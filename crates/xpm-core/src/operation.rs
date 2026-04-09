@@ -1,27 +1,16 @@
-//! Package operations (install, remove, update, etc.).
-
 use crate::package::{Package, PackageBackend};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// The kind of operation to perform.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OperationKind {
-    /// Install a package.
     Install,
-    /// Remove a package.
     Remove,
-    /// Remove a package and its unneeded dependencies.
     RemoveWithDeps,
-    /// Update a specific package.
     Update,
-    /// Update all packages (system upgrade).
     SystemUpgrade,
-    /// Sync package databases.
     SyncDatabases,
-    /// Clean package cache.
     CleanCache,
-    /// Remove orphan packages.
     RemoveOrphans,
 }
 
@@ -40,98 +29,100 @@ impl fmt::Display for OperationKind {
     }
 }
 
-/// A package operation request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Operation {
-    /// What kind of operation.
     pub kind: OperationKind,
-    /// Target packages (names).
     pub packages: Vec<String>,
-    /// Which backend to use.
     pub backend: PackageBackend,
+    pub options: OperationOptions,
 }
 
 impl Operation {
-    fn new(kind: OperationKind, packages: Vec<String>, backend: PackageBackend) -> Self {
+    pub fn install(packages: Vec<String>, backend: PackageBackend) -> Self {
         Self {
-            kind,
+            kind: OperationKind::Install,
             packages,
             backend,
+            options: OperationOptions::default(),
         }
     }
 
-    fn without_packages(kind: OperationKind, backend: PackageBackend) -> Self {
-        Self::new(kind, Vec::new(), backend)
-    }
-
-    /// Creates a new install operation.
-    pub fn install(packages: Vec<String>, backend: PackageBackend) -> Self {
-        Self::new(OperationKind::Install, packages, backend)
-    }
-
-    /// Creates a new remove operation.
     pub fn remove(packages: Vec<String>, backend: PackageBackend) -> Self {
-        Self::new(OperationKind::Remove, packages, backend)
+        Self {
+            kind: OperationKind::Remove,
+            packages,
+            backend,
+            options: OperationOptions::default(),
+        }
     }
 
-    /// Creates a new update operation.
     pub fn update(packages: Vec<String>, backend: PackageBackend) -> Self {
-        Self::new(OperationKind::Update, packages, backend)
+        Self {
+            kind: OperationKind::Update,
+            packages,
+            backend,
+            options: OperationOptions::default(),
+        }
     }
 
-    /// Creates a system upgrade operation.
     pub fn system_upgrade(backend: PackageBackend) -> Self {
-        Self::without_packages(OperationKind::SystemUpgrade, backend)
+        Self {
+            kind: OperationKind::SystemUpgrade,
+            packages: Vec::new(),
+            backend,
+            options: OperationOptions::default(),
+        }
     }
 
-    /// Creates a database sync operation.
     pub fn sync_databases(backend: PackageBackend) -> Self {
-        Self::without_packages(OperationKind::SyncDatabases, backend)
+        Self {
+            kind: OperationKind::SyncDatabases,
+            packages: Vec::new(),
+            backend,
+            options: OperationOptions::default(),
+        }
+    }
+
+    pub fn with_options(mut self, options: OperationOptions) -> Self {
+        self.options = options;
+        self
     }
 }
 
-/// Status of an ongoing or completed operation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OperationOptions {
+    pub no_confirm: bool,
+    pub download_only: bool,
+    pub force: bool,
+    pub recursive: bool,
+    pub keep_config: bool,
+    pub no_deps: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationStatus {
-    /// Operation is pending/queued.
     Pending,
-    /// Resolving dependencies.
     ResolvingDeps,
-    /// Downloading packages.
     Downloading,
-    /// Verifying package integrity.
     Verifying,
-    /// Installing/removing packages.
     Processing,
-    /// Running post-transaction hooks.
     RunningHooks,
-    /// Operation completed successfully.
     Completed,
-    /// Operation failed.
     Failed,
-    /// Operation was cancelled.
     Cancelled,
 }
 
-/// Result of a completed operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationResult {
-    /// The operation that was performed.
     pub operation: Operation,
-    /// Final status.
     pub status: OperationStatus,
-    /// Packages that were affected.
     pub affected_packages: Vec<Package>,
-    /// Any warnings generated.
     pub warnings: Vec<String>,
-    /// Error message if failed.
     pub error: Option<String>,
-    /// Duration in milliseconds.
     pub duration_ms: u64,
 }
 
 impl OperationResult {
-    /// Creates a successful result.
     pub fn success(operation: Operation, affected: Vec<Package>, duration_ms: u64) -> Self {
         Self {
             operation,
@@ -143,7 +134,6 @@ impl OperationResult {
         }
     }
 
-    /// Creates a failed result.
     pub fn failure(operation: Operation, error: impl Into<String>, duration_ms: u64) -> Self {
         Self {
             operation,
@@ -155,39 +145,28 @@ impl OperationResult {
         }
     }
 
-    /// Returns true if the operation was successful.
     pub fn is_success(&self) -> bool {
         self.status == OperationStatus::Completed
     }
 
-    /// Adds a warning to the result.
     pub fn with_warning(mut self, warning: impl Into<String>) -> Self {
         self.warnings.push(warning.into());
         self
     }
 }
 
-/// Progress information for an operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationProgress {
-    /// Current status.
     pub status: OperationStatus,
-    /// Current package being processed.
     pub current_package: Option<String>,
-    /// Total packages in this operation.
     pub total_packages: usize,
-    /// Packages completed so far.
     pub completed_packages: usize,
-    /// Total bytes to download.
     pub total_bytes: u64,
-    /// Bytes downloaded so far.
     pub downloaded_bytes: u64,
-    /// Current status message.
     pub message: String,
 }
 
 impl OperationProgress {
-    /// Creates a new progress tracker.
     pub fn new(total_packages: usize, total_bytes: u64) -> Self {
         Self {
             status: OperationStatus::Pending,
@@ -200,7 +179,7 @@ impl OperationProgress {
         }
     }
 
-    /// Returns the download progress as a percentage (0-100).
+    // avoid divide by zero when theres nothing to download
     pub fn download_percent(&self) -> u8 {
         if self.total_bytes == 0 {
             return 100;
@@ -208,7 +187,6 @@ impl OperationProgress {
         ((self.downloaded_bytes as f64 / self.total_bytes as f64) * 100.0) as u8
     }
 
-    /// Returns the package progress as a percentage (0-100).
     pub fn package_percent(&self) -> u8 {
         if self.total_packages == 0 {
             return 100;

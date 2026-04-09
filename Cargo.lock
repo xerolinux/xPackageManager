@@ -1085,6 +1085,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3594,6 +3603,16 @@ checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quick-xml"
+version = "0.37.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "encoding_rs",
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
 version = "0.38.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
@@ -5185,7 +5204,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5423e94b6a63e68e439803a3e153a9252d5ead12fd853334e2ad33997e3889e3"
 dependencies = [
  "proc-macro2",
- "quick-xml",
+ "quick-xml 0.38.4",
  "quote",
 ]
 
@@ -5926,7 +5945,6 @@ dependencies = [
  "tokio",
  "tracing",
  "xpm-core",
- "xpm-pacman",
 ]
 
 [[package]]
@@ -5952,7 +5970,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "xpm-pacman"
+name = "xpm-notify"
 version = "0.1.0"
 
 [[package]]
@@ -5975,6 +5993,8 @@ dependencies = [
  "flate2",
  "libc",
  "open",
+ "quick-xml 0.37.5",
+ "serde",
  "serde_json",
  "slint",
  "slint-build",
@@ -5984,7 +6004,6 @@ dependencies = [
  "xpm-alpm",
  "xpm-core",
  "xpm-flatpak",
- "xpm-pacman",
  "xpm-service",
 ]
 

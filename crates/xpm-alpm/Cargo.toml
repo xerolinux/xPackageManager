@@ -7,7 +7,6 @@ description = "Pacman/libalpm backend for xPackageManager"
 
 [dependencies]
 xpm-core.workspace = true
-xpm-pacman.workspace = true
 alpm.workspace = true
 async-trait.workspace = true
 tokio.workspace = true

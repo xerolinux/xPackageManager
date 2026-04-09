@@ -1,4 +1,4 @@
-import { Button, VerticalBox, HorizontalBox, ListView, ScrollView, LineEdit, ProgressIndicator, Spinner, Palette } from "std-widgets.slint";
+import { ListView, ScrollView, Spinner, Palette } from "std-widgets.slint";
 
 export struct PackageData {
     name: string,
@@ -14,7 +14,6 @@ export struct PackageData {
     url: string,
     dependencies: string,
     required-by: string,
-    icon-name: string,
     selected: bool,
 }
 
@@ -26,16 +25,160 @@ export struct StatsData {
     cache-size: string,
 }
 
-// Nav button - clean professional style
-component NavButton inherits Rectangle {
-    in property <string> icon;
+export struct NewsItem {
+    title: string,
+    date: string,
+    url: string,
+}
+
+export struct AppRow {
+    a: PackageData,
+    b: PackageData,
+    c: PackageData,
+    count: int,
+}
+
+export global Cat {
+    // Core backgrounds — derived from system Palette
+    out property <color> base: Palette.background;
+    out property <color> mantle: Palette.alternate-background;
+    out property <color> crust: Palette.background.darker(0.12);
+    // Surfaces
+    out property <color> surface0: Palette.control-background;
+    out property <color> surface1: Palette.control-background.brighter(0.08);
+    out property <color> surface2: Palette.control-background.brighter(0.18);
+    // Text / overlays
+    out property <color> overlay0: Palette.foreground.with-alpha(0.38);
+    out property <color> overlay1: Palette.foreground.with-alpha(0.55);
+    out property <color> overlay2: Palette.foreground.with-alpha(0.7);
+    out property <color> subtext0: Palette.foreground.with-alpha(0.8);
+    out property <color> subtext1: Palette.foreground.with-alpha(0.9);
+    out property <color> text: Palette.foreground;
+    // Accent — purple
+    out property <color> mauve: #c6a0f6;
+    out property <color> blue: #8aadf4;
+    out property <color> lavender: #b7bdf8;
+    // Semantic colors — keep consistent across themes
+    out property <color> red: #e06c75;
+    out property <color> green: #98c379;
+    out property <color> yellow: #e5c07b;
+    out property <color> peach: #d19a66;
+    out property <color> teal: #56b6c2;
+    out property <color> pink: #c678dd;
+    out property <color> flamingo: #e06c75;
+    out property <color> rosewater: #e5c0c0;
+    out property <color> sapphire: #61afef;
+    out property <color> sky: #56b6c2;
+    out property <color> maroon: #be5046;
+}
+
+component NavIcon inherits Rectangle {
+    in property <brush> icon-color: Cat.text;
+    in property <string> d;
+    in property <bool> filled: false;
+    width: 18px;
+    height: 18px;
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: d;
+        fill: filled ? icon-color : transparent;
+        stroke: filled ? transparent : icon-color;
+        stroke-width: 1.5px;
+    }
+}
+
+component Input inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder: "";
+    out property <bool> has-focus: input.has-focus;
+    callback accepted(string);
+    callback edited(string);
+
+    height: 34px;
+    background: Cat.surface0;
+    border-radius: 8px;
+    border-width: input.has-focus ? 1px : 0;
+    border-color: Cat.mauve.with-alpha(0.5);
+    animate border-width { duration: 80ms; }
+
+    TouchArea { clicked => { input.focus(); } }
+
+    if input.text == "" && !input.has-focus: Text {
+        x: 12px;
+        width: parent.width - 24px;
+        height: parent.height;
+        text: root.placeholder;
+        font-size: 13px;
+        color: Cat.overlay0;
+        vertical-alignment: center;
+    }
+
+    input := TextInput {
+        x: 12px;
+        y: 0;
+        width: parent.width - 24px;
+        height: parent.height;
+        color: Cat.text;
+        font-size: 13px;
+        vertical-alignment: center;
+        single-line: true;
+        selection-background-color: Cat.mauve.with-alpha(0.3);
+        selection-foreground-color: Cat.text;
+        accepted => { root.accepted(self.text); }
+        edited => { root.edited(self.text); }
+    }
+}
+
+component Btn inherits Rectangle {
     in property <string> label;
-    in property <bool> active: false;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
     callback clicked;
 
-    height: 38px;
+    height: 30px;
+    min-width: 70px;
     border-radius: 8px;
-    background: active ? #9b59b6 : (touch.has-hover ? Palette.control-background : transparent);
+    background: !enabled ? Cat.surface0 :
+                danger ? (btn-touch.has-hover ? Cat.red : Cat.red.with-alpha(0.85)) :
+                primary ? (btn-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85)) :
+                btn-touch.has-hover ? Cat.surface1 : Cat.surface0;
+    animate background { duration: 100ms; }
+
+    Text {
+        text: label;
+        font-size: 12px;
+        font-weight: 600;
+        color: !enabled ? Cat.overlay0 :
+               (primary || danger) ? Cat.crust : Cat.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    btn-touch := TouchArea {
+        mouse-cursor: enabled ? pointer : default;
+        clicked => { if enabled { root.clicked(); } }
+    }
+}
+
+component NavButton inherits Rectangle {
+    in property <string> label;
+    in property <string> icon-path: "";
+    in property <bool> icon-filled: false;
+    in property <bool> active: false;
+    in property <string> badge: "";
+    callback clicked;
+
+    height: 36px;
+    border-radius: 8px;
+    background: active ? Cat.mauve.with-alpha(0.2) : (touch.has-hover ? Cat.surface0.with-alpha(0.6) : transparent);
+    animate background { duration: 120ms; easing: ease-out; }
 
     touch := TouchArea {
         mouse-cursor: pointer;
@@ -43,52 +186,67 @@ component NavButton inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 12px;
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
 
-        Text {
-            width: 22px;
-            text: icon;
-            font-size: 16px;
-            color: active ? white : Palette.foreground;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        if icon-path != "": VerticalLayout {
+            alignment: center;
+            NavIcon {
+                d: icon-path;
+                icon-color: active ? Cat.mauve : Cat.subtext0;
+                filled: icon-filled;
+            }
         }
 
         Text {
             text: label;
-            font-size: 14px;
-            font-weight: active ? 500 : 400;
-            color: active ? white : Palette.foreground;
+            font-size: 13px;
+            font-weight: active ? 600 : 400;
+            color: active ? Cat.mauve : Cat.text;
+            opacity: active ? 1.0 : 0.85;
             vertical-alignment: center;
             horizontal-stretch: 1;
+        }
+
+        if badge != "": Rectangle {
+            width: 22px;
+            height: 18px;
+            border-radius: 9px;
+            background: Cat.red;
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: badge;
+                    font-size: 10px;
+                    font-weight: 700;
+                    color: Cat.crust;
+                    horizontal-alignment: center;
+                }
+            }
         }
     }
 }
 
-// Custom checkbox
 component CheckBox inherits Rectangle {
     in property <bool> checked: false;
     callback toggled(bool);
 
-    width: 20px;
-    height: 20px;
-    border-radius: 4px;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
     border-width: checked ? 0 : 1.5px;
-    border-color: Palette.foreground.with-alpha(0.3);
-    background: checked ? #9b59b6 : transparent;
+    border-color: Cat.surface2;
+    background: checked ? Cat.mauve : transparent;
+    animate background { duration: 100ms; }
 
-    animate background { duration: 120ms; }
-
-    Text {
-        text: "✓";
-        font-size: 13px;
-        font-weight: 700;
-        color: white;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        visible: checked;
+    if checked: NavIcon {
+        d: "M20 6L9 17l-5-5";
+        icon-color: Cat.crust;
+        width: 12px;
+        height: 12px;
+        x: 3px;
+        y: 3px;
     }
 
     TouchArea {
@@ -97,7 +255,6 @@ component CheckBox inherits Rectangle {
     }
 }
 
-// Package row
 component PackageRow inherits Rectangle {
     in property <PackageData> pkg;
     in property <bool> show-separator: true;
@@ -108,8 +265,10 @@ component PackageRow inherits Rectangle {
     callback remove;
     callback toggle-selected(bool);
 
-    height: 52px;
-    background: pkg.selected ? #9b59b6.with-alpha(0.08) : (touch.has-hover ? Palette.alternate-background : transparent);
+    height: 58px;
+    background: pkg.selected ? Cat.mauve.with-alpha(0.07) :
+                (touch.has-hover ? Cat.surface0.with-alpha(0.45) : transparent);
+    animate background { duration: 80ms; }
 
     touch := TouchArea {
         mouse-cursor: pointer;
@@ -117,11 +276,10 @@ component PackageRow inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 14px;
+        padding-left: 16px;
         padding-right: 14px;
         spacing: 10px;
 
-        // Checkbox
         if show-checkbox: VerticalLayout {
             alignment: center;
             CheckBox {
@@ -130,191 +288,555 @@ component PackageRow inherits Rectangle {
             }
         }
 
-        // Info
         VerticalLayout {
             horizontal-stretch: 1;
-            spacing: 2px;
+            spacing: 1px;
+            alignment: center;
+
+            Text {
+                text: pkg.display-name;
+                font-size: 13px;
+                font-weight: 600;
+                color: pkg.has-update ? Cat.peach : Cat.text;
+                overflow: elide;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: pkg.version;
+                    font-size: 11px;
+                    font-weight: 500;
+                    color: pkg.has-update ? Cat.peach.with-alpha(0.8) : Cat.mauve.with-alpha(0.7);
+                    vertical-alignment: center;
+                }
+
+                if pkg.description != "": Text {
+                    text: "·";
+                    font-size: 11px;
+                    color: Cat.overlay0;
+                    vertical-alignment: center;
+                }
+
+                if pkg.description != "": Text {
+                    text: pkg.description;
+                    font-size: 11px;
+                    color: Cat.subtext0;
+                    opacity: 0.75;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        if pkg.repository != "": VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: repo-text.preferred-width + 10px;
+                height: 18px;
+                border-radius: 4px;
+                background: Cat.surface0;
+
+                repo-text := Text {
+                    text: pkg.repository;
+                    font-size: 9.5px;
+                    color: Cat.overlay1;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if show-action-button: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 68px;
+                height: 28px;
+                border-radius: 6px;
+                background: pkg.installed ? Cat.red.with-alpha(0.15) : Cat.mauve.with-alpha(0.15);
+
+                Text {
+                    text: pkg.installed ? "Remove" : "Install";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: pkg.installed ? Cat.red : Cat.mauve;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        if pkg.installed { root.remove(); }
+                        else { root.install(); }
+                    }
+                }
+            }
+        }
+    }
+
+    if show-separator: Rectangle {
+        x: 16px;
+        y: parent.height - 1px;
+        width: parent.width - 32px;
+        height: 1px;
+        background: Cat.surface0;
+        opacity: 0.6;
+    }
+}
+
+// Avatar color based on primary category (stored in installed-size field for flatpak)
+component AppAvatar inherits Rectangle {
+    in property <string> initial;
+    in property <string> category;
+    width: 56px;
+    height: 56px;
+    border-radius: 14px;
+    background: category == "AudioVideo" ? Cat.pink.with-alpha(0.18) :
+                category == "Development" ? Cat.blue.with-alpha(0.18) :
+                category == "Game" ? Cat.green.with-alpha(0.18) :
+                category == "Graphics" ? Cat.peach.with-alpha(0.18) :
+                category == "Network" ? Cat.teal.with-alpha(0.18) :
+                category == "Office" ? Cat.sapphire.with-alpha(0.18) :
+                category == "Science" ? Cat.sky.with-alpha(0.18) :
+                category == "System" ? Cat.overlay1.with-alpha(0.18) :
+                category == "Utility" ? Cat.yellow.with-alpha(0.18) :
+                Cat.mauve.with-alpha(0.18);
+    Text {
+        text: initial;
+        font-size: 22px;
+        font-weight: 800;
+        color: category == "AudioVideo" ? Cat.pink :
+               category == "Development" ? Cat.blue :
+               category == "Game" ? Cat.green :
+               category == "Graphics" ? Cat.peach :
+               category == "Network" ? Cat.teal :
+               category == "Office" ? Cat.sapphire :
+               category == "Science" ? Cat.sky :
+               category == "System" ? Cat.overlay2 :
+               category == "Utility" ? Cat.yellow :
+               Cat.mauve;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component AppTile inherits Rectangle {
+    in property <PackageData> pkg;
+    callback clicked();
+
+    height: 88px;
+    border-radius: 0;
+    background: tile-touch.has-hover ? Cat.surface0.with-alpha(0.45) : transparent;
+    animate background { duration: 60ms; }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 14px;
+
+        VerticalLayout {
+            alignment: center;
+            AppAvatar {
+                initial: pkg.required-by;
+                category: pkg.installed-size;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 3px;
             alignment: center;
 
             HorizontalLayout {
-                spacing: 5px;
+                spacing: 8px;
                 Text {
                     text: pkg.display-name;
                     font-size: 14px;
-                    font-weight: 500;
-                    color: pkg.has-update ? #9b59b6 : Palette.foreground;
+                    font-weight: 700;
+                    color: Cat.text;
                     overflow: elide;
+                    horizontal-stretch: 1;
                     vertical-alignment: center;
                 }
+                if pkg.installed: Rectangle {
+                    height: 20px;
+                    width: inst-t.preferred-width + 12px;
+                    border-radius: 4px;
+                    background: Cat.green.with-alpha(0.15);
+                    inst-t := Text {
+                        text: "Installed";
+                        font-size: 9.5px;
+                        font-weight: 600;
+                        color: Cat.green;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
 
-                Text {
-                    text: pkg.backend == 1 ? "Flatpak" : "Pacman";
-                    font-size: 10px;
-                    color: Palette.foreground;
-                    opacity: 0.5;
-                    vertical-alignment: center;
-                    y: 1px; // Slight optical adjustment
-                }
-                
-                Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: pkg.name;
+                font-size: 10px;
+                color: Cat.overlay0;
+                overflow: elide;
             }
 
             Text {
                 text: pkg.description;
                 font-size: 12px;
-                color: Palette.foreground;
-                opacity: 0.5;
+                color: Cat.subtext0;
                 overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+    }
+
+    // Bottom divider
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        width: parent.width;
+        background: Cat.surface0.with-alpha(0.35);
+    }
+
+    tile-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component CategoryPill inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked();
+
+    height: 28px;
+    width: pill-lbl.preferred-width + 20px;
+    border-radius: 14px;
+    background: active ? Cat.mauve : (pill-t.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.6));
+    animate background { duration: 80ms; }
+
+    pill-lbl := Text {
+        text: label;
+        font-size: 12px;
+        font-weight: active ? 700 : 400;
+        color: active ? Cat.crust : Cat.subtext0;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    pill-t := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component RepoRow inherits Rectangle {
+    in property <PackageData> pkg;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 46px;
+    background: selected ? Cat.blue.with-alpha(0.1) :
+                (row-touch.has-hover ? Cat.surface0.with-alpha(0.35) : transparent);
+    animate background { duration: 60ms; }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 12px;
+
+        // Name — flex
+        Text {
+            text: pkg.display-name;
+            font-size: 13px;
+            font-weight: selected ? 700 : 500;
+            color: selected ? Cat.blue : Cat.text;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        // Version — 130px fixed
+        Rectangle {
+            width: 130px;
+            Text {
+                text: pkg.version;
+                font-size: 11px;
+                color: Cat.mauve.with-alpha(0.75);
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-alignment: right;
             }
         }
 
-        // Inline action button
-        if show-action-button: VerticalLayout {
-            alignment: center;
+        // Repo badge — 90px
+        Rectangle {
+            width: 90px;
             Rectangle {
-            width: 72px;
-            height: 28px;
-            border-radius: 6px;
-            background: pkg.installed ? #e74c3c : #9b59b6;
-
-            Text {
-                text: pkg.installed ? "Remove" : "Install";
-                font-size: 11px;
-                font-weight: 600;
-                color: white;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    if pkg.installed { root.remove(); }
-                    else { root.install(); }
+                width: rep-t.preferred-width + 10px;
+                height: 18px;
+                border-radius: 4px;
+                background: Cat.surface0;
+                x: parent.width - self.width;
+                y: (parent.height - self.height) / 2;
+                rep-t := Text {
+                    text: pkg.repository;
+                    font-size: 9.5px;
+                    color: Cat.overlay1;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
+        }
+
+        // Installed badge — 80px
+        Rectangle {
+            width: 80px;
+            if pkg.installed: Rectangle {
+                width: 68px;
+                height: 20px;
+                border-radius: 4px;
+                background: Cat.green.with-alpha(0.12);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                Text {
+                    text: "Installed";
+                    font-size: 9.5px;
+                    font-weight: 600;
+                    color: Cat.green;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
     }
 
     // Bottom separator
     Rectangle {
-        x: 14px;
         y: parent.height - 1px;
-        width: parent.width - 28px;
-        height: show-separator ? 1px : 0;
-        background: Palette.border;
+        height: 1px;
+        width: parent.width - 20px;
+        x: 10px;
+        background: Cat.surface0.with-alpha(0.5);
+    }
+
+    row-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
-// Distro warning window — shown when not running on XeroLinux
-export component DistroWarning inherits Window {
-    title: "xPackage Manager";
-    preferred-width: 440px;
-    preferred-height: 280px;
-    min-width: 440px;
-    min-height: 280px;
-    background: Palette.background;
+component SettingsRow inherits Rectangle {
+    in property <string> label;
+    in property <string> subtitle: "";
+    in property <bool> checked: false;
+    callback toggled(bool);
 
-    callback dismiss;
+    height: subtitle != "" ? 54px : 42px;
+    border-radius: 8px;
+    background: Cat.surface0.with-alpha(0.4);
 
-    VerticalLayout {
-        padding: 0;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
 
-        // Header
-        Rectangle {
-            height: 56px;
-            background: #e74c3c.with-alpha(0.12);
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
 
-            HorizontalLayout {
-                padding-left: 20px;
-                padding-right: 20px;
-                spacing: 10px;
-                alignment: center;
+            Text {
+                text: label;
+                font-size: 13px;
+                color: Cat.text;
+            }
 
-                Text {
-                    text: "⚠️";
-                    font-size: 22px;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: "Unsupported Distribution";
-                    font-size: 17px;
-                    font-weight: 700;
-                    color: #e74c3c;
-                    vertical-alignment: center;
-                }
+            if subtitle != "": Text {
+                text: subtitle;
+                font-size: 11px;
+                color: Cat.overlay0;
             }
         }
 
-        // Separator
-        Rectangle { height: 1px; background: Palette.border; }
+        VerticalLayout {
+            alignment: center;
+            CheckBox {
+                checked: root.checked;
+                toggled(val) => { root.toggled(val); }
+            }
+        }
+    }
+}
 
-        // Body
+component ActionCard inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> icon-path: "";
+    in property <bool> enabled: true;
+    callback clicked;
+
+    height: 48px;
+    border-radius: 8px;
+    background: enabled ? (card-touch.has-hover ? Cat.surface0.with-alpha(0.7) : Cat.surface0.with-alpha(0.4)) : Cat.surface0.with-alpha(0.2);
+    animate background { duration: 100ms; }
+
+    card-touch := TouchArea {
+        mouse-cursor: enabled ? pointer : default;
+        clicked => { if enabled { root.clicked(); } }
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+
+        if icon-path != "": VerticalLayout {
+            alignment: center;
+            NavIcon {
+                d: icon-path;
+                icon-color: enabled ? Cat.subtext0 : Cat.overlay0;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            horizontal-stretch: 1;
+
+            Text {
+                text: title;
+                font-size: 13px;
+                font-weight: 500;
+                color: Cat.text;
+                opacity: enabled ? 1.0 : 0.4;
+            }
+
+            if subtitle != "": Text {
+                text: subtitle;
+                font-size: 11px;
+                color: Cat.overlay0;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            NavIcon {
+                d: "M9 18l6-6-6-6";
+                icon-color: Cat.overlay0;
+                width: 14px;
+                height: 14px;
+            }
+        }
+    }
+}
+
+
+component SectionLabel inherits Text {
+    in property <string> section-title;
+    text: section-title;
+    font-size: 11px;
+    font-weight: 700;
+    color: Cat.overlay0;
+    letter-spacing: 0.8px;
+}
+
+component Paginator inherits Rectangle {
+    in property <int> current-page;
+    in property <int> total-pages;
+    callback go-to-page(int);
+
+    height: 40px;
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 8px;
+
         Rectangle {
-            vertical-stretch: 1;
+            width: 32px;
+            height: 28px;
+            border-radius: 6px;
+            background: current-page > 0 ? (prev-touch.has-hover ? Cat.surface1 : Cat.surface0) : Cat.surface0.with-alpha(0.3);
 
             VerticalLayout {
-                padding: 24px;
-                padding-top: 20px;
-                spacing: 8px;
                 alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    NavIcon {
+                        d: "M15 18l-6-6 6-6";
+                        icon-color: current-page > 0 ? Cat.text : Cat.overlay0;
+                        width: 14px;
+                        height: 14px;
+                    }
+                }
+            }
 
-                Text {
-                    text: "🚫  Invalid distro detected";
-                    font-size: 14px;
-                    font-weight: 600;
-                    color: Palette.foreground;
-                    horizontal-alignment: center;
-                }
-                Text {
-                    text: "Please make sure you are running this\non XeroLinux before using this tool.";
-                    font-size: 13px;
-                    color: Palette.foreground;
-                    opacity: 0.7;
-                    horizontal-alignment: center;
-                }
+            prev-touch := TouchArea {
+                mouse-cursor: current-page > 0 ? pointer : default;
+                clicked => { if current-page > 0 { root.go-to-page(current-page - 1); } }
             }
         }
 
-        // Separator
-        Rectangle { height: 1px; background: Palette.border; }
+        Text {
+            text: (current-page + 1) + " / " + total-pages;
+            font-size: 12px;
+            font-weight: 500;
+            color: Cat.subtext0;
+            vertical-alignment: center;
+            min-width: 60px;
+            horizontal-alignment: center;
+        }
 
-        // Button area
         Rectangle {
-            height: 56px;
+            width: 32px;
+            height: 28px;
+            border-radius: 6px;
+            background: current-page < total-pages - 1 ? (next-touch.has-hover ? Cat.surface1 : Cat.surface0) : Cat.surface0.with-alpha(0.3);
 
-            HorizontalLayout {
+            VerticalLayout {
                 alignment: center;
-                padding: 12px;
-
-                Rectangle {
-                    width: 180px;
-                    height: 34px;
-                    border-radius: 8px;
-                    background: dismiss-touch.has-hover ? #c0392b : #e74c3c;
-                    animate background { duration: 120ms; }
-
-                    Text {
-                        text: "Understood...";
-                        font-size: 13px;
-                        font-weight: 600;
-                        color: white;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-
-                    dismiss-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.dismiss(); }
+                HorizontalLayout {
+                    alignment: center;
+                    NavIcon {
+                        d: "M9 18l6-6-6-6";
+                        icon-color: current-page < total-pages - 1 ? Cat.text : Cat.overlay0;
+                        width: 14px;
+                        height: 14px;
                     }
                 }
+            }
+
+            next-touch := TouchArea {
+                mouse-cursor: current-page < total-pages - 1 ? pointer : default;
+                clicked => { if current-page < total-pages - 1 { root.go-to-page(current-page + 1); } }
             }
         }
     }
 }
 
-// Main window
+component DetailProperty inherits HorizontalLayout {
+    in property <string> prop-label;
+    in property <string> prop-value;
+    spacing: 8px;
+
+    Text {
+        text: prop-label;
+        width: 80px;
+        font-size: 11.5px;
+        color: Cat.overlay0;
+        vertical-alignment: top;
+    }
+
+    Text {
+        text: prop-value;
+        font-size: 11.5px;
+        color: Cat.text;
+        wrap: word-wrap;
+        horizontal-stretch: 1;
+    }
+}
+
 export component MainWindow inherits Window {
     title: "xPackage Manager";
     preferred-width: 1100px;
@@ -323,54 +845,43 @@ export component MainWindow inherits Window {
     min-height: 550px;
     background: Palette.background;
 
-    in-out property <int> view: 7;
+    in-out property <int> view: 9;
     in-out property <[PackageData]> installed-packages: [];
     in-out property <[PackageData]> update-packages: [];
-    in-out property <[PackageData]> search-packages: [];
     in-out property <[PackageData]> flatpak-packages: [];
-    in-out property <[PackageData]> firmware-packages: [];
     in-out property <int> selected-index: -1;
     in-out property <bool> loading: false;
     in-out property <bool> busy: false;
     in-out property <string> status-message: "Ready";
     in-out property <int> progress: 0;
     in-out property <StatsData> stats;
+    in-out property <[NewsItem]> news-items: [];
     in-out property <string> search-text: "";
     in-out property <PackageData> local-package;
     in-out property <string> local-package-path: "";
     in-out property <bool> show-local-install: false;
-    in-out property <[PackageData]> category-packages: [];
-    in-out property <bool> show-category-grid: true;
-    in-out property <string> current-category-name: "";
-    in-out property <[PackageData]> repo-packages: [];
-    in-out property <[string]> repos: [];
-    in-out property <string> current-repo-name: "";
     in-out property <string> progress-text: "";
     in-out property <bool> show-terminal: false;
     in-out property <string> terminal-title: "";
     in-out property <string> terminal-output: "";
     in-out property <bool> terminal-done: false;
     in-out property <bool> terminal-success: false;
-    in-out property <bool> show-troubleshoot-menu: false;
+    in-out property <bool> setting-aur-enabled: false;
+    in-out property <bool> setting-flatpak-enabled: true;
+    in-out property <bool> setting-check-updates-on-start: false;
+    in-out property <int> setting-notify-interval: 30;
+    in-out property <int> setting-parallel-downloads: 5;
+    in-out property <int> setting-clean-keep-versions: 3;
 
-    // Multi-select
     in-out property <int> selected-count: 0;
     in-out property <int> selected-installed-count: 0;
     in-out property <int> selected-uninstalled-count: 0;
     in-out property <bool> multi-select-mode: true;
 
-    // Confirmation popup
-    in-out property <bool> show-confirm-popup: false;
-    in-out property <string> confirm-title: "";
-    in-out property <string> confirm-action: "";
-    in-out property <string> confirm-package-names: "";
-    in-out property <string> confirm-version: "";
-    in-out property <string> confirm-size: "";
-    in-out property <string> confirm-deps: "";
-    in-out property <int> confirm-backend: 0;
-    in-out property <int> confirm-package-count: 1;
+    in-out property <bool> show-conflict-dialog: false;
+    in-out property <string> conflict-summary: "";
+    in-out property <bool> conflict-can-force: false;
 
-    // Progress popup
     in-out property <bool> show-progress-popup: false;
     in-out property <string> progress-popup-title: "";
     in-out property <int> progress-popup-percent: 0;
@@ -380,6 +891,43 @@ export component MainWindow inherits Window {
     in-out property <string> progress-popup-output: "";
     in-out property <bool> progress-popup-show-input: false;
     in-out property <string> progress-popup-prompt: "";
+    in-out property <bool> show-progress-logs: false;
+
+    in-out property <int> current-page: 0;
+    in-out property <int> total-pages: 1;
+    in-out property <[PackageData]> search-installed: [];
+    in-out property <[PackageData]> search-available: [];
+
+    // Flatpak browser (view 10) — Shelly-ALPM style
+    in-out property <[string]> flatpak-remotes: [];
+    in-out property <string> selected-remote: "";
+    in-out property <[PackageData]> remote-apps: [];
+    in-out property <bool> remote-apps-loading: false;
+    in-out property <[string]> flatpak-categories: ["All", "AudioVideo", "Development", "Education", "Game", "Graphics", "Network", "Office", "Science", "System", "Utility"];
+    in-out property <string> selected-flatpak-category: "All";
+    in-out property <string> flatpak-search: "";
+    // Detail panel
+    in-out property <bool> show-flatpak-detail: false;
+    in-out property <string> flatpak-detail-name: "";
+    in-out property <string> flatpak-detail-summary: "";
+    in-out property <string> flatpak-detail-description: "";
+    in-out property <string> flatpak-detail-developer: "";
+    in-out property <bool> flatpak-detail-installed: false;
+    in-out property <string> current-flatpak-id: "";
+    in-out property <image> flatpak-screenshot;
+    in-out property <image> flatpak-detail-icon;
+    in-out property <[PackageData]> flatpak-addons: [];
+    in-out property <[AppRow]> flatpak-app-rows: [];
+
+    // Repos browser (view 7/8)
+    in-out property <[string]> pacman-repos: [];
+    in-out property <string> selected-repo: "";
+    in-out property <[PackageData]> repo-packages: [];
+    in-out property <bool> repo-loading: false;
+    in-out property <bool> show-repo-detail: false;
+    in-out property <PackageData> repo-detail-pkg;
+    in-out property <string> repo-detail-description: "";
+    in-out property <bool> repo-detail-loading: false;
 
     callback refresh;
     callback search(string);
@@ -391,309 +939,353 @@ export component MainWindow inherits Window {
     callback open-url(string);
     callback install-local-package(string);
     callback cancel-local-install;
-    callback load-category(string);
-    callback load-repo(string);
+    callback load-flatpak-detail(string);
+    callback load-flatpak-icon(string);
+    callback browse-remote(string);
+    callback filter-flatpak(string, string);
+    callback load-pacman-repos;
+    callback browse-repo(string);
+    callback select-repo-pkg(string, int);
     callback terminal-send-input(string);
     callback terminal-close;
     callback update-mirrorlists;
     callback fix-keyring;
 
-    // Multi-select callbacks
     callback toggle-package-selected(string, int, bool);
     callback bulk-install;
     callback bulk-remove;
     callback clear-selection;
 
-    // Confirmation callbacks
     callback request-install(string, int);
     callback request-remove(string, int);
     callback request-update(string, int);
-    callback confirm-operation;
-    callback cancel-confirm;
-
-    // Progress popup callbacks
     callback close-progress-popup;
+    callback cancel-operation;
     callback progress-popup-send-input(string);
+    callback conflict-force-overwrite;
+    callback conflict-cancel;
+
+    callback clean-package-cache;
+    callback remove-orphans;
+    callback export-package-list;
+    callback import-package-list;
+    callback load-page(int);
+    callback apply-theme(string);
+    callback save-settings();
+    callback fetch-news;
+
+    property <string> icon-home: "M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10";
+    property <string> icon-grid: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z";
+    property <string> icon-list: "M3 5h18v2H3zM3 11h18v2H3zM3 17h18v2H3z";
+    property <string> icon-search: "M5 11a6 6 0 0 1 12 0a6 6 0 0 1-12 0z M15.5 15.5L20 20";
+    property <string> icon-package: "M12 2L3 7v10l9 5 9-5V7zM3 7l9 5 9-5M12 12v10";
+    property <string> icon-chip: "M7 4h10v16H7zM4 8h3M4 12h3M4 16h3M17 8h3M17 12h3M17 16h3";
+    property <string> icon-gear: "M8 12a4 4 0 0 1 8 0a4 4 0 0 1-8 0zM12 2v4M12 18v4M2 12h4M18 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8";
+    property <string> icon-arrow-up: "M12 19V5M5 12l7-7 7 7";
+    property <string> icon-folder: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z";
+    property <string> icon-close: "M18 6L6 18M6 6l12 12";
+    property <string> icon-link: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3";
+    property <string> icon-music: "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z";
+    property <string> icon-code: "M16 18l6-6-6-6M8 6l-6 6 6 6";
+    property <string> icon-gamepad: "M6 11h4M8 9v4M15 12h0.01M18 10h0.01M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z";
+    property <string> icon-image: "M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM8.5 10a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zM21 15l-5-5L5 21";
+    property <string> icon-globe: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z";
+    property <string> icon-file: "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z";
+    property <string> icon-graduation: "M22 10v6M2 10l10-5 10 5-10 5z M6 12v5c3 3 9 3 12 0v-5";
+    property <string> icon-flask: "M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.13A1 1 0 0 0 5.596 22h12.808a1 1 0 0 0 .876-1.87l-5.07-9.707A2 2 0 0 1 14 9.527V2M8.5 2h7";
+    property <string> icon-cpu: "M4 4h16v16H4zM9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3";
+    property <string> icon-wrench: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z";
+    property <string> icon-refresh: "M1 4v6h6M23 20v-6h-6M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 0 1 3.51 15";
+
+    property <string> icon-flatpak: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5";
 
     function get-list() -> [PackageData] {
         if view == 0 { return installed-packages; }
         if view == 1 { return update-packages; }
-        if view == 2 { return search-packages; }
-        if view == 3 { return flatpak-packages; }
-        if view == 6 { return firmware-packages; }
-        if view == 7 { return category-packages; }
+        if view == 10 { return remote-apps; }
         if view == 8 { return repo-packages; }
         return [];
     }
 
-    // Use absolute positioning to prevent layout recalculation
-    // Sidebar - fixed left
     Rectangle {
         x: 0;
         y: 0;
-        width: 210px;
+        width: 200px;
         height: parent.height;
-        background: Palette.alternate-background.with-alpha(0.85);
+        background: Cat.mantle;
 
-            VerticalLayout {
-                padding: 12px;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 2px;
+
+            HorizontalLayout {
+                padding-left: 4px;
+                padding-bottom: 4px;
                 spacing: 8px;
 
-                // Search
-                Rectangle {
-                    height: 38px;
-                    background: Palette.control-background;
-                    border-radius: 8px;
-
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 8px;
-
-                        Text {
-                            text: "⌕";
-                            font-size: 16px;
-                            color: Palette.foreground;
-                            opacity: 0.5;
-                            vertical-alignment: center;
-                        }
-
-                        LineEdit {
-                            text <=> search-text;
-                            placeholder-text: "Search...";
-                            horizontal-stretch: 1;
-                            accepted => {
-                                if search-text != "" {
-                                    view = 2;
-                                    root.search(search-text);
-                                }
-                            }
-                        }
+                VerticalLayout {
+                    alignment: center;
+                    NavIcon {
+                        d: icon-package;
+                        icon-color: Cat.mauve;
+                        width: 20px;
+                        height: 20px;
                     }
                 }
-
-                Rectangle { height: 8px; }
-
-                // Nav
-                NavButton {
-                    icon: "📂";
-                    label: "Browse";
-                    active: view == 7;
-                    clicked => { view = 7; selected-index = -1; show-category-grid = true; }
-                }
-
-                NavButton {
-                    icon: "⬇";
-                    label: "Installed";
-                    active: view == 0;
-                    clicked => { view = 0; selected-index = -1; }
-                }
-
-                NavButton {
-                    icon: "🔍";
-                    label: "Search Results";
-                    active: view == 2;
-                    clicked => { view = 2; selected-index = -1; }
-                }
-
-                Rectangle { height: 8px; }
-                Rectangle { height: 1px; background: Palette.border; }
-                Rectangle { height: 8px; }
-
-                NavButton {
-                    icon: "📦";
-                    label: "Flatpak";
-                    active: view == 3;
-                    clicked => { view = 3; selected-index = -1; }
-                }
-
-                NavButton {
-                    icon: "🔧";
-                    label: "Firmware";
-                    active: view == 6;
-                    clicked => { view = 6; }
-                }
-
-                Rectangle { height: 8px; }
-                Rectangle { height: 1px; background: Palette.border; }
-                Rectangle { height: 8px; }
-
-                // Repos from pacman.conf
-                for repo[i] in repos: NavButton {
-                    icon: "📁";
-                    label: repo;
-                    active: view == 8 && current-repo-name == repo;
-                    clicked => {
-                        view = 8;
-                        current-repo-name = repo;
-                        root.load-repo(repo);
-                    }
-                }
-
-                Rectangle { vertical-stretch: 1; }
-
-                // Actions
-                Button {
-                    text: "Check for Updates";
-                    enabled: !busy;
-                    clicked => { root.sync-databases(); }
-                }
-
-                if stats.update-count > 0: Button {
-                    text: "Available Updates (" + stats.update-count + ")";
-                    primary: true;
-                    enabled: !busy;
-                    clicked => { view = 1; selected-index = -1; }
-                }
-
-                Rectangle { height: 6px; }
 
                 Text {
-                    text: "Cache: " + stats.cache-size + "  •  " + stats.orphan-count + " orphans";
-                    font-size: 11px;
-                    color: Palette.foreground;
-                    opacity: 0.4;
+                    text: "xPM";
+                    font-size: 17px;
+                    font-weight: 700;
+                    color: Cat.text;
+                    vertical-alignment: center;
+                }
+            }
+
+            Rectangle { height: 10px; }
+
+            Input {
+                text <=> search-text;
+                placeholder: "Search packages...";
+                accepted(t) => {
+                    if search-text != "" {
+                        view = 2;
+                        root.search(search-text);
+                    }
+                }
+            }
+
+            Rectangle { height: 12px; }
+            SectionLabel { section-title: "LIBRARY"; }
+            Rectangle { height: 4px; }
+
+            NavButton {
+                icon-path: icon-home;
+                label: "Home";
+                active: view == 9;
+                clicked => { view = 9; }
+            }
+
+            NavButton {
+                icon-path: icon-list;
+                icon-filled: true;
+                label: "Installed";
+                active: view == 0;
+                clicked => { view = 0; selected-index = -1; current-page = 0; root.load-page(0); }
+            }
+
+            NavButton {
+                icon-path: icon-flatpak;
+                label: "Flatpaks";
+                active: view == 10;
+                clicked => {
+                    view = 10; selected-index = -1; show-flatpak-detail = false;
+                    if flatpak-remotes.length == 0 { root.browse-remote(""); }
+                }
+            }
+
+            NavButton {
+                icon-path: icon-folder;
+                label: "Browse Repos";
+                active: view == 7 || view == 8;
+                clicked => {
+                    view = 7; selected-index = -1;
+                    if pacman-repos.length == 0 { root.load-pacman-repos(); }
+                }
+            }
+
+            NavButton {
+                icon-path: icon-search;
+                label: "Search Results";
+                active: view == 2;
+                clicked => { view = 2; selected-index = -1; }
+            }
+
+            Rectangle { height: 6px; }
+            Rectangle { height: 1px; background: Cat.surface0; }
+            Rectangle { height: 6px; }
+
+            NavButton {
+                icon-path: icon-gear;
+                label: "Settings";
+                active: view == 5;
+                clicked => { view = 5; }
+            }
+
+            Rectangle { vertical-stretch: 1; }
+
+            if stats.update-count > 0: NavButton {
+                icon-path: icon-arrow-up;
+                label: "Updates";
+                badge: stats.update-count;
+                active: view == 1;
+                clicked => { view = 1; selected-index = -1; }
+            }
+
+            Rectangle {
+                height: 34px;
+                border-radius: 8px;
+                background: sync-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85);
+                opacity: busy ? 0.5 : 1.0;
+                animate background { duration: 100ms; }
+
+                Text {
+                    text: "Sync & Update";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Cat.crust;
                     horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                sync-touch := TouchArea {
+                    mouse-cursor: busy ? default : pointer;
+                    clicked => { if !busy { root.sync-databases(); } }
+                }
+            }
+
+            Rectangle { height: 8px; }
+
+            HorizontalLayout {
+                padding-left: 4px;
+                spacing: 4px;
+
+                Text {
+                    text: stats.pacman-count + " pacman";
+                    font-size: 10px;
+                    color: Cat.overlay0;
+                }
+                Text {
+                    text: "/";
+                    font-size: 10px;
+                    color: Cat.surface2;
+                }
+                Text {
+                    text: stats.flatpak-count + " flatpak";
+                    font-size: 10px;
+                    color: Cat.overlay0;
                 }
             }
         }
+    }
 
-    // Border after sidebar
     Rectangle {
-        x: 210px;
+        x: 200px;
         y: 0;
         width: 1px;
         height: parent.height;
-        background: Palette.border;
+        background: Cat.surface0;
     }
 
-    // Content/List area - positioned absolutely
     Rectangle {
-        x: 211px;
+        x: 201px;
         y: 0;
-        width: parent.width - 211px;
+        width: parent.width - 201px;
         height: parent.height;
+        clip: true;
 
-            VerticalLayout {
-                padding: 20px;
-                padding-top: 24px;
-                spacing: 16px;
+        VerticalLayout {
+            padding: 24px;
+            padding-top: 20px;
+            spacing: 12px;
 
-                // Header
+            HorizontalLayout {
+                spacing: 12px;
+
+                Text {
+                    text: view == 9 ? "Home" :
+                          view == 0 ? "Installed" :
+                          view == 1 ? "Updates" :
+                          view == 2 ? "Search Results" :
+                          view == 5 ? "Settings" :
+                          view == 7 ? "Browse Repos" :
+                          view == 8 ? selected-repo :
+                          view == 10 ? (show-flatpak-detail ? flatpak-detail-name : "Flatpaks") : "Packages";
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: Cat.text;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                if (view == 0 || view == 1 || view == 8) || (view == 10 && !show-flatpak-detail): Text {
+                    text: get-list().length + " packages";
+                    font-size: 12px;
+                    color: Cat.overlay0;
+                    vertical-alignment: center;
+                }
+
+                if view == 1 && update-packages.length > 0: Btn {
+                    label: "Update All";
+                    primary: true;
+                    enabled: !busy;
+                    clicked => { root.update-all(); }
+                }
+
+                if view == 0: Btn {
+                    label: "Refresh";
+                    clicked => { root.refresh(); }
+                }
+            }
+
+            Rectangle { height: 1px; background: Cat.surface0; opacity: 0.6; }
+
+            if loading: VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
                 HorizontalLayout {
-                    spacing: 12px;
-
-                    Text {
-                        text: view == 0 ? "Installed Packages" :
-                              view == 1 ? "Available Updates" :
-                              view == 2 ? "Search Results" :
-                              view == 3 ? "Flatpak Applications" :
-                              view == 6 ? "Firmware Updates" :
-                              view == 7 && show-category-grid ? "Browse by Category" :
-                              view == 7 ? current-category-name :
-                              view == 8 ? current-repo-name : "Packages";
-                        font-size: 20px;
-                        font-weight: 600;
-                        color: Palette.foreground;
-                    }
-
-                    Rectangle { horizontal-stretch: 1; }
-
-                    if !(view == 7 && show-category-grid): Text {
-                        text: get-list().length + " packages";
-                        font-size: 13px;
-                        color: Palette.foreground;
-                        opacity: 0.5;
-                        vertical-alignment: center;
-                    }
-
-                    if view == 1 && update-packages.length > 0: Button {
-                        text: "Update All";
-                        primary: true;
-                        enabled: !busy;
-                        clicked => { root.update-all(); }
-                    }
-
-
-                    // Troubleshoot button
-                    Rectangle {
-                        width: 120px;
-                        height: 32px;
-                        border-radius: 6px;
-                        background: troubleshoot-touch.has-hover ? Palette.control-background : transparent;
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            spacing: 6px;
-                            alignment: center;
-
-                            Text {
-                                text: "🔧";
-                                font-size: 13px;
-                                vertical-alignment: center;
-                            }
-
-                            Text {
-                                text: "Troubleshoot";
-                                font-size: 13px;
-                                color: Palette.foreground;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        troubleshoot-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { show-troubleshoot-menu = !show-troubleshoot-menu; }
-                        }
-                    }
+                    alignment: center;
+                    Spinner { indeterminate: true; }
                 }
+            }
 
-                Rectangle { height: 1px; background: Palette.border; }
+            if !loading && view == 2 && search-installed.length == 0 && search-available.length == 0: VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                spacing: 8px;
 
-                // Database sync notice
-                Rectangle {
+                NavIcon {
+                    d: icon-search;
+                    icon-color: Cat.surface2;
+                    width: 32px;
                     height: 32px;
-                    border-radius: 6px;
-                    background: #e67e22.with-alpha(0.15);
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 8px;
-                        alignment: center;
-                        Text { text: "⚠"; font-size: 13px; vertical-alignment: center; }
-                        Text {
-                            text: "Click \"Check for Updates\" in the sidebar to sync databases & check for any available updates";
-                            font-size: 11.5px;
-                            color: Palette.foreground;
-                            opacity: 0.8;
-                            vertical-alignment: center;
-                        }
-                    }
+                    x: (parent.width - 32px) / 2;
                 }
 
-                if loading: VerticalLayout {
-                    vertical-stretch: 1;
-                    alignment: center;
-                    HorizontalLayout {
-                        alignment: center;
-                        Spinner { indeterminate: true; }
-                    }
+                Text {
+                    text: "Search for packages";
+                    font-size: 14px;
+                    color: Cat.overlay0;
+                    horizontal-alignment: center;
+                }
+            }
+
+            if !loading && (view == 0 || view == 1 || view == 10) && get-list().length == 0: VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                spacing: 8px;
+
+                NavIcon {
+                    d: icon-package;
+                    icon-color: Cat.surface2;
+                    width: 32px;
+                    height: 32px;
+                    x: (parent.width - 32px) / 2;
                 }
 
-                if !loading && view != 7 && get-list().length == 0: VerticalLayout {
-                    vertical-stretch: 1;
-                    alignment: center;
-                    Text {
-                        text: view == 2 ? "Type to search" : "No packages";
-                        font-size: 14px;
-                        color: Palette.foreground;
-                        opacity: 0.4;
-                        horizontal-alignment: center;
-                    }
+                Text {
+                    text: "No packages found";
+                    font-size: 14px;
+                    color: Cat.overlay0;
+                    horizontal-alignment: center;
                 }
+            }
 
-                if !loading && view == 0 && installed-packages.length > 0: ListView {
+            // Installed packages (view 0) — paginated
+            if !loading && view == 0 && installed-packages.length > 0: VerticalLayout {
+                vertical-stretch: 1;
+
+                ListView {
                     vertical-stretch: 1;
                     for p[i] in installed-packages: PackageRow {
                         pkg: p;
@@ -705,212 +1297,732 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if !loading && view == 1 && update-packages.length > 0: ListView {
-                    vertical-stretch: 1;
-                    for p[i] in update-packages: PackageRow {
-                        pkg: p;
-                        show-separator: i < update-packages.length - 1;
-                        show-checkbox: multi-select-mode;
-                        show-action-button: false;
-                        install => { root.request-update(p.name, p.backend); }
-                        remove => { root.request-remove(p.name, p.backend); }
-                        toggle-selected(val) => { root.toggle-package-selected(p.name, p.backend, val); }
-                    }
+                if total-pages > 1: Paginator {
+                    current-page: root.current-page;
+                    total-pages: root.total-pages;
+                    go-to-page(p) => { root.current-page = p; root.load-page(p); }
                 }
+            }
 
-                if !loading && view == 2 && search-packages.length > 0: ListView {
-                    vertical-stretch: 1;
-                    for p[i] in search-packages: PackageRow {
-                        pkg: p;
-                        show-separator: i < search-packages.length - 1;
-                        show-checkbox: multi-select-mode;
-                        install => { root.request-install(p.name, p.backend); }
-                        remove => { root.request-remove(p.name, p.backend); }
-                        toggle-selected(val) => { root.toggle-package-selected(p.name, p.backend, val); }
-                    }
+            // Updates (view 1)
+            if !loading && view == 1 && update-packages.length > 0: ListView {
+                vertical-stretch: 1;
+                for p[i] in update-packages: PackageRow {
+                    pkg: p;
+                    show-separator: i < update-packages.length - 1;
+                    show-checkbox: false;
+                    show-action-button: true;
+                    install => { root.request-update(p.name, p.backend); }
+                    remove => { root.request-remove(p.name, p.backend); }
                 }
+            }
 
-                if !loading && view == 3 && flatpak-packages.length > 0: ListView {
-                    vertical-stretch: 1;
-                    for p[i] in flatpak-packages: PackageRow {
-                        pkg: p;
-                        show-separator: i < flatpak-packages.length - 1;
-                        show-checkbox: multi-select-mode;
-                        install => { root.request-install(p.name, p.backend); }
-                        remove => { root.request-remove(p.name, p.backend); }
-                        toggle-selected(val) => { root.toggle-package-selected(p.name, p.backend, val); }
-                    }
-                }
+            // Flatpaks (view 10) — Shelly-ALPM style with sidebar + card grid + inline detail
+            if view == 10: VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 0;
 
-                if !loading && view == 6 && firmware-packages.length > 0: ListView {
-                    vertical-stretch: 1;
-                    for p[i] in firmware-packages: PackageRow {
-                        pkg: p;
-                        show-separator: i < firmware-packages.length - 1;
-                        show-checkbox: multi-select-mode;
-                        install => { root.request-install(p.name, p.backend); }
-                        remove => { root.request-remove(p.name, p.backend); }
-                        toggle-selected(val) => { root.toggle-package-selected(p.name, p.backend, val); }
-                    }
-                }
-
-                // Repo package list
-                if !loading && view == 8 && repo-packages.length > 0: ListView {
-                    vertical-stretch: 1;
-                    for p[i] in repo-packages: PackageRow {
-                        pkg: p;
-                        show-separator: i < repo-packages.length - 1;
-                        show-checkbox: multi-select-mode;
-                        install => { root.request-install(p.name, p.backend); }
-                        remove => { root.request-remove(p.name, p.backend); }
-                        toggle-selected(val) => { root.toggle-package-selected(p.name, p.backend, val); }
-                    }
-                }
-
-                if !loading && view == 8 && repo-packages.length == 0: VerticalLayout {
-                    vertical-stretch: 1;
-                    alignment: center;
-                    Text {
-                        text: "No packages in " + current-repo-name;
-                        font-size: 14px;
-                        color: Palette.foreground;
-                        opacity: 0.4;
-                        horizontal-alignment: center;
-                    }
-                }
-
-                // Browse by Category - Grid View
-                if !loading && view == 7 && show-category-grid: Rectangle {
-                    vertical-stretch: 1;
-
-                    // Large background text in multiple languages
-                    Text { x: -20px; y: 15px; text: "APPS"; font-size: 72px; font-weight: 900; color: Palette.foreground; opacity: 0.08; }
-                    Text { x: parent.width - 220px; y: 5px; text: "软件"; font-size: 64px; font-weight: 900; color: Palette.foreground; opacity: 0.08; }
-                    Text { x: 30px; y: parent.height - 90px; text: "アプリ"; font-size: 56px; font-weight: 900; color: Palette.foreground; opacity: 0.08; }
-                    Text { x: parent.width - 280px; y: parent.height - 85px; text: "LOGICIEL"; font-size: 48px; font-weight: 900; color: Palette.foreground; opacity: 0.07; }
-
-                    // Medium decorative text
-                    Text { x: 10px; y: 95px; text: "Install"; font-size: 28px; font-weight: 700; color: Palette.foreground; opacity: 0.12; }
-                    Text { x: parent.width - 110px; y: 85px; text: "Discover"; font-size: 24px; font-weight: 700; color: Palette.foreground; opacity: 0.12; }
-                    Text { x: 15px; y: parent.height / 2 + 60px; text: "Launch"; font-size: 26px; font-weight: 700; color: Palette.foreground; opacity: 0.12; }
-                    Text { x: parent.width - 100px; y: parent.height / 2 + 55px; text: "Create"; font-size: 24px; font-weight: 700; color: Palette.foreground; opacity: 0.12; }
-
-                    // Emojis scattered
-                    Text { x: 5px; y: 140px; text: "📦"; font-size: 32px; opacity: 0.25; }
-                    Text { x: parent.width - 50px; y: 130px; text: "🚀"; font-size: 32px; opacity: 0.25; }
-                    Text { x: 10px; y: parent.height - 130px; text: "🎮"; font-size: 32px; opacity: 0.25; }
-                    Text { x: parent.width - 55px; y: parent.height - 125px; text: "🔧"; font-size: 32px; opacity: 0.25; }
-                    Text { x: parent.width / 2 - 80px; y: 20px; text: "✨"; font-size: 28px; opacity: 0.30; }
-                    Text { x: parent.width / 2 + 50px; y: parent.height - 45px; text: "⬇"; font-size: 28px; opacity: 0.30; }
-
-                    // Centered grid
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 10px;
-
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 10px;
-                            for cat in [
-                                { icon: "🎵", label: "Audio & Video", id: "AudioVideo" },
-                                { icon: "💻", label: "Development", id: "Development" },
-                                { icon: "🎮", label: "Games", id: "Game" },
-                                { icon: "🎨", label: "Graphics", id: "Graphics" },
-                                { icon: "🌐", label: "Internet", id: "Network" },
-                            ]: Rectangle {
-                                width: 120px;
-                                height: 95px;
-                                background: Palette.control-background;
-                                border-radius: 10px;
-                                drop-shadow-blur: tile-touch1.has-hover ? 16px : 8px;
-                                drop-shadow-color: tile-touch1.has-hover ? #9b59b6.with-alpha(0.7) : #000000.with-alpha(0.2);
-                                drop-shadow-offset-y: tile-touch1.has-hover ? 2px : 4px;
-                                animate drop-shadow-blur { duration: 150ms; }
-                                animate drop-shadow-color { duration: 150ms; }
-                                tile-touch1 := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        show-category-grid = false;
-                                        current-category-name = cat.label;
-                                        root.load-category(cat.id);
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 6px;
-                                    Text { text: cat.icon; font-size: 28px; horizontal-alignment: center; }
-                                    Text { text: cat.label; font-size: 12px; font-weight: 500; color: Palette.foreground; horizontal-alignment: center; }
-                                }
-                            }
-                        }
-
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 10px;
-                            for cat in [
-                                { icon: "📄", label: "Office", id: "Office" },
-                                { icon: "🎓", label: "Education", id: "Education" },
-                                { icon: "🔬", label: "Science", id: "Science" },
-                                { icon: "⚙", label: "System", id: "System" },
-                                { icon: "🔧", label: "Utilities", id: "Utility" },
-                            ]: Rectangle {
-                                width: 120px;
-                                height: 95px;
-                                background: Palette.control-background;
-                                border-radius: 10px;
-                                drop-shadow-blur: tile-touch2.has-hover ? 16px : 8px;
-                                drop-shadow-color: tile-touch2.has-hover ? #9b59b6.with-alpha(0.7) : #000000.with-alpha(0.2);
-                                drop-shadow-offset-y: tile-touch2.has-hover ? 2px : 4px;
-                                animate drop-shadow-blur { duration: 150ms; }
-                                animate drop-shadow-color { duration: 150ms; }
-                                tile-touch2 := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        show-category-grid = false;
-                                        current-category-name = cat.label;
-                                        root.load-category(cat.id);
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 6px;
-                                    Text { text: cat.icon; font-size: 28px; horizontal-alignment: center; }
-                                    Text { text: cat.label; font-size: 12px; font-weight: 500; color: Palette.foreground; horizontal-alignment: center; }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Browse by Category - Package List
-                if !loading && view == 7 && !show-category-grid: VerticalLayout {
-                    vertical-stretch: 1;
+                // ── Top bar: search + remote selector ─────────────────────
+                Rectangle {
+                    height: 52px;
+                    background: Cat.mantle;
 
                     HorizontalLayout {
-                        padding-bottom: 12px;
-                        Rectangle {
-                            width: 80px;
-                            height: 32px;
-                            background: Palette.control-background;
-                            border-radius: 6px;
-                            Text {
-                                text: "← Back";
-                                color: Palette.foreground;
-                                vertical-alignment: center;
-                                horizontal-alignment: center;
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 10px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Input {
+                                placeholder: "Search apps on Flathub...";
+                                text <=> flatpak-search;
+                                accepted(t) => {
+                                    show-flatpak-detail = false;
+                                    root.filter-flatpak(selected-flatpak-category, t);
+                                }
+                                edited(t) => {
+                                    show-flatpak-detail = false;
+                                    root.filter-flatpak(selected-flatpak-category, t);
+                                }
                             }
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { show-category-grid = true; selected-index = -1; }
+                        }
+
+                        if flatpak-remotes.length > 1: VerticalLayout {
+                            alignment: center;
+                            for r[ri] in flatpak-remotes: Rectangle {
+                                height: 28px;
+                                width: rmt-lbl.preferred-width + 18px;
+                                border-radius: 6px;
+                                background: selected-remote == r ? Cat.mauve.with-alpha(0.2) : (rmt-t.has-hover ? Cat.surface1 : Cat.surface0);
+                                animate background { duration: 80ms; }
+                                rmt-lbl := Text {
+                                    text: r;
+                                    font-size: 11px;
+                                    font-weight: selected-remote == r ? 700 : 400;
+                                    color: selected-remote == r ? Cat.mauve : Cat.subtext0;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                rmt-t := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        selected-remote = r;
+                                        selected-flatpak-category = "All";
+                                        flatpak-search = "";
+                                        show-flatpak-detail = false;
+                                        root.browse-remote(r);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Category pills bar ─────────────────────────────────────
+                Rectangle {
+                    height: 44px;
+                    background: Cat.surface0.with-alpha(0.25);
+
+                    ScrollView {
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 6px;
+                            alignment: start;
+
+                            for cat[ci] in flatpak-categories: CategoryPill {
+                                label: cat;
+                                active: selected-flatpak-category == cat;
+                                clicked => {
+                                    selected-flatpak-category = cat;
+                                    show-flatpak-detail = false;
+                                    root.filter-flatpak(cat, flatpak-search);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Loading state ──────────────────────────────────────────
+                if remote-apps-loading: VerticalLayout {
+                    vertical-stretch: 1;
+                    alignment: center;
+                    HorizontalLayout { alignment: center; Spinner { indeterminate: true; } }
+                    Text { text: "Parsing appstream data…"; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
+                }
+
+                // ── Detail view ────────────────────────────────────────────
+                if !remote-apps-loading && show-flatpak-detail: ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 0;
+                        spacing: 0;
+
+                        // Screenshot banner
+                        if flatpak-screenshot.width > 0: Rectangle {
+                            height: 300px;
+                            clip: true;
+                            background: Cat.surface0.with-alpha(0.3);
+
+                            Image {
+                                source: flatpak-screenshot;
+                                width: parent.width;
+                                height: parent.height;
+                                image-fit: cover;
+                            }
+
+                            Rectangle {
+                                y: parent.height - 100px;
+                                height: 100px;
+                                width: parent.width;
+                                background: @linear-gradient(180deg, transparent 0%, Cat.base 100%);
+                            }
+                        }
+
+                        VerticalLayout {
+                            padding: 24px;
+                            spacing: 22px;
+
+                            // Back row
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    width: bk-lbl.preferred-width + 28px;
+                                    height: 34px;
+                                    border-radius: 8px;
+                                    background: bk-touch.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.7);
+                                    border-width: 1px;
+                                    border-color: Cat.surface0;
+                                    animate background { duration: 80ms; }
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 6px;
+                                        NavIcon { d: "M19 12H5M12 19l-7-7 7-7"; icon-color: Cat.subtext0; width: 13px; height: 13px; }
+                                        bk-lbl := Text { text: "All Apps"; font-size: 12px; color: Cat.subtext0; vertical-alignment: center; }
+                                    }
+                                    bk-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            show-flatpak-detail = false;
+                                            flatpak-screenshot = @image-url("");
+                                            flatpak-detail-icon = @image-url("");
+                                        }
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Rectangle {
+                                    width: rem-d-lbl.preferred-width + 14px;
+                                    height: 34px;
+                                    border-radius: 8px;
+                                    background: Cat.surface0.with-alpha(0.5);
+                                    rem-d-lbl := Text {
+                                        text: selected-remote;
+                                        font-size: 11px;
+                                        color: Cat.overlay1;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // App header: icon + name/developer + install button
+                            HorizontalLayout {
+                                spacing: 18px;
+
+                                // App icon (real or placeholder)
+                                VerticalLayout {
+                                    alignment: start;
+                                    Rectangle {
+                                        width: 80px;
+                                        height: 80px;
+                                        border-radius: 20px;
+                                        clip: true;
+                                        background: Cat.surface0;
+
+                                        if flatpak-detail-icon.width > 0: Image {
+                                            source: flatpak-detail-icon;
+                                            width: parent.width;
+                                            height: parent.height;
+                                            image-fit: contain;
+                                        }
+                                        if flatpak-detail-icon.width == 0: NavIcon {
+                                            d: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4";
+                                            icon-color: Cat.mauve.with-alpha(0.6);
+                                            width: 38px;
+                                            height: 38px;
+                                            x: 21px;
+                                            y: 21px;
+                                        }
+                                    }
+                                }
+
+                                // Name + app_id + developer
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 6px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: flatpak-detail-name;
+                                        font-size: 24px;
+                                        font-weight: 800;
+                                        color: Cat.text;
+                                        wrap: word-wrap;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Text {
+                                            text: current-flatpak-id;
+                                            font-size: 11px;
+                                            color: Cat.overlay0;
+                                            vertical-alignment: center;
+                                        }
+                                        if flatpak-detail-developer != "": Text {
+                                            text: "·  " + flatpak-detail-developer;
+                                            font-size: 11px;
+                                            color: Cat.subtext0;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                // Install / Remove
+                                VerticalLayout {
+                                    alignment: center;
+                                    if !flatpak-detail-installed: Rectangle {
+                                        width: 120px;
+                                        height: 38px;
+                                        border-radius: 10px;
+                                        background: inst-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.88);
+                                        animate background { duration: 80ms; }
+                                        Text { text: "Install"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                        inst-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                flatpak-detail-installed = true;
+                                                root.request-install(current-flatpak-id, 1);
+                                            }
+                                        }
+                                    }
+                                    if flatpak-detail-installed: Rectangle {
+                                        width: 120px;
+                                        height: 38px;
+                                        border-radius: 10px;
+                                        background: rm-touch.has-hover ? Cat.red : Cat.red.with-alpha(0.85);
+                                        animate background { duration: 80ms; }
+                                        Text { text: "Remove"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                        rm-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                flatpak-detail-installed = false;
+                                                root.request-remove(current-flatpak-id, 1);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Summary tagline
+                            if flatpak-detail-summary != "": Text {
+                                text: flatpak-detail-summary;
+                                font-size: 15px;
+                                color: Cat.subtext0;
+                                wrap: word-wrap;
+                            }
+
+                            Rectangle { height: 1px; background: Cat.surface0; opacity: 0.6; }
+
+                            // Description
+                            Text {
+                                text: flatpak-detail-description != "" ? flatpak-detail-description : "No description available.";
+                                font-size: 13px;
+                                color: flatpak-detail-description != "" ? Cat.text : Cat.overlay0;
+                                wrap: word-wrap;
+                                opacity: 0.9;
+                            }
+
+                            // Addons section
+                            if flatpak-addons.length > 0: VerticalLayout {
+                                spacing: 10px;
+
+                                Rectangle { height: 1px; background: Cat.surface0; opacity: 0.6; }
+
+                                Text {
+                                    text: "Add-ons & Extensions (" + flatpak-addons.length + ")";
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    color: Cat.text;
+                                }
+
+                                for addon[ai] in flatpak-addons: Rectangle {
+                                    height: 64px;
+                                    border-radius: 8px;
+                                    background: addon-t.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.5);
+                                    animate background { duration: 70ms; }
+
+                                    HorizontalLayout {
+                                        padding: 12px;
+                                        spacing: 10px;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 3px;
+                                            alignment: center;
+                                            Text { text: addon.display-name; font-size: 13px; font-weight: 600; color: Cat.text; overflow: elide; }
+                                            Text { text: addon.description; font-size: 11px; color: Cat.subtext0; overflow: elide; }
+                                        }
+
+                                        VerticalLayout {
+                                            alignment: center;
+                                            if !addon.installed: Rectangle {
+                                                width: 80px; height: 28px; border-radius: 6px;
+                                                background: addon-inst-t.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.2);
+                                                animate background { duration: 70ms; }
+                                                Text { text: "Install"; font-size: 11px; font-weight: 600; color: addon-inst-t.has-hover ? #ffffff : Cat.mauve; horizontal-alignment: center; vertical-alignment: center; }
+                                                addon-inst-t := TouchArea { mouse-cursor: pointer; clicked => { root.request-install(addon.name, 1); } }
+                                            }
+                                            if addon.installed: Rectangle {
+                                                width: 80px; height: 28px; border-radius: 6px;
+                                                background: Cat.green.with-alpha(0.12);
+                                                Text { text: "Installed"; font-size: 11px; font-weight: 600; color: Cat.green; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                        }
+                                    }
+
+                                    addon-t := TouchArea { }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── App grid ───────────────────────────────────────────────
+                if !remote-apps-loading && !show-flatpak-detail: ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 0;
+
+                        if flatpak-app-rows.length == 0: VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: center;
+                            Text { text: "No apps found."; font-size: 13px; color: Cat.overlay0; horizontal-alignment: center; }
+                        }
+
+                        for row[ri] in flatpak-app-rows: HorizontalLayout {
+                            spacing: 0;
+
+                            AppTile {
+                                horizontal-stretch: 1;
+                                pkg: row.a;
+                                clicked => {
+                                    current-flatpak-id = row.a.name;
+                                    flatpak-detail-installed = row.a.installed;
+                                    flatpak-detail-name = row.a.display-name;
+                                    flatpak-detail-summary = row.a.description;
+                                    flatpak-detail-description = "";
+                                    flatpak-detail-developer = "";
+                                    flatpak-screenshot = @image-url("");
+                                    flatpak-detail-icon = @image-url("");
+                                    flatpak-addons = [];
+                                    root.load-flatpak-detail(row.a.name);
+                                    root.load-flatpak-icon(row.a.name);
+                                    show-flatpak-detail = true;
+                                }
+                            }
+
+                            if row.count >= 2: AppTile {
+                                horizontal-stretch: 1;
+                                pkg: row.b;
+                                clicked => {
+                                    current-flatpak-id = row.b.name;
+                                    flatpak-detail-installed = row.b.installed;
+                                    flatpak-detail-name = row.b.display-name;
+                                    flatpak-detail-summary = row.b.description;
+                                    flatpak-detail-description = "";
+                                    flatpak-detail-developer = "";
+                                    flatpak-screenshot = @image-url("");
+                                    flatpak-detail-icon = @image-url("");
+                                    flatpak-addons = [];
+                                    root.load-flatpak-detail(row.b.name);
+                                    root.load-flatpak-icon(row.b.name);
+                                    show-flatpak-detail = true;
+                                }
+                            }
+                            if row.count < 2: Rectangle { horizontal-stretch: 1; }
+
+                            if row.count >= 3: AppTile {
+                                horizontal-stretch: 1;
+                                pkg: row.c;
+                                clicked => {
+                                    current-flatpak-id = row.c.name;
+                                    flatpak-detail-installed = row.c.installed;
+                                    flatpak-detail-name = row.c.display-name;
+                                    flatpak-detail-summary = row.c.description;
+                                    flatpak-detail-description = "";
+                                    flatpak-detail-developer = "";
+                                    flatpak-screenshot = @image-url("");
+                                    flatpak-detail-icon = @image-url("");
+                                    flatpak-addons = [];
+                                    root.load-flatpak-detail(row.c.name);
+                                    root.load-flatpak-icon(row.c.name);
+                                    show-flatpak-detail = true;
+                                }
+                            }
+                            if row.count < 3: Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+                }
+            }
+
+            // Repos browser — professional column view with right detail panel
+            if view == 7 || view == 8: HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: 0;
+
+                // ── Left: repo list + package table ────────────────────────
+                VerticalLayout {
+                    horizontal-stretch: 1;
+
+                    // Repo selector bar
+                    Rectangle {
+                        height: 44px;
+                        background: Cat.mantle;
+
+                        if pacman-repos.length == 0: HorizontalLayout {
+                            padding-left: 14px;
+                            spacing: 10px;
+                            alignment: center;
+                            Spinner { indeterminate: true; }
+                            Text { text: "Loading repositories..."; font-size: 12px; color: Cat.overlay0; vertical-alignment: center; }
+                        }
+
+                        if pacman-repos.length > 0: ScrollView {
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 5px;
+                                alignment: start;
+
+                                for repo[i] in pacman-repos: Rectangle {
+                                    width: rp-lbl.preferred-width + 18px;
+                                    height: 28px;
+                                    border-radius: 6px;
+                                    background: selected-repo == repo ?
+                                        Cat.blue.with-alpha(0.85) : (rp-t.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.5));
+                                    animate background { duration: 70ms; }
+
+                                    rp-lbl := Text {
+                                        text: repo;
+                                        font-size: 11.5px;
+                                        font-weight: selected-repo == repo ? 700 : 400;
+                                        color: selected-repo == repo ? #ffffff : Cat.subtext0;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    rp-t := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            selected-repo = repo;
+                                            view = 8;
+                                            show-repo-detail = false;
+                                            root.browse-repo(repo);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
 
-                    if category-packages.length > 0: ListView {
+                    // Column header
+                    if view == 8: Rectangle {
+                        height: 32px;
+                        background: Cat.surface0.with-alpha(0.6);
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 12px;
+
+                            Text { text: "Name"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-stretch: 1; }
+                            Rectangle { width: 130px;
+                                Text { text: "Version"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; }
+                            }
+                            Rectangle { width: 90px;
+                                Text { text: "Repo"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; }
+                            }
+                            Rectangle { width: 80px;
+                                Text { text: "Status"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                        }
+                    }
+
+                    // Loading state
+                    if repo-loading: VerticalLayout {
                         vertical-stretch: 1;
-                        for p[i] in category-packages: PackageRow {
+                        alignment: center;
+                        HorizontalLayout { alignment: center; Spinner { indeterminate: true; } }
+                        Text { text: "Loading " + selected-repo + "..."; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
+                    }
+
+                    // Empty / select prompt
+                    if !repo-loading && view == 7: VerticalLayout {
+                        vertical-stretch: 1;
+                        alignment: center;
+                        Text { text: "Select a repository above"; font-size: 14px; font-weight: 600; color: Cat.overlay0; horizontal-alignment: center; }
+                        Text { text: "to browse available packages"; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
+                    }
+
+                    // Package list
+                    if !repo-loading && view == 8 && repo-packages.length > 0: ListView {
+                        vertical-stretch: 1;
+                        for p[i] in repo-packages: RepoRow {
                             pkg: p;
-                            show-separator: i < category-packages.length - 1;
+                            selected: show-repo-detail && repo-detail-pkg.name == p.name;
+                            clicked => {
+                                repo-detail-pkg = p;
+                                show-repo-detail = true;
+                                root.select-repo-pkg(p.name, p.backend);
+                            }
+                        }
+                    }
+
+                    if !repo-loading && view == 8 && repo-packages.length == 0: VerticalLayout {
+                        vertical-stretch: 1;
+                        alignment: center;
+                        Text { text: "No packages found"; font-size: 13px; color: Cat.overlay0; horizontal-alignment: center; }
+                    }
+                }
+
+                // ── Right detail panel (300px) ─────────────────────────────
+                if show-repo-detail: Rectangle {
+                    width: 300px;
+                    background: Cat.mantle;
+
+                    // Vertical divider
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: 1px;
+                        height: parent.height;
+                        background: Cat.surface0;
+                    }
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 14px;
+
+                        // Close button
+                        HorizontalLayout {
+                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                border-radius: 6px;
+                                background: cls-t.has-hover ? Cat.surface1 : transparent;
+                                animate background { duration: 70ms; }
+                                NavIcon { d: "M18 6L6 18M6 6l12 12"; icon-color: Cat.overlay1; width: 14px; height: 14px; x: 7px; y: 7px; }
+                                cls-t := TouchArea { mouse-cursor: pointer; clicked => { show-repo-detail = false; } }
+                            }
+                        }
+
+                        // Package name
+                        Text {
+                            text: repo-detail-pkg.display-name;
+                            font-size: 20px;
+                            font-weight: 700;
+                            color: Cat.text;
+                            wrap: word-wrap;
+                        }
+
+                        // Version + repo badges
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+
+                            Rectangle {
+                                width: ver-t.preferred-width + 14px;
+                                height: 24px;
+                                border-radius: 5px;
+                                background: Cat.mauve.with-alpha(0.12);
+                                ver-t := Text {
+                                    text: repo-detail-pkg.version;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: Cat.mauve;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle {
+                                width: rdt.preferred-width + 12px;
+                                height: 24px;
+                                border-radius: 5px;
+                                background: Cat.surface0;
+                                rdt := Text {
+                                    text: repo-detail-pkg.repository;
+                                    font-size: 11px;
+                                    color: Cat.overlay1;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Cat.surface0; }
+
+                        // Description
+                        if repo-detail-loading: HorizontalLayout {
+                            alignment: start;
+                            Spinner { indeterminate: true; }
+                        }
+
+                        if !repo-detail-loading && repo-detail-description != "": Text {
+                            text: repo-detail-description;
+                            font-size: 13px;
+                            color: Cat.subtext0;
+                            wrap: word-wrap;
+                        }
+
+                        if !repo-detail-loading && repo-detail-description == "": Text {
+                            text: "No description available.";
+                            font-size: 12px;
+                            color: Cat.overlay0;
+                        }
+
+                        Rectangle { vertical-stretch: 1; }
+
+                        // Install / Remove button
+                        if !repo-detail-pkg.installed: Rectangle {
+                            height: 40px;
+                            border-radius: 8px;
+                            background: inst-r-t.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85);
+                            animate background { duration: 80ms; }
+                            Text { text: "Install"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                            inst-r-t := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.request-install(repo-detail-pkg.name, repo-detail-pkg.backend); }
+                            }
+                        }
+                        if repo-detail-pkg.installed: Rectangle {
+                            height: 40px;
+                            border-radius: 8px;
+                            background: rm-r-t.has-hover ? Cat.red : Cat.red.with-alpha(0.85);
+                            animate background { duration: 80ms; }
+                            Text { text: "Remove"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                            rm-r-t := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.request-remove(repo-detail-pkg.name, repo-detail-pkg.backend); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !loading && view == 2 && (search-installed.length > 0 || search-available.length > 0): ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    spacing: 0px;
+
+                    if search-installed.length > 0: VerticalLayout {
+                        spacing: 0px;
+
+                        Rectangle {
+                            height: 32px;
+                            background: Cat.green.with-alpha(0.06);
+                            border-radius: 6px;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                spacing: 6px;
+
+                                NavIcon {
+                                    d: "M20 6L9 17l-5-5";
+                                    icon-color: Cat.green;
+                                    width: 14px;
+                                    height: 14px;
+                                }
+
+                                Text {
+                                    text: "Installed (" + search-installed.length + ")";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: Cat.green;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        for p[i] in search-installed: PackageRow {
+                            pkg: p;
+                            show-separator: i < search-installed.length - 1;
                             show-checkbox: multi-select-mode;
                             install => { root.request-install(p.name, p.backend); }
                             remove => { root.request-remove(p.name, p.backend); }
@@ -918,116 +2030,663 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    if category-packages.length == 0: Rectangle {
-                        vertical-stretch: 1;
-                        Text {
-                            text: "No apps found in this category";
-                            color: Palette.foreground;
-                            opacity: 0.5;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                    if search-available.length > 0: VerticalLayout {
+                        spacing: 0px;
+
+                        Rectangle {
+                            height: 32px;
+                            background: Cat.blue.with-alpha(0.06);
+                            border-radius: 6px;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                spacing: 6px;
+
+                                NavIcon {
+                                    d: icon-package;
+                                    icon-color: Cat.blue;
+                                    width: 14px;
+                                    height: 14px;
+                                }
+
+                                Text {
+                                    text: "Available (" + search-available.length + ")";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: Cat.blue;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        for p[i] in search-available: PackageRow {
+                            pkg: p;
+                            show-separator: i < search-available.length - 1;
+                            show-checkbox: multi-select-mode;
+                            install => { root.request-install(p.name, p.backend); }
+                            remove => { root.request-remove(p.name, p.backend); }
+                            toggle-selected(val) => { root.toggle-package-selected(p.name, p.backend, val); }
+                        }
+                    }
+                }
+            }
+
+            if view == 5: ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 28px;
+
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionLabel { section-title: "GENERAL"; }
+
+                        SettingsRow {
+                            label: "Flatpak Support";
+                            subtitle: "Enable Flatpak package management";
+                            checked: setting-flatpak-enabled;
+                            toggled(val) => { setting-flatpak-enabled = val; root.save-settings(); }
+                        }
+
+                        SettingsRow {
+                            label: "Check Updates on Startup";
+                            subtitle: "Automatically sync databases on launch";
+                            checked: setting-check-updates-on-start;
+                            toggled(val) => { setting-check-updates-on-start = val; root.save-settings(); }
+                        }
+
+                        // Notification interval picker
+                        Rectangle {
+                            height: 54px;
+                            border-radius: 8px;
+                            background: Cat.surface0.with-alpha(0.4);
+
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+
+                                    Text {
+                                        text: "Update Check Interval";
+                                        font-size: 13px;
+                                        color: Cat.text;
+                                    }
+                                    Text {
+                                        text: "How often xpm-notify checks for updates";
+                                        font-size: 11px;
+                                        color: Cat.overlay0;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+
+                                    for opt[i] in [15, 30, 60, 120]: Rectangle {
+                                        width: 42px;
+                                        height: 26px;
+                                        border-radius: 6px;
+                                        background: setting-notify-interval == opt ?
+                                            Cat.mauve : (opt-touch.has-hover ? Cat.surface1 : Cat.surface0);
+                                        animate background { duration: 80ms; }
+
+                                        Text {
+                                            text: opt >= 60 ? (opt / 60) + "h" : opt + "m";
+                                            font-size: 11px;
+                                            font-weight: setting-notify-interval == opt ? 700 : 400;
+                                            color: setting-notify-interval == opt ? Cat.crust : Cat.subtext0;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+
+                                        opt-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                setting-notify-interval = opt;
+                                                root.save-settings();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionLabel { section-title: "MAINTENANCE"; }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 64px;
+                                border-radius: 10px;
+                                background: Cat.surface0.with-alpha(0.4);
+
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 6px;
+
+                                    Text {
+                                        text: "Cache: " + stats.cache-size;
+                                        font-size: 12px;
+                                        color: Cat.subtext0;
+                                    }
+
+                                    Btn {
+                                        label: "Clean Cache";
+                                        primary: true;
+                                        clicked => { root.clean-package-cache(); }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 64px;
+                                border-radius: 10px;
+                                background: Cat.surface0.with-alpha(0.4);
+
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 6px;
+
+                                    Text {
+                                        text: stats.orphan-count + " orphan packages";
+                                        font-size: 12px;
+                                        color: Cat.subtext0;
+                                    }
+
+                                    Btn {
+                                        label: "Remove Orphans";
+                                        danger: stats.orphan-count > 0;
+                                        enabled: stats.orphan-count > 0;
+                                        clicked => { root.remove-orphans(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionLabel { section-title: "DATA"; }
+
+                        ActionCard {
+                            title: "Export Package List";
+                            subtitle: "Save explicitly installed packages to ~/xpm-packages.txt";
+                            icon-path: icon-file;
+                            clicked => { root.export-package-list(); }
+                        }
+
+                        ActionCard {
+                            title: "Import Package List";
+                            subtitle: "Install packages from ~/xpm-packages.txt";
+                            icon-path: icon-folder;
+                            clicked => { root.import-package-list(); }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionLabel { section-title: "TROUBLESHOOTING"; }
+
+                        ActionCard {
+                            title: "Update Mirrorlists";
+                            subtitle: "Re-rank fastest mirrors";
+                            icon-path: icon-globe;
+                            clicked => { root.update-mirrorlists(); }
+                        }
+
+                        ActionCard {
+                            title: "Fix GnuPG Keyring";
+                            subtitle: "Reset and repopulate keys";
+                            icon-path: icon-refresh;
+                            clicked => { root.fix-keyring(); }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionLabel { section-title: "ABOUT"; }
+
+                        Rectangle {
+                            height: 52px;
+                            border-radius: 10px;
+                            background: Cat.surface0.with-alpha(0.4);
+
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 12px;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    NavIcon {
+                                        d: icon-package;
+                                        icon-color: Cat.mauve;
+                                        width: 22px;
+                                        height: 22px;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 2px;
+                                    Text {
+                                        text: "xPackage Manager";
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: Cat.text;
+                                    }
+                                    Text {
+                                        text: stats.pacman-count + " pacman  /  " + stats.flatpak-count + " flatpak  /  " + stats.orphan-count + " orphans";
+                                        font-size: 11px;
+                                        color: Cat.overlay0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if view == 9: ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 20px;
+
+                    // Stat cards
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionLabel { section-title: "SYSTEM OVERVIEW"; }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 82px;
+                                border-radius: 10px;
+                                background: Cat.blue.with-alpha(0.1);
+                                border-width: 1px;
+                                border-color: Cat.blue.with-alpha(0.25);
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+
+                                    Text {
+                                        text: stats.pacman-count;
+                                        font-size: 28px;
+                                        font-weight: 700;
+                                        color: Cat.blue;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Pacman Packages";
+                                        font-size: 11px;
+                                        color: Cat.overlay1;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 82px;
+                                border-radius: 10px;
+                                background: Cat.teal.with-alpha(0.1);
+                                border-width: 1px;
+                                border-color: Cat.teal.with-alpha(0.25);
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+
+                                    Text {
+                                        text: stats.flatpak-count;
+                                        font-size: 28px;
+                                        font-weight: 700;
+                                        color: Cat.teal;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Flatpak Apps";
+                                        font-size: 11px;
+                                        color: Cat.overlay1;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 82px;
+                                border-radius: 10px;
+                                background: stats.orphan-count > 0 ? Cat.yellow.with-alpha(0.1) : Cat.surface0.with-alpha(0.35);
+                                border-width: 1px;
+                                border-color: stats.orphan-count > 0 ? Cat.yellow.with-alpha(0.25) : Cat.surface0.with-alpha(0.2);
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+
+                                    Text {
+                                        text: stats.orphan-count;
+                                        font-size: 28px;
+                                        font-weight: 700;
+                                        color: stats.orphan-count > 0 ? Cat.yellow : Cat.overlay0;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Orphaned";
+                                        font-size: 11px;
+                                        color: Cat.overlay1;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 82px;
+                                border-radius: 10px;
+                                background: stats.update-count > 0 ? Cat.peach.with-alpha(0.1) : Cat.surface0.with-alpha(0.35);
+                                border-width: 1px;
+                                border-color: stats.update-count > 0 ? Cat.peach.with-alpha(0.25) : Cat.surface0.with-alpha(0.2);
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+
+                                    Text {
+                                        text: stats.update-count;
+                                        font-size: 28px;
+                                        font-weight: 700;
+                                        color: stats.update-count > 0 ? Cat.peach : Cat.overlay0;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Updates";
+                                        font-size: 11px;
+                                        color: Cat.overlay1;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Quick actions
+                    VerticalLayout {
+                        spacing: 8px;
+                        SectionLabel { section-title: "QUICK ACTIONS"; }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 66px;
+                                border-radius: 10px;
+                                background: home-sync-touch.has-hover ? Cat.mauve.with-alpha(0.18) : Cat.surface0.with-alpha(0.4);
+                                opacity: busy ? 0.5 : 1.0;
+                                animate background { duration: 100ms; }
+
+                                home-sync-touch := TouchArea {
+                                    mouse-cursor: busy ? default : pointer;
+                                    clicked => { if !busy { root.sync-databases(); } }
+                                }
+
+                                VerticalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    alignment: center;
+                                    spacing: 3px;
+
+                                    Text {
+                                        text: "Sync & Update";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: Cat.mauve;
+                                    }
+                                    Text {
+                                        text: stats.update-count > 0 ? stats.update-count + " updates pending" : "System is up to date";
+                                        font-size: 11px;
+                                        color: Cat.overlay0;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 66px;
+                                border-radius: 10px;
+                                background: home-cache-touch.has-hover ? Cat.blue.with-alpha(0.15) : Cat.surface0.with-alpha(0.4);
+                                animate background { duration: 100ms; }
+
+                                home-cache-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.clean-package-cache(); }
+                                }
+
+                                VerticalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    alignment: center;
+                                    spacing: 3px;
+
+                                    Text {
+                                        text: "Clean Cache";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: Cat.blue;
+                                    }
+                                    Text {
+                                        text: stats.cache-size + " used";
+                                        font-size: 11px;
+                                        color: Cat.overlay0;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 66px;
+                                border-radius: 10px;
+                                background: home-orphan-touch.has-hover ? (stats.orphan-count > 0 ? Cat.red.with-alpha(0.18) : Cat.surface0.with-alpha(0.5)) : Cat.surface0.with-alpha(0.4);
+                                opacity: stats.orphan-count == 0 ? 0.5 : 1.0;
+                                animate background { duration: 100ms; }
+
+                                home-orphan-touch := TouchArea {
+                                    mouse-cursor: stats.orphan-count > 0 ? pointer : default;
+                                    clicked => { if stats.orphan-count > 0 { root.remove-orphans(); } }
+                                }
+
+                                VerticalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    alignment: center;
+                                    spacing: 3px;
+
+                                    Text {
+                                        text: "Remove Orphans";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: stats.orphan-count > 0 ? Cat.red : Cat.overlay0;
+                                    }
+                                    Text {
+                                        text: stats.orphan-count + " orphaned packages";
+                                        font-size: 11px;
+                                        color: Cat.overlay0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Arch Linux News
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 8px;
+
+                            SectionLabel {
+                                section-title: "ARCH LINUX NEWS";
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                width: news-refresh-label.preferred-width + 18px;
+                                height: 22px;
+                                border-radius: 5px;
+                                background: news-refresh-touch.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.6);
+                                animate background { duration: 80ms; }
+
+                                news-refresh-label := Text {
+                                    text: "Refresh";
+                                    font-size: 10px;
+                                    color: Cat.overlay1;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                news-refresh-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.fetch-news(); }
+                                }
+                            }
+                        }
+
+                        if news-items.length == 0: Rectangle {
+                            height: 56px;
+                            border-radius: 8px;
+                            background: Cat.surface0.with-alpha(0.3);
+
+                            Text {
+                                text: "No news loaded — click Refresh to fetch";
+                                font-size: 12px;
+                                color: Cat.overlay0;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        for item[i] in news-items: Rectangle {
+                            height: 58px;
+                            border-radius: 8px;
+                            background: news-item-touch.has-hover ? Cat.surface0.with-alpha(0.6) : Cat.surface0.with-alpha(0.3);
+                            animate background { duration: 80ms; }
+
+                            news-item-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.open-url(item.url); }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    spacing: 3px;
+
+                                    Text {
+                                        text: item.title;
+                                        font-size: 12.5px;
+                                        font-weight: 500;
+                                        color: Cat.text;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: item.date;
+                                        font-size: 10.5px;
+                                        color: Cat.overlay0;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    NavIcon {
+                                        d: icon-link;
+                                        icon-color: Cat.overlay0;
+                                        width: 13px;
+                                        height: 13px;
+                                    }
+                                }
+                            }
+
+                            if i < news-items.length - 1: Rectangle {
+                                x: 14px;
+                                y: parent.height - 1px;
+                                width: parent.width - 28px;
+                                height: 1px;
+                                background: Cat.surface0;
+                                opacity: 0.5;
+                            }
                         }
                     }
                 }
             }
 
         }
-
-
-    // Enhanced progress bar
-    if busy: Rectangle {
-        y: parent.height - 28px;
-        width: 100%;
-        height: 28px;
-        background: Palette.alternate-background;
-
-        // Progress track at top
-        Rectangle {
-            y: 0;
-            width: 100%;
-            height: 4px;
-            background: Palette.border;
-
-            Rectangle {
-                width: progress > 0 ? parent.width * (progress / 100) : parent.width * 0.3;
-                height: 100%;
-                background: #9b59b6;
-                animate width { duration: 300ms; easing: ease-in-out; }
-            }
-        }
-
-        HorizontalLayout {
-            padding-left: 12px;
-            padding-right: 12px;
-            padding-top: 4px;
-            spacing: 8px;
-            alignment: center;
-
-            if progress == 0: Spinner {
-                indeterminate: true;
-                width: 16px;
-                height: 16px;
-            }
-
-            Text {
-                text: progress-text != "" ? progress-text : status-message;
-                font-size: 11px;
-                color: Palette.foreground;
-                opacity: 0.7;
-                vertical-alignment: center;
-                overflow: elide;
-                horizontal-stretch: 1;
-            }
-
-            if progress > 0: Text {
-                text: progress + "%";
-                font-size: 11px;
-                font-weight: 600;
-                color: #9b59b6;
-                vertical-alignment: center;
-            }
-        }
     }
 
-    // Floating action bar for multi-select
+
     if selected-count > 0: Rectangle {
-        x: (parent.width - 420px) / 2;
+        x: (parent.width - 360px) / 2;
         y: parent.height - 64px;
-        width: 420px;
-        height: 48px;
-        border-radius: 24px;
-        background: Palette.background;
+        width: 360px;
+        height: 44px;
+        border-radius: 22px;
+        background: Cat.surface0;
         drop-shadow-blur: 20px;
-        drop-shadow-color: #000000.with-alpha(0.25);
+        drop-shadow-color: Cat.crust.with-alpha(0.5);
         drop-shadow-offset-y: 4px;
+        border-width: 1px;
+        border-color: Cat.surface1;
 
         HorizontalLayout {
-            padding-left: 20px;
-            padding-right: 12px;
-            spacing: 12px;
+            padding-left: 16px;
+            padding-right: 10px;
+            spacing: 8px;
 
             Text {
                 text: selected-count + " selected";
-                font-size: 14px;
+                font-size: 12px;
                 font-weight: 500;
-                color: Palette.foreground;
+                color: Cat.text;
                 vertical-alignment: center;
             }
 
             Rectangle { horizontal-stretch: 1; }
 
-            // Clear button
             Rectangle {
-                width: 60px;
-                height: 32px;
+                width: 48px;
+                height: 28px;
                 border-radius: 6px;
-                background: fab-clear-touch.has-hover ? Palette.control-background : transparent;
+                background: fab-clear-touch.has-hover ? Cat.surface1 : transparent;
 
                 Text {
                     text: "Clear";
-                    font-size: 12px;
-                    color: Palette.foreground;
-                    opacity: 0.7;
+                    font-size: 11px;
+                    color: Cat.subtext0;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -1038,279 +2697,90 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Install button (enabled only when uninstalled packages selected)
-            Rectangle {
-                width: 72px;
-                height: 32px;
-                border-radius: 6px;
-                background: selected-uninstalled-count > 0 ? #9b59b6 : Palette.control-background;
-
-                Text {
-                    text: "Install";
-                    font-size: 12px;
-                    font-weight: 600;
-                    color: selected-uninstalled-count > 0 ? white : Palette.foreground;
-                    opacity: selected-uninstalled-count > 0 ? 1.0 : 0.3;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-
-                TouchArea {
-                    mouse-cursor: selected-uninstalled-count > 0 ? pointer : default;
-                    clicked => {
-                        if selected-uninstalled-count > 0 { root.bulk-install(); }
-                    }
-                }
+            Btn {
+                label: "Install";
+                primary: selected-uninstalled-count > 0;
+                enabled: selected-uninstalled-count > 0;
+                min-width: 60px;
+                clicked => { root.bulk-install(); }
             }
 
-            // Remove button (enabled only when installed packages selected)
-            Rectangle {
-                width: 72px;
-                height: 32px;
-                border-radius: 6px;
-                background: selected-installed-count > 0 ? #e74c3c : Palette.control-background;
-
-                Text {
-                    text: "Remove";
-                    font-size: 12px;
-                    font-weight: 600;
-                    color: selected-installed-count > 0 ? white : Palette.foreground;
-                    opacity: selected-installed-count > 0 ? 1.0 : 0.3;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-
-                TouchArea {
-                    mouse-cursor: selected-installed-count > 0 ? pointer : default;
-                    clicked => {
-                        if selected-installed-count > 0 { root.bulk-remove(); }
-                    }
-                }
+            Btn {
+                label: "Remove";
+                danger: selected-installed-count > 0;
+                enabled: selected-installed-count > 0;
+                min-width: 64px;
+                clicked => { root.bulk-remove(); }
             }
         }
     }
 
-    // Troubleshoot dropdown menu
-    if show-troubleshoot-menu: Rectangle {
-        width: 100%;
-        height: 100%;
-        // Dismiss when clicking outside
-        TouchArea {
-            clicked => { show-troubleshoot-menu = false; }
-        }
-
-        Rectangle {
-            x: parent.width - 260px;
-            y: 58px;
-            width: 240px;
-            height: 100px;
-            background: Palette.background;
-            border-radius: 10px;
-            drop-shadow-blur: 20px;
-            drop-shadow-color: #000000.with-alpha(0.25);
-            drop-shadow-offset-y: 4px;
-
-            VerticalLayout {
-                padding: 6px;
-                spacing: 2px;
-
-                // Update Mirrorlists
-                Rectangle {
-                    height: 40px;
-                    border-radius: 6px;
-                    background: mirror-touch.has-hover ? #9b59b6.with-alpha(0.15) : transparent;
-
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        spacing: 10px;
-
-                        Text {
-                            text: "🌐";
-                            font-size: 15px;
-                            vertical-alignment: center;
-                        }
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 1px;
-                            Text {
-                                text: "Update Mirrorlists";
-                                font-size: 13px;
-                                font-weight: 500;
-                                color: Palette.foreground;
-                            }
-                            Text {
-                                text: "Re-rank fastest mirrors";
-                                font-size: 11px;
-                                color: Palette.foreground;
-                                opacity: 0.5;
-                            }
-                        }
-                    }
-
-                    mirror-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            show-troubleshoot-menu = false;
-                            root.update-mirrorlists();
-                        }
-                    }
-                }
-
-                // Fix GnuPG Keyring
-                Rectangle {
-                    height: 40px;
-                    border-radius: 6px;
-                    background: keyring-touch.has-hover ? #9b59b6.with-alpha(0.15) : transparent;
-
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        spacing: 10px;
-
-                        Text {
-                            text: "🔑";
-                            font-size: 15px;
-                            vertical-alignment: center;
-                        }
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 1px;
-                            Text {
-                                text: "Fix GnuPG Keyring";
-                                font-size: 13px;
-                                font-weight: 500;
-                                color: Palette.foreground;
-                            }
-                            Text {
-                                text: "Reset & repopulate keys";
-                                font-size: 11px;
-                                color: Palette.foreground;
-                                opacity: 0.5;
-                            }
-                        }
-                    }
-
-                    keyring-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            show-troubleshoot-menu = false;
-                            root.fix-keyring();
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Local package install overlay
     if show-local-install: Rectangle {
         width: 100%;
         height: 100%;
-        background: #000000.with-alpha(0.6);
+        background: Cat.crust.with-alpha(0.7);
 
-        TouchArea {
-            clicked => { root.cancel-local-install(); }
-        }
+        TouchArea { clicked => { root.cancel-local-install(); } }
 
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: 480px;
-            height: 320px;
-            background: Palette.background;
-            border-radius: 16px;
+            width: 440px;
+            height: 300px;
+            background: Cat.base;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Cat.surface0;
             drop-shadow-blur: 30px;
-            drop-shadow-color: #000000.with-alpha(0.3);
+            drop-shadow-color: Cat.crust.with-alpha(0.6);
             drop-shadow-offset-y: 8px;
 
             TouchArea {}
 
             VerticalLayout {
-                padding: 28px;
-                spacing: 20px;
+                padding: 24px;
+                spacing: 16px;
 
-                // Header
                 HorizontalLayout {
-                    spacing: 16px;
-
-                    Rectangle {
-                        width: 56px;
-                        height: 56px;
-                        border-radius: 12px;
-                        background: #9b59b6;
-
-                        Text {
-                            text: "📦";
-                            font-size: 26px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                    spacing: 12px;
+                    NavIcon {
+                        d: icon-package;
+                        icon-color: Cat.mauve;
+                        width: 24px;
+                        height: 24px;
                     }
-
-                    VerticalLayout {
-                        spacing: 4px;
-                        alignment: center;
-
-                        Text {
-                            text: "Install Local Package";
-                            font-size: 20px;
-                            font-weight: 600;
-                            color: Palette.foreground;
-                        }
-
-                        Text {
-                            text: local-package.display-name != "" ? local-package.display-name : "Unknown Package";
-                            font-size: 14px;
-                            color: Palette.foreground;
-                            opacity: 0.7;
-                        }
+                    Text {
+                        text: "Install Local Package";
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: Cat.text;
+                        vertical-alignment: center;
                     }
                 }
 
-                Rectangle { height: 1px; background: Palette.border; }
+                Rectangle { height: 1px; background: Cat.surface0; }
 
-                // Package info
                 VerticalLayout {
-                    spacing: 10px;
-
-                    HorizontalLayout {
-                        Text { text: "Version:"; width: 80px; font-size: 13px; color: Palette.foreground; opacity: 0.6; }
-                        Text { text: local-package.version; font-size: 13px; color: Palette.foreground; }
-                    }
-
-                    HorizontalLayout {
-                        Text { text: "Size:"; width: 80px; font-size: 13px; color: Palette.foreground; opacity: 0.6; }
-                        Text { text: local-package.installed-size; font-size: 13px; color: Palette.foreground; }
-                    }
-
-                    HorizontalLayout {
-                        Text { text: "File:"; width: 80px; font-size: 13px; color: Palette.foreground; opacity: 0.6; }
-                        Text {
-                            text: local-package-path;
-                            font-size: 12px;
-                            color: Palette.foreground;
-                            opacity: 0.8;
-                            overflow: elide;
-                            horizontal-stretch: 1;
-                        }
-                    }
+                    spacing: 8px;
+                    DetailProperty { prop-label: "Name"; prop-value: local-package.display-name != "" ? local-package.display-name : "Unknown"; }
+                    DetailProperty { prop-label: "Version"; prop-value: local-package.version; }
+                    DetailProperty { prop-label: "Size"; prop-value: local-package.installed-size; }
+                    DetailProperty { prop-label: "File"; prop-value: local-package-path; }
                 }
 
                 Rectangle { vertical-stretch: 1; }
 
-                // Actions
                 HorizontalLayout {
-                    spacing: 12px;
+                    spacing: 8px;
                     alignment: end;
 
-                    Button {
-                        text: "Cancel";
+                    Btn {
+                        label: "Cancel";
                         clicked => { root.cancel-local-install(); }
                     }
 
-                    Button {
-                        text: "Install";
+                    Btn {
+                        label: "Install";
                         primary: true;
                         enabled: !busy;
                         clicked => { root.install-local-package(local-package-path); }
@@ -1320,354 +2790,181 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Confirmation popup overlay
-    if show-confirm-popup: Rectangle {
-        width: 100%;
-        height: 100%;
-        background: #000000.with-alpha(0.5);
-
-        TouchArea {
-            clicked => { root.cancel-confirm(); }
-        }
-
-        Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            width: 440px;
-            height: confirm-package-count > 1 ? 420px : 340px;
-            background: Palette.background;
-            border-radius: 16px;
-            drop-shadow-blur: 30px;
-            drop-shadow-color: #000000.with-alpha(0.3);
-            drop-shadow-offset-y: 8px;
-
-            TouchArea {}
-
-            VerticalLayout {
-                padding: 28px;
-                spacing: 16px;
-
-                // Header with icon
-                HorizontalLayout {
-                    spacing: 16px;
-
-                    Rectangle {
-                        width: 48px;
-                        height: 48px;
-                        border-radius: 12px;
-                        background: confirm-action == "remove" || confirm-action == "bulk-remove" ? #e74c3c : #9b59b6;
-
-                        Text {
-                            text: confirm-action == "remove" || confirm-action == "bulk-remove" ? "🗑" : (confirm-action == "update" || confirm-action == "update-all" ? "⬆" : "📦");
-                            font-size: 22px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    VerticalLayout {
-                        spacing: 4px;
-                        alignment: center;
-
-                        Text {
-                            text: confirm-title;
-                            font-size: 18px;
-                            font-weight: 600;
-                            color: Palette.foreground;
-                        }
-
-                        if confirm-package-count > 1: Text {
-                            text: confirm-package-count + " packages";
-                            font-size: 13px;
-                            color: Palette.foreground;
-                            opacity: 0.6;
-                        }
-                    }
-                }
-
-                Rectangle { height: 1px; background: Palette.border; }
-
-                // Package details (single package)
-                if confirm-package-count <= 1: VerticalLayout {
-                    spacing: 8px;
-
-                    HorizontalLayout {
-                        Text { text: "Package:"; width: 70px; font-size: 13px; color: Palette.foreground; opacity: 0.6; }
-                        Text { text: confirm-package-names; font-size: 13px; color: Palette.foreground; overflow: elide; horizontal-stretch: 1; }
-                    }
-
-                    if confirm-version != "": HorizontalLayout {
-                        Text { text: "Version:"; width: 70px; font-size: 13px; color: Palette.foreground; opacity: 0.6; }
-                        Text { text: confirm-version; font-size: 13px; color: Palette.foreground; }
-                    }
-
-                    if confirm-size != "": HorizontalLayout {
-                        Text { text: "Size:"; width: 70px; font-size: 13px; color: Palette.foreground; opacity: 0.6; }
-                        Text { text: confirm-size; font-size: 13px; color: Palette.foreground; }
-                    }
-
-                    if confirm-deps != "": HorizontalLayout {
-                        Text { text: "Deps:"; width: 70px; font-size: 13px; color: Palette.foreground; opacity: 0.6; }
-                        Text { text: confirm-deps; font-size: 13px; color: Palette.foreground; overflow: elide; horizontal-stretch: 1; }
-                    }
-                }
-
-                // Package list (bulk)
-                if confirm-package-count > 1: Rectangle {
-                    vertical-stretch: 1;
-                    background: Palette.alternate-background.with-alpha(0.5);
-                    border-radius: 6px;
-
-                    ScrollView {
-                        VerticalLayout {
-                            padding: 10px;
-                            Text {
-                                text: confirm-package-names;
-                                font-size: 12px;
-                                font-family: "monospace";
-                                color: Palette.foreground;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-                }
-
-                if confirm-package-count <= 1: Rectangle { vertical-stretch: 1; }
-
-                // Action buttons
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: end;
-
-                    Rectangle {
-                        width: 80px;
-                        height: 34px;
-                        border-radius: 6px;
-                        background: cancel-confirm-touch.has-hover ? Palette.control-background : Palette.alternate-background;
-
-                        Text {
-                            text: "Cancel";
-                            font-size: 13px;
-                            color: Palette.foreground;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-
-                        cancel-confirm-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.cancel-confirm(); }
-                        }
-                    }
-
-                    Rectangle {
-                        width: 100px;
-                        height: 34px;
-                        border-radius: 6px;
-                        background: confirm-action == "remove" || confirm-action == "bulk-remove" ? #e74c3c : #9b59b6;
-
-                        Text {
-                            text: confirm-action == "remove" || confirm-action == "bulk-remove" ? "Remove" :
-                                  confirm-action == "update" || confirm-action == "update-all" ? "Update" : "Install";
-                            font-size: 13px;
-                            font-weight: 600;
-                            color: white;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.confirm-operation(); }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Progress popup overlay
     if show-progress-popup: Rectangle {
         width: 100%;
         height: 100%;
-        background: #000000.with-alpha(0.5);
+        background: Cat.crust.with-alpha(0.65);
 
         TouchArea {}
 
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: min(560px, parent.width - 40px);
-            height: min(460px, parent.height - 40px);
-            background: Palette.background;
-            border-radius: 16px;
+            width: min(620px, parent.width - 40px);
+            height: min(500px, parent.height - 40px);
+            background: Cat.base;
+            border-radius: 12px;
             clip: true;
-            drop-shadow-blur: 30px;
-            drop-shadow-color: #000000.with-alpha(0.3);
-            drop-shadow-offset-y: 8px;
+            border-width: 1px;
+            border-color: Cat.surface0;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: Cat.crust.with-alpha(0.7);
+            drop-shadow-offset-y: 10px;
 
             VerticalLayout {
                 spacing: 0;
 
-                // Title bar with X close button
+                // Title bar
                 Rectangle {
-                    height: 44px;
-                    background: Palette.alternate-background.with-alpha(0.5);
+                    height: 48px;
+                    background: Cat.mantle;
 
                     HorizontalLayout {
-                        padding-left: 20px;
+                        padding-left: 16px;
                         padding-right: 10px;
+                        spacing: 10px;
+
+                        if !progress-popup-done: VerticalLayout {
+                            alignment: center;
+                            Spinner { indeterminate: true; width: 16px; height: 16px; }
+                        }
+
+                        if progress-popup-done: VerticalLayout {
+                            alignment: center;
+                            NavIcon {
+                                d: progress-popup-success ? "M20 6L9 17l-5-5" : icon-close;
+                                icon-color: progress-popup-success ? Cat.green : Cat.red;
+                                width: 16px;
+                                height: 16px;
+                            }
+                        }
 
                         Text {
                             text: progress-popup-title;
-                            font-size: 15px;
+                            font-size: 14px;
                             font-weight: 600;
-                            color: Palette.foreground;
+                            color: Cat.text;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
+                            overflow: elide;
                         }
 
-                        // Done indicator
-                        if progress-popup-done: Text {
-                            text: progress-popup-success ? "✓" : "✗";
-                            font-size: 16px;
-                            font-weight: 700;
-                            color: progress-popup-success ? #2ecc71 : #e74c3c;
-                            vertical-alignment: center;
+                        if !progress-popup-done: VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: cancel-label.preferred-width + 20px;
+                                height: 26px;
+                                border-radius: 6px;
+                                background: cancel-touch.has-hover ? Cat.red.with-alpha(0.2) : Cat.surface0;
+                                animate background { duration: 80ms; }
+
+                                cancel-label := Text {
+                                    text: "Cancel";
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: cancel-touch.has-hover ? Cat.red : Cat.overlay0;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    animate color { duration: 80ms; }
+                                }
+
+                                cancel-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.cancel-operation(); }
+                                }
+                            }
                         }
 
-                        // X close button — always visible
+                        if progress-popup-done: VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                border-radius: 6px;
+                                background: prog-close-x.has-hover ? Cat.surface0 : transparent;
+
+                                NavIcon {
+                                    d: icon-close;
+                                    icon-color: Cat.overlay0;
+                                    width: 12px;
+                                    height: 12px;
+                                    x: 8px;
+                                    y: 8px;
+                                }
+
+                                prog-close-x := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.close-progress-popup(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Progress bar + stage
+                Rectangle {
+                    height: 50px;
+                    background: Cat.mantle;
+
+                    Rectangle {
+                        y: 0;
+                        width: 100%;
+                        height: 1px;
+                        background: Cat.surface0;
+                        opacity: 0.6;
+                    }
+
+                    VerticalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 10px;
+                        spacing: 6px;
+
                         Rectangle {
-                            width: 30px;
-                            height: 30px;
-                            border-radius: 6px;
-                            background: prog-close-x.has-hover ? Palette.foreground.with-alpha(0.1) : transparent;
+                            height: 5px;
+                            border-radius: 3px;
+                            background: Cat.surface0;
+
+                            Rectangle {
+                                width: progress-popup-done ? parent.width :
+                                       (progress-popup-percent > 0 ? parent.width * progress-popup-percent / 100 : 4px);
+                                height: 100%;
+                                border-radius: 3px;
+                                background: progress-popup-done ?
+                                            (progress-popup-success ? Cat.green : Cat.red) : Cat.mauve;
+                                animate width { duration: 300ms; easing: ease-in-out; }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            Text {
+                                text: progress-popup-done ?
+                                      (progress-popup-success ? "Completed successfully" : "Operation failed") :
+                                      progress-popup-stage;
+                                font-size: 11px;
+                                color: progress-popup-done ?
+                                       (progress-popup-success ? Cat.green : Cat.red) : Cat.overlay0;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
 
                             Text {
-                                text: "✕";
-                                font-size: 14px;
-                                color: Palette.foreground;
-                                opacity: 0.6;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-
-                            prog-close-x := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.close-progress-popup(); }
+                                text: progress-popup-done ? "done" : progress-popup-percent + "%";
+                                font-size: 11px;
+                                font-weight: 600;
+                                color: progress-popup-done ?
+                                       (progress-popup-success ? Cat.green : Cat.red) : Cat.mauve;
                             }
                         }
                     }
                 }
 
-                Rectangle { height: 1px; background: Palette.border; opacity: 0.3; }
+                Rectangle { height: 1px; background: Cat.surface0; opacity: 0.5; }
 
-                // Progress bar with percentage
-                if !progress-popup-done: Rectangle {
-                    height: 36px;
-
-                    // Bar track
-                    Rectangle {
-                        x: 20px;
-                        y: (parent.height - 14px) / 2;
-                        width: parent.width - 80px;
-                        height: 14px;
-                        border-radius: 7px;
-                        background: Palette.border;
-
-                        // Bar fill
-                        Rectangle {
-                            width: progress-popup-percent > 0 ? parent.width * (progress-popup-percent / 100) : 0;
-                            height: 100%;
-                            border-radius: 7px;
-                            background: #9b59b6;
-                            animate width { duration: 300ms; easing: ease-in-out; }
-                        }
-                    }
-
-                    // Percentage text
-                    Text {
-                        x: parent.width - 56px;
-                        y: 0;
-                        width: 44px;
-                        height: parent.height;
-                        text: progress-popup-percent + "%";
-                        font-size: 13px;
-                        font-weight: 700;
-                        color: #9b59b6;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Done bar (replaces progress bar)
-                if progress-popup-done: Rectangle {
-                    height: 36px;
-
-                    Rectangle {
-                        x: 20px;
-                        y: (parent.height - 14px) / 2;
-                        width: parent.width - 80px;
-                        height: 14px;
-                        border-radius: 7px;
-                        background: progress-popup-success ? #2ecc71 : #e74c3c;
-                    }
-
-                    Text {
-                        x: parent.width - 56px;
-                        y: 0;
-                        width: 44px;
-                        height: parent.height;
-                        text: "100%";
-                        font-size: 13px;
-                        font-weight: 700;
-                        color: progress-popup-success ? #2ecc71 : #e74c3c;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Stage text
-                if !progress-popup-done: Rectangle {
-                    height: 24px;
-
-                    HorizontalLayout {
-                        padding-left: 20px;
-                        padding-right: 20px;
-
-                        Text {
-                            text: "▸ " + progress-popup-stage;
-                            font-size: 11px;
-                            color: Palette.foreground;
-                            opacity: 0.6;
-                            overflow: elide;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                // Done status text
-                if progress-popup-done: Rectangle {
-                    height: 24px;
-
-                    HorizontalLayout {
-                        padding-left: 20px;
-
-                        Text {
-                            text: progress-popup-success ? "▸ Operation completed successfully" : "▸ Operation failed — check output above";
-                            font-size: 11px;
-                            font-weight: 500;
-                            color: progress-popup-success ? #2ecc71 : #e74c3c;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                Rectangle { height: 1px; background: Palette.border; opacity: 0.2; }
-
-                // Live output area
+                // Live log output — always visible
                 Rectangle {
                     vertical-stretch: 1;
-                    background: Palette.background.with-alpha(0.6);
+                    background: Cat.crust;
 
                     ScrollView {
                         viewport-y: min(0px, self.visible-height - self.viewport-height);
@@ -1677,56 +2974,80 @@ export component MainWindow inherits Window {
 
                             Text {
                                 text: progress-popup-output;
-                                font-size: 11px;
+                                font-size: 11.5px;
                                 font-family: "monospace";
-                                color: Palette.foreground;
-                                opacity: 0.8;
+                                color: Cat.text;
+                                opacity: 0.85;
                                 wrap: word-wrap;
                             }
                         }
                     }
                 }
 
-                // User input area — always visible when operation is running
-                if !progress-popup-done: Rectangle {
-                    height: progress-popup-show-input ? 64px : 40px;
-                    background: progress-popup-show-input ? #e67e22.with-alpha(0.08) : Palette.alternate-background.with-alpha(0.5);
-                    animate height { duration: 150ms; }
-                    animate background { duration: 150ms; }
+                // User input prompt (conflict resolution / password / questions)
+                if progress-popup-show-input: Rectangle {
+                    height: 60px;
+                    background: Cat.yellow.with-alpha(0.06);
 
-                    Rectangle { y: 0; width: 100%; height: 1px; background: progress-popup-show-input ? #e67e22.with-alpha(0.3) : Palette.border; opacity: 0.5; }
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; opacity: 0.5; }
 
                     VerticalLayout {
-                        padding: 6px;
+                        padding: 8px;
                         padding-left: 16px;
                         padding-right: 16px;
-                        spacing: 4px;
+                        spacing: 3px;
 
-                        // Prompt text (only when pacman asks something)
-                        if progress-popup-show-input: Text {
-                            text: "⚠ " + progress-popup-prompt;
-                            font-size: 11px;
+                        Text {
+                            text: progress-popup-prompt;
+                            font-size: 10.5px;
                             font-weight: 500;
-                            color: #e67e22;
+                            color: Cat.yellow;
                             overflow: elide;
                         }
 
-                        HorizontalLayout {
-                            spacing: 8px;
-
-                            Text {
-                                text: "❯";
-                                font-size: 12px;
-                                color: #9b59b6;
-                                vertical-alignment: center;
+                        Input {
+                            placeholder: "Type response and press Enter...";
+                            accepted(text) => {
+                                root.progress-popup-send-input(text);
+                                self.text = "";
                             }
+                        }
+                    }
+                }
 
-                            progress-input := LineEdit {
-                                horizontal-stretch: 1;
-                                placeholder-text: progress-popup-show-input ? "Type response and press Enter..." : "Send input to process...";
-                                accepted(text) => {
-                                    root.progress-popup-send-input(text);
-                                    self.text = "";
+                // Footer when done
+                if progress-popup-done: Rectangle {
+                    height: 46px;
+                    background: progress-popup-success ? Cat.green.with-alpha(0.06) : Cat.red.with-alpha(0.06);
+
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; opacity: 0.4; }
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        alignment: end;
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: done-close-label.preferred-width + 28px;
+                                height: 28px;
+                                border-radius: 7px;
+                                background: done-close-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85);
+                                animate background { duration: 80ms; }
+
+                                done-close-label := Text {
+                                    text: "Close";
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: Cat.crust;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                done-close-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.close-progress-popup(); }
                                 }
                             }
                         }
@@ -1736,115 +3057,286 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Terminal popup overlay
-    if show-terminal: Rectangle {
+    if show-conflict-dialog: Rectangle {
         width: 100%;
         height: 100%;
-        background: #000000.with-alpha(0.5);
+        background: Cat.crust.with-alpha(0.72);
 
         TouchArea {}
 
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: min(700px, parent.width - 40px);
-            height: min(500px, parent.height - 40px);
+            width: min(540px, parent.width - 40px);
+            height: min(420px, parent.height - 40px);
+            background: Cat.base;
             border-radius: 12px;
             clip: true;
-            background: Palette.background.with-alpha(0.85);
-            drop-shadow-blur: 50px;
-            drop-shadow-color: #000000.with-alpha(0.35);
-            drop-shadow-offset-y: 8px;
+            border-width: 1px;
+            border-color: Cat.yellow.with-alpha(0.35);
+            drop-shadow-blur: 32px;
+            drop-shadow-color: Cat.crust.with-alpha(0.7);
+            drop-shadow-offset-y: 10px;
 
             VerticalLayout {
-                // Title bar
+                spacing: 0;
+
+                // Header
                 Rectangle {
-                    height: 40px;
-                    background: Palette.alternate-background.with-alpha(0.9);
+                    height: 52px;
+                    background: Cat.yellow.with-alpha(0.08);
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Cat.yellow.with-alpha(0.25);
+                    }
 
                     HorizontalLayout {
-                        padding-left: 14px;
-                        padding-right: 10px;
+                        padding-left: 18px;
+                        padding-right: 18px;
+                        spacing: 12px;
 
-                        Text {
-                            text: terminal-title;
-                            font-size: 13px;
-                            font-weight: 500;
-                            color: Palette.foreground;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                            overflow: elide;
+                        VerticalLayout {
+                            alignment: center;
+                            NavIcon {
+                                d: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4 M12 17h.01";
+                                icon-color: Cat.yellow;
+                                width: 20px;
+                                height: 20px;
+                            }
                         }
 
-                        // Close button (always visible — kills process if still running)
-                        Rectangle {
-                            width: 28px;
-                            height: 28px;
-                            border-radius: 6px;
-                            background: close-touch.has-hover ? Palette.foreground.with-alpha(0.1) : transparent;
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            spacing: 2px;
 
                             Text {
-                                text: "✕";
-                                font-size: 14px;
-                                color: Palette.foreground;
-                                opacity: 0.6;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                                text: "Conflict Detected";
+                                font-size: 15px;
+                                font-weight: 700;
+                                color: Cat.text;
                             }
 
-                            close-touch := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.terminal-close(); }
+                            Text {
+                                text: conflict-can-force ? "File already exists in filesystem" : "Package dependency conflict";
+                                font-size: 11px;
+                                color: Cat.yellow;
                             }
                         }
                     }
                 }
 
-                Rectangle { height: 1px; background: Palette.border; opacity: 0.5; }
-
-                // Terminal output area — semi-transparent
+                // Conflict details (scrollable)
                 Rectangle {
                     vertical-stretch: 1;
-                    background: Palette.background.with-alpha(0.6);
+                    background: Cat.crust;
 
                     ScrollView {
-                        // Auto-scroll to bottom as new output arrives
-                        viewport-y: min(0px, self.visible-height - self.viewport-height);
                         VerticalLayout {
-                            padding: 10px;
+                            padding: 14px;
+
                             Text {
-                                text: terminal-output;
-                                font-size: 13px;
+                                text: conflict-summary;
+                                font-size: 11.5px;
                                 font-family: "monospace";
-                                color: Palette.foreground;
+                                color: Cat.text;
+                                opacity: 0.85;
                                 wrap: word-wrap;
                             }
                         }
                     }
                 }
 
-                // Input area (hidden when done)
-                if !terminal-done: Rectangle {
+                // Advice
+                Rectangle {
                     height: 36px;
-                    background: Palette.alternate-background.with-alpha(0.9);
+                    background: conflict-can-force ? Cat.yellow.with-alpha(0.06) : Cat.red.with-alpha(0.06);
 
-                    Rectangle { y: 0; width: 100%; height: 1px; background: Palette.border; opacity: 0.5; }
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; opacity: 0.5; }
+
+                    Text {
+                        x: 18px;
+                        width: parent.width - 36px;
+                        height: parent.height;
+                        text: conflict-can-force
+                            ? "Force overwrite will replace the conflicting files. Use with caution."
+                            : "This conflict requires manual resolution. Remove the conflicting package first.";
+                        font-size: 10.5px;
+                        color: conflict-can-force ? Cat.yellow : Cat.red;
+                        opacity: 0.8;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                }
+
+                // Buttons
+                Rectangle {
+                    height: 52px;
+                    background: Cat.mantle;
+
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; opacity: 0.5; }
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 10px;
+                        alignment: end;
+
+                        Rectangle {
+                            width: cancel-conf-label.preferred-width + 24px;
+                            height: 30px;
+                            border-radius: 7px;
+                            background: cancel-conf-touch.has-hover ? Cat.surface1 : Cat.surface0;
+                            animate background { duration: 80ms; }
+
+                            cancel-conf-label := Text {
+                                text: "Cancel";
+                                font-size: 12px;
+                                font-weight: 500;
+                                color: Cat.text;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+
+                            cancel-conf-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.conflict-cancel(); }
+                            }
+                        }
+
+                        if conflict-can-force: Rectangle {
+                            width: force-label.preferred-width + 24px;
+                            height: 30px;
+                            border-radius: 7px;
+                            background: force-touch.has-hover ? Cat.yellow : Cat.yellow.with-alpha(0.85);
+                            animate background { duration: 80ms; }
+
+                            force-label := Text {
+                                text: "Force Overwrite";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: Cat.crust;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+
+                            force-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.conflict-force-overwrite(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if show-terminal: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Cat.crust.with-alpha(0.6);
+
+        TouchArea {}
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(640px, parent.width - 40px);
+            height: min(460px, parent.height - 40px);
+            border-radius: 12px;
+            clip: true;
+            background: Cat.base;
+            border-width: 1px;
+            border-color: Cat.surface0;
+            drop-shadow-blur: 30px;
+            drop-shadow-color: Cat.crust.with-alpha(0.6);
+            drop-shadow-offset-y: 8px;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 40px;
+                    background: Cat.mantle;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 8px;
+
+                        Text {
+                            text: terminal-title;
+                            font-size: 13px;
+                            font-weight: 500;
+                            color: Cat.text;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                border-radius: 6px;
+                                background: close-touch.has-hover ? Cat.surface0 : transparent;
+
+                                NavIcon {
+                                    d: icon-close;
+                                    icon-color: Cat.overlay0;
+                                    width: 12px;
+                                    height: 12px;
+                                    x: 8px;
+                                    y: 8px;
+                                }
+
+                                close-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.terminal-close(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Cat.surface0; }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Cat.crust;
+
+                    ScrollView {
+                        viewport-y: min(0px, self.visible-height - self.viewport-height);
+                        VerticalLayout {
+                            padding: 12px;
+                            Text {
+                                text: terminal-output;
+                                font-size: 12px;
+                                font-family: "monospace";
+                                color: Cat.text;
+                                opacity: 0.9;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                if !terminal-done: Rectangle {
+                    height: 38px;
+                    background: Cat.mantle;
+
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; }
 
                     HorizontalLayout {
                         padding-left: 12px;
                         padding-right: 12px;
                         spacing: 8px;
 
-                        Text {
-                            text: "❯";
-                            font-size: 13px;
-                            color: #9b59b6;
-                            vertical-alignment: center;
-                        }
-
-                        term-input := LineEdit {
+                        Input {
                             horizontal-stretch: 1;
-                            placeholder-text: "Type response and press Enter...";
+                            placeholder: "Type response...";
                             accepted(text) => {
                                 root.terminal-send-input(text);
                                 self.text = "";
@@ -1853,19 +3345,26 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Done status bar
                 if terminal-done: Rectangle {
-                    height: 30px;
-                    background: terminal-success ? #2ecc71.with-alpha(0.12) : #e74c3c.with-alpha(0.12);
+                    height: 32px;
+                    background: terminal-success ? Cat.green.with-alpha(0.1) : Cat.red.with-alpha(0.1);
 
                     HorizontalLayout {
                         padding-left: 14px;
+                        spacing: 8px;
+
+                        NavIcon {
+                            d: terminal-success ? "M20 6L9 17l-5-5" : icon-close;
+                            icon-color: terminal-success ? Cat.green : Cat.red;
+                            width: 14px;
+                            height: 14px;
+                        }
 
                         Text {
-                            text: terminal-success ? "✓ Completed successfully" : "✗ Operation failed";
-                            font-size: 12px;
+                            text: terminal-success ? "Completed successfully" : "Operation failed";
+                            font-size: 11px;
                             font-weight: 500;
-                            color: terminal-success ? #2ecc71 : #e74c3c;
+                            color: terminal-success ? Cat.green : Cat.red;
                             vertical-alignment: center;
                         }
                     }
@@ -1873,5 +3372,4 @@ export component MainWindow inherits Window {
             }
         }
     }
-
 }

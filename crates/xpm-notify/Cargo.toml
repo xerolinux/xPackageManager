@@ -1,0 +1,10 @@
+[package]
+name = "xpm-notify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Background update notification daemon for xPackageManager"
+
+[[bin]]
+name = "xpm-notify"
+path = "src/main.rs"

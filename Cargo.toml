@@ -3,10 +3,10 @@ resolver = "2"
 members = [
     "crates/xpm-core",
     "crates/xpm-alpm",
-    "crates/xpm-pacman",
     "crates/xpm-flatpak",
     "crates/xpm-service",
     "crates/xpm-ui",
+    "crates/xpm-notify",
 ]
 
 [workspace.package]
@@ -17,33 +17,20 @@ authors = ["xPackageManager Contributors"]
 repository = "https://github.com/example/xpackagemanager"
 
 [workspace.dependencies]
-# Async runtime
 tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "sync", "macros"] }
 async-trait = "0.1"
-
-# UI Framework - Slint
 slint = { version = "1.9", default-features = false, features = ["backend-qt", "backend-winit", "renderer-femtovg", "compat-1-2"] }
-
-# Package manager backends
 alpm = "5.0"
 libflatpak = "0.7"
-
-# Error handling
 thiserror = "2.0"
 anyhow = "1.0"
-
-# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# Logging
+quick-xml = "0.37"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-
-# Internal crates
 xpm-core = { path = "crates/xpm-core" }
 xpm-alpm = { path = "crates/xpm-alpm" }
-xpm-pacman = { path = "crates/xpm-pacman" }
 xpm-flatpak = { path = "crates/xpm-flatpak" }
 xpm-service = { path = "crates/xpm-service" }
 

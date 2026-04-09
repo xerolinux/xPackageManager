@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=xPackageManager Update Notifier
+Comment=Background update notification daemon for xPackageManager
+Exec=xpm-notify
+Icon=system-software-update
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel
+Hidden=false
+NoDisplay=true

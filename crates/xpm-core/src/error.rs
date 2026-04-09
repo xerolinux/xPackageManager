@@ -1,8 +1,6 @@
-//! Error types for xPackageManager.
-
 use thiserror::Error;
 
-/// The main error type for xPackageManager operations.
+// covers basically every way a package op can go wrong
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Package not found: {0}")]
@@ -42,5 +40,4 @@ pub enum Error {
     Other(String),
 }
 
-/// A type alias for Results using our Error type.
 pub type Result<T> = std::result::Result<T, Error>;
