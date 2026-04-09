@@ -13,31 +13,16 @@ A modern package manager for Arch Linux supporting pacman (via libalpm) and Flat
 
 ## Building
 
-### Prerequisites
-
-- Rust (Edition 2024)
-- Qt 6.2+ with QtQuick and QtQuickControls2
-- libalpm (pacman library)
-- flatpak development libraries
-- CMake 3.24+ (optional, for CMake integration)
-
 ### Arch Linux Dependencies
 
 ```bash
-sudo pacman -S rust qt6-base qt6-declarative qt6-quickcontrols2 pacman flatpak
+sudo pacman -S rust flatpak
 ```
 
 ### Build with Cargo
 
 ```bash
 cargo build --release
-```
-
-### Build with CMake (optional)
-
-```bash
-cmake -B build
-cmake --build build
 ```
 
 ## Running

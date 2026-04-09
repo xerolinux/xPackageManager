@@ -45,10 +45,12 @@ enum UiMessage {
     ProgressHidePrompt,
     OperationDone(bool),
     ShowTerminalFallback(String),
-    NewsLoaded(Vec<(String, String, String)>),
+    ActivityLoaded(Vec<ActivityItem>),
+    SysInfoLoaded(SysInfo),
     ShowConflict { summary: String, can_force: bool },
     FlatpakRemotesLoaded(Vec<String>),
     RemoteAppsLoaded(Vec<PackageData>),
+    RemoteAppsFiltered { serial: u64, apps: Vec<PackageData>, total_matches: usize },
     FlatpakDetailReady {
         name: String,
         summary: String,
@@ -58,6 +60,7 @@ enum UiMessage {
     FlatpakScreenshotReady(String),
     FlatpakIconReady(String),
     FlatpakAddonsReady(Vec<PackageData>),
+    FlatpakPageAppended(Vec<PackageData>),
     PacmanReposLoaded(Vec<String>),
     RepoPackagesLoaded(Vec<PackageData>),
     RepoPkgDetail(String),
@@ -862,84 +865,182 @@ fn parse_conflict_summary(output: &str) -> (String, bool) {
 }
 
 
-fn fetch_arch_news() -> Vec<(String, String, String)> {
-    let output = match std::process::Command::new("curl")
-        .args([
-            "-s",
-            "--max-time", "10",
-            "--user-agent", "xPackageManager/1.0",
-            "https://archlinux.org/feeds/news/",
-        ])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
+fn load_recent_activity() -> Vec<ActivityItem> {
+    let content = match std::fs::read_to_string("/var/log/pacman.log") {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
     };
+    let mut items: Vec<ActivityItem> = content
+        .lines()
+        .filter_map(|line| {
+            // Format: [2024-01-15T10:30:00+0000] [ALPM] installed pkg (ver)
+            let alpm_pos = line.find("] [ALPM] ")?;
+            let rest = &line[alpm_pos + 9..];
+            let (action, pkg_part) = if rest.starts_with("installed ") {
+                ("installed", &rest[10..])
+            } else if rest.starts_with("removed ") {
+                ("removed", &rest[8..])
+            } else if rest.starts_with("upgraded ") {
+                ("upgraded", &rest[9..])
+            } else {
+                return None;
+            };
+            let pkg = pkg_part.split_whitespace().next().unwrap_or("").to_string();
+            if pkg.is_empty() { return None; }
 
-    let body = String::from_utf8_lossy(&output.stdout);
-    parse_rss_news(&body)
-}
+            // Parse date from [2024-01-15T10:30:00+0000]
+            let date = line.strip_prefix('[')
+                .and_then(|s| s.find(']').map(|e| &s[..e]))
+                .and_then(|s| s.get(..10))
+                .unwrap_or("")
+                .to_string();
 
-fn parse_rss_news(body: &str) -> Vec<(String, String, String)> {
-    let mut items = Vec::new();
-    let mut remaining = body;
-
-    while let Some(start) = remaining.find("<item>") {
-        remaining = &remaining[start + 6..];
-        let end = remaining.find("</item>").unwrap_or(remaining.len());
-        let item_xml = &remaining[..end];
-
-        let title = extract_xml_tag(item_xml, "title");
-        let link  = extract_xml_tag(item_xml, "link");
-        let date  = extract_xml_tag(item_xml, "pubDate");
-
-        if !title.is_empty() {
-            items.push((title, format_rss_date(&date), link));
-        }
-
-        if end >= remaining.len() { break; }
-        remaining = &remaining[end + 7..];
-    }
-
-    items.truncate(10);
+            Some(ActivityItem {
+                action: SharedString::from(action),
+                package: SharedString::from(pkg.as_str()),
+                date: SharedString::from(date.as_str()),
+            })
+        })
+        .collect();
+    items.reverse();
+    items.truncate(14);
     items
 }
 
-fn decode_html_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-     .replace("&lt;", "<")
-     .replace("&gt;", ">")
-     .replace("&quot;", "\"")
-     .replace("&#39;", "'")
-     .replace("&apos;", "'")
-     .replace("&#8220;", "\u{201C}")
-     .replace("&#8221;", "\u{201D}")
-     .replace("&#8230;", "…")
-     .replace("&nbsp;", " ")
-}
+fn load_sys_info() -> SysInfo {
+    // Kernel version
+    let kernel = std::fs::read_to_string("/proc/version")
+        .unwrap_or_default()
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or("unknown")
+        .to_string();
 
-fn extract_xml_tag(xml: &str, tag: &str) -> String {
-    let open  = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
-    if let Some(s) = xml.find(&open) {
-        let s = s + open.len();
-        if let Some(e) = xml[s..].find(&close) {
-            let content = xml[s..s + e].trim();
-            let content = content.strip_prefix("<![CDATA[").unwrap_or(content);
-            let content = content.strip_suffix("]]>").unwrap_or(content);
-            return decode_html_entities(content.trim());
-        }
-    }
-    String::new()
-}
-
-fn format_rss_date(date_str: &str) -> String {
-    // RSS dates: "Mon, 07 Apr 2025 00:00:00 +0000" → "Apr 07, 2025"
-    let parts: Vec<&str> = date_str.trim().split_whitespace().collect();
-    if parts.len() >= 4 {
-        format!("{} {}, {}", parts[2], parts[1], parts[3])
+    // Uptime
+    let uptime_secs: u64 = std::fs::read_to_string("/proc/uptime")
+        .unwrap_or_default()
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|f| f as u64)
+        .unwrap_or(0);
+    let uptime = if uptime_secs >= 86400 {
+        format!("{}d {}h {}m", uptime_secs / 86400, (uptime_secs % 86400) / 3600, (uptime_secs % 3600) / 60)
+    } else if uptime_secs >= 3600 {
+        format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
     } else {
-        date_str.to_string()
+        format!("{}m", uptime_secs / 60)
+    };
+
+    // CPU model (first model name line, shortened)
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .unwrap_or_default()
+        .lines()
+        .find(|l| l.starts_with("model name"))
+        .and_then(|l| l.split(':').nth(1))
+        .map(|s| {
+            s.trim()
+             .replace("(R)", "")
+             .replace("(TM)", "")
+             .replace("  ", " ")
+             .trim()
+             .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // RAM from /proc/meminfo (kB → MB)
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let mem_total_kb: u64 = meminfo.lines()
+        .find(|l| l.starts_with("MemTotal:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let mem_avail_kb: u64 = meminfo.lines()
+        .find(|l| l.starts_with("MemAvailable:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let used_mb = (mem_total_kb.saturating_sub(mem_avail_kb)) / 1024;
+    let total_mb = mem_total_kb / 1024;
+    let (ram_used, ram_total) = if total_mb >= 1024 {
+        (format!("{:.1}G", used_mb as f64 / 1024.0), format!("{:.1}G", total_mb as f64 / 1024.0))
+    } else {
+        (format!("{}M", used_mb), format!("{}M", total_mb))
+    };
+
+    // GPU — probe /sys/class/drm (fast, no subprocess)
+    let gpu = (|| -> Option<String> {
+        for entry in std::fs::read_dir("/sys/class/drm").ok()?.flatten() {
+            let name = entry.file_name();
+            let s = name.to_string_lossy();
+            if !s.starts_with("card") || s.contains('-') { continue; }
+            let vendor_path = entry.path().join("device/vendor");
+            let device_path = entry.path().join("device/device");
+            if let (Ok(vendor), Ok(device)) = (
+                std::fs::read_to_string(&vendor_path),
+                std::fs::read_to_string(&device_path),
+            ) {
+                let v = vendor.trim().to_lowercase();
+                let prefix = if v == "0x10de" { "NVIDIA" }
+                    else if v == "0x1002" { "AMD" }
+                    else if v == "0x8086" { "Intel" }
+                    else { "GPU" };
+                let dev = device.trim().to_string();
+                let uevent = entry.path().join("device/uevent");
+                if let Ok(ue) = std::fs::read_to_string(uevent) {
+                    if let Some(line) = ue.lines().find(|l| l.starts_with("PCI_ID=")) {
+                        let pci_id = line.trim_start_matches("PCI_ID=");
+                        return Some(format!("{} ({})", prefix, pci_id));
+                    }
+                }
+                return Some(format!("{} {}", prefix, dev));
+            }
+        }
+        None
+    })().unwrap_or_default();
+
+    // Disk usage for / via /proc/mounts + statvfs (no subprocess needed)
+    let (disk_used, disk_total) = (|| -> Option<(String, String)> {
+        // Use df -h / which is universally available and fast
+        let out = std::process::Command::new("df")
+            .args(["-h", "/"])
+            .output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        // df -h / output: header line then data line
+        // Filesystem  Size  Used  Avail  Use%  Mounted on
+        let line = text.lines().nth(1)?;
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // col 1=Size, 2=Used
+        let total = parts.get(1)?.to_string();
+        let used = parts.get(2)?.to_string();
+        Some((used, total))
+    })().unwrap_or_default();
+
+    // Hostname
+    let hostname = std::fs::read_to_string("/etc/hostname")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    // Distro name from /etc/os-release
+    let distro = std::fs::read_to_string("/etc/os-release")
+        .unwrap_or_default()
+        .lines()
+        .find(|l| l.starts_with("NAME="))
+        .map(|l| l.trim_start_matches("NAME=").trim_matches('"').to_string())
+        .unwrap_or_default();
+
+    SysInfo {
+        kernel: SharedString::from(kernel.as_str()),
+        uptime: SharedString::from(uptime.as_str()),
+        cpu: SharedString::from(cpu.as_str()),
+        ram_used: SharedString::from(ram_used.as_str()),
+        ram_total: SharedString::from(ram_total.as_str()),
+        gpu: SharedString::from(gpu.as_str()),
+        disk_used: SharedString::from(disk_used.as_str()),
+        disk_total: SharedString::from(disk_total.as_str()),
+        hostname: SharedString::from(hostname.as_str()),
+        distro: SharedString::from(distro.as_str()),
     }
 }
 
@@ -970,6 +1071,11 @@ fn main() {
     // Full parsed flatpak app list for client-side filtering
     let flatpak_app_store: Arc<Mutex<Vec<CachedRemoteApp>>> = Arc::new(Mutex::new(Vec::new()));
     let flatpak_installed_ids: Arc<Mutex<std::collections::HashSet<String>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // Serial counter: incremented on each filter call, background threads check it before sending
+    let flatpak_filter_serial: Arc<std::sync::atomic::AtomicU64> =
+        Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    const FLATPAK_PAGE_SIZE: usize = 150;  // max rows shown at once
 
     // Load cached packages immediately for fast startup
     if let Some(cache) = load_package_cache() {
@@ -991,13 +1097,16 @@ fn main() {
         window.set_update_packages(ModelRc::new(VecModel::from(updates)));
         window.set_flatpak_packages(ModelRc::new(VecModel::from(flatpak)));
         window.set_stats(stats);
-        window.set_loading(false);
     }
+    // Always clear loading immediately — stat cards should never be stuck in skeleton state.
+    // The background thread will overwrite stats/packages when it finishes.
+    window.set_loading(false);
 
     let selected_packages: Rc<RefCell<Vec<(String, i32, bool)>>> = Rc::new(RefCell::new(Vec::new()));
 
     let page_size: i32 = 50;
     let full_installed: Rc<RefCell<Vec<PackageData>>> = Rc::new(RefCell::new(Vec::new()));
+    let repo_packages_full: Rc<RefCell<Vec<PackageData>>> = Rc::new(RefCell::new(Vec::new()));
 
     let tx_load = tx.clone();
     let tx_search = tx.clone();
@@ -1009,6 +1118,8 @@ fn main() {
     let mut pending_terminal = String::new();
     let mut last_term_flush = std::time::Instant::now();
     let full_installed_timer = full_installed.clone();
+    let repo_full_timer = repo_packages_full.clone();
+    let filter_serial_timer = flatpak_filter_serial.clone();
 
     timer.start(TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
         if let Some(window) = window_weak.upgrade() {
@@ -1166,15 +1277,11 @@ fn main() {
                         window.set_flatpak_detail_developer(SharedString::from(&developer));
                         window.set_show_flatpak_detail(true);
                     }
-                    UiMessage::NewsLoaded(items) => {
-                        let news: Vec<NewsItem> = items.into_iter().map(|(title, date, url)| {
-                            NewsItem {
-                                title: SharedString::from(&title),
-                                date: SharedString::from(&date),
-                                url: SharedString::from(&url),
-                            }
-                        }).collect();
-                        window.set_news_items(ModelRc::new(VecModel::from(news)));
+                    UiMessage::ActivityLoaded(items) => {
+                        window.set_activity_items(ModelRc::new(VecModel::from(items)));
+                    }
+                    UiMessage::SysInfoLoaded(info) => {
+                        window.set_sys_info(info);
                     }
                     UiMessage::ShowTerminalFallback(accumulated) => {
                         window.set_show_progress_popup(false);
@@ -1196,10 +1303,21 @@ fn main() {
                         }
                     }
                     UiMessage::RemoteAppsLoaded(apps) => {
-                        let rows = to_app_rows(apps.clone());
                         window.set_remote_apps(ModelRc::new(VecModel::from(apps)));
-                        window.set_flatpak_app_rows(ModelRc::new(VecModel::from(rows)));
                         window.set_remote_apps_loading(false);
+                        window.set_flatpak_store_ready(true);
+                    }
+                    UiMessage::RemoteAppsFiltered { serial, apps, total_matches } => {
+                        // u64::MAX is a sentinel used by preload/browse paths — always accept
+                        // For normal filter serials, drop stale results from previous keystrokes
+                        let current = filter_serial_timer.load(std::sync::atomic::Ordering::Relaxed);
+                        if serial == u64::MAX || serial == current {
+                            window.set_flatpak_total_matches(total_matches as i32);
+                            window.set_remote_apps(ModelRc::new(VecModel::from(apps)));
+                            window.set_remote_apps_loading(false);
+                            window.set_flatpak_store_ready(true);
+                            window.set_flatpak_loading_more(false);
+                        }
                     }
                     UiMessage::FlatpakScreenshotReady(path) => {
                         if let Ok(img) = slint::Image::load_from_path(std::path::Path::new(&path)) {
@@ -1212,7 +1330,19 @@ fn main() {
                         }
                     }
                     UiMessage::FlatpakAddonsReady(addons) => {
+                        let installed_count = addons.iter().filter(|a| a.installed).count() as i32;
+                        window.set_flatpak_addons_installed_count(installed_count);
                         window.set_flatpak_addons(ModelRc::new(VecModel::from(addons)));
+                    }
+                    UiMessage::FlatpakPageAppended(new_items) => {
+                        // Append next page to the existing remote-apps model
+                        let model = window.get_remote_apps();
+                        let mut current: Vec<PackageData> = (0..model.row_count())
+                            .filter_map(|i| model.row_data(i))
+                            .collect();
+                        current.extend(new_items);
+                        window.set_remote_apps(ModelRc::new(VecModel::from(current)));
+                        window.set_flatpak_loading_more(false);
                     }
                     UiMessage::PacmanReposLoaded(repos) => {
                         if let Some(first) = repos.first() {
@@ -1225,8 +1355,10 @@ fn main() {
                         )));
                     }
                     UiMessage::RepoPackagesLoaded(pkgs) => {
+                        *repo_full_timer.borrow_mut() = pkgs.clone();
                         window.set_repo_packages(ModelRc::new(VecModel::from(pkgs)));
                         window.set_repo_loading(false);
+                        window.set_repo_search(SharedString::from(""));
                     }
                     UiMessage::RepoPkgDetail(desc) => {
                         window.set_repo_detail_description(SharedString::from(&desc));
@@ -1257,6 +1389,10 @@ fn main() {
     let config = load_config();
     let check_updates_on_start = config.check_updates_on_start;
 
+    // Fire homepage data immediately — these are pure /proc reads, sub-millisecond
+    let _ = tx.send(UiMessage::SysInfoLoaded(load_sys_info()));
+    let _ = tx.send(UiMessage::ActivityLoaded(load_recent_activity()));
+
     let tx_initial = tx.clone();
     thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
@@ -1264,9 +1400,29 @@ fn main() {
             let _ = tx_initial.send(UiMessage::SetLoading(true));
             load_packages_async(&tx_initial, check_updates_on_start).await;
         });
-        let news = fetch_arch_news();
-        let _ = tx_initial.send(UiMessage::NewsLoaded(news));
     });
+
+    // Preload flatpak appstream in background so first Flatpaks click is instant
+    {
+        let store_preload = flatpak_app_store.clone();
+        let ids_preload = flatpak_installed_ids.clone();
+        let tx_preload = tx.clone();
+        thread::spawn(move || {
+            let remotes = fetch_flatpak_remotes();
+            let target = remotes.first().cloned().unwrap_or_else(|| "flathub".to_string());
+            // Send remotes first so sidebar populates
+            let _ = tx_preload.send(UiMessage::FlatpakRemotesLoaded(remotes));
+            let (all_apps, installed) = load_remote_apps(&target);
+            *ids_preload.lock().unwrap() = installed.clone();
+            // Build first page immediately for instant display
+            let all_pkg = apps_to_package_data(&all_apps, &installed, &target, "All", "");
+            let total = all_pkg.len();
+            let page: Vec<PackageData> = all_pkg.into_iter().take(FLATPAK_PAGE_SIZE).collect();
+            *store_preload.lock().unwrap() = all_apps;
+            // Use u64::MAX sentinel — initial population is always accepted by the message loop
+            let _ = tx_preload.send(UiMessage::RemoteAppsFiltered { serial: u64::MAX, apps: page, total_matches: total });
+        });
+    }
 
     if let Some(ref path) = local_package_path {
         if let Some(pkg_info) = get_local_package_info(path) {
@@ -1315,6 +1471,33 @@ fn main() {
                 window.set_installed_packages(ModelRc::new(VecModel::from(page_data)));
                 window.set_total_pages(total);
             }
+        }
+    });
+
+    // Filter installed packages client-side (instant, no network)
+    let full_installed_filter = full_installed.clone();
+    let window_weak_fi = window.as_weak();
+    window.on_filter_installed(move |query| {
+        if let Some(w) = window_weak_fi.upgrade() {
+            let q = query.to_string().to_lowercase();
+            let data = full_installed_filter.borrow();
+            let filtered: Vec<PackageData> = if q.is_empty() {
+                // Reset to first page
+                let ps = 50usize;
+                let total = ((data.len() + ps - 1) / ps).max(1) as i32;
+                w.set_total_pages(total);
+                w.set_current_page(0);
+                data.iter().take(ps).cloned().collect()
+            } else {
+                let filtered: Vec<PackageData> = data.iter().filter(|p| {
+                    p.name.to_lowercase().contains(&q)
+                        || p.display_name.to_lowercase().contains(&q)
+                }).cloned().collect();
+                w.set_total_pages(1);
+                w.set_current_page(0);
+                filtered
+            };
+            w.set_installed_packages(ModelRc::new(VecModel::from(filtered)));
         }
     });
 
@@ -1802,7 +1985,7 @@ fn main() {
         let _ = tx_close.send(UiMessage::HideTerminal);
     });
 
-    // Flatpak remote browser
+    // Flatpak remote browser — serves capped first page from in-memory store if preloaded
     let tx_remotes = tx.clone();
     let window_weak_remote = window.as_weak();
     let store_remote = flatpak_app_store.clone();
@@ -1811,6 +1994,30 @@ fn main() {
         let tx = tx_remotes.clone();
         let remote_str = remote.to_string();
         info!("Browse remote: {}", remote_str);
+
+        // If the store is already populated (preloaded), serve first page immediately
+        {
+            let store = store_remote.lock().unwrap();
+            if !store.is_empty() {
+                let ids = ids_remote.lock().unwrap();
+                let target = if remote_str.is_empty() {
+                    "flathub".to_string()
+                } else {
+                    remote_str.clone()
+                };
+                // Only deliver first FLATPAK_PAGE_SIZE items for instant render
+                let all = apps_to_package_data(&store, &ids, &target, "All", "");
+                let total = all.len();
+                let page: Vec<PackageData> = all.into_iter().take(FLATPAK_PAGE_SIZE).collect();
+                drop(ids);
+                drop(store);
+                // u64::MAX sentinel — browse result always accepted
+                let _ = tx.send(UiMessage::RemoteAppsFiltered { serial: u64::MAX, apps: page, total_matches: total });
+                return;
+            }
+        }
+
+        // Store not ready yet — show loading and fetch in background
         if let Some(w) = window_weak_remote.upgrade() {
             w.set_remote_apps_loading(true);
         }
@@ -1829,29 +2036,173 @@ fn main() {
             };
             let (all_apps, installed) = load_remote_apps(&target);
             *ids.lock().unwrap() = installed.clone();
-            let pkg_list = apps_to_package_data(&all_apps, &installed, &target, "All", "");
+            let all = apps_to_package_data(&all_apps, &installed, &target, "All", "");
             *store.lock().unwrap() = all_apps;
-            let _ = tx.send(UiMessage::RemoteAppsLoaded(pkg_list));
+            let total = all.len();
+            let page: Vec<PackageData> = all.into_iter().take(FLATPAK_PAGE_SIZE).collect();
+            // u64::MAX sentinel — background browse fetch always accepted
+            let _ = tx.send(UiMessage::RemoteAppsFiltered { serial: u64::MAX, apps: page, total_matches: total });
         });
     });
 
-    // Filter flatpak apps client-side
+    // Filter flatpak apps — background thread, stale results dropped via serial counter
     let tx_filter = tx.clone();
     let store_filter = flatpak_app_store.clone();
     let ids_filter = flatpak_installed_ids.clone();
     let window_weak_filter = window.as_weak();
+    let serial_filter = flatpak_filter_serial.clone();
     window.on_filter_flatpak(move |category, search| {
         let cat = category.to_string();
         let q = search.to_string();
-        let store = store_filter.lock().unwrap();
-        let ids = ids_filter.lock().unwrap();
         let remote = if let Some(w) = window_weak_filter.upgrade() {
             w.get_selected_remote().to_string()
         } else {
             "flathub".to_string()
         };
-        let filtered = apps_to_package_data(&store, &ids, &remote, &cat, &q);
-        let _ = tx_filter.send(UiMessage::RemoteAppsLoaded(filtered));
+        // Bump serial immediately — any in-flight result with the old serial will be dropped
+        let my_serial = serial_filter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let store = store_filter.clone();
+        let ids = ids_filter.clone();
+        let tx = tx_filter.clone();
+        let serial_check = serial_filter.clone();
+        thread::spawn(move || {
+            let store = store.lock().unwrap();
+            let ids = ids.lock().unwrap();
+            // Check if already superseded before doing expensive work
+            if serial_check.load(std::sync::atomic::Ordering::Relaxed) != my_serial {
+                return;
+            }
+            let all = apps_to_package_data(&store, &ids, &remote, &cat, &q);
+            drop(store);
+            drop(ids);
+            // Check again after the filter work
+            if serial_check.load(std::sync::atomic::Ordering::Relaxed) != my_serial {
+                return;
+            }
+            let total = all.len();
+            // Cap to FLATPAK_PAGE_SIZE — enough for display, avoids VecModel of 2000 items
+            let page: Vec<PackageData> = all.into_iter().take(FLATPAK_PAGE_SIZE).collect();
+            let _ = tx.send(UiMessage::RemoteAppsFiltered { serial: my_serial, apps: page, total_matches: total });
+        });
+    });
+
+    // Load next page of flatpak results
+    let tx_load_more = tx.clone();
+    let store_load_more = flatpak_app_store.clone();
+    let ids_load_more = flatpak_installed_ids.clone();
+    let window_weak_more = window.as_weak();
+    let serial_load_more = flatpak_filter_serial.clone();
+    window.on_load_more_flatpaks(move || {
+        let tx = tx_load_more.clone();
+        let store = store_load_more.clone();
+        let ids = ids_load_more.clone();
+        // Capture current offset and filter state from UI thread
+        let (offset, remote, category, search) = if let Some(w) = window_weak_more.upgrade() {
+            (
+                w.get_remote_apps().row_count(),
+                w.get_selected_remote().to_string(),
+                w.get_selected_flatpak_category().to_string(),
+                w.get_flatpak_search().to_string(),
+            )
+        } else {
+            return;
+        };
+        let my_serial = serial_load_more.load(std::sync::atomic::Ordering::Relaxed);
+        thread::spawn(move || {
+            let store = store.lock().unwrap();
+            let ids = ids.lock().unwrap();
+            let all = apps_to_package_data(&store, &ids, &remote, &category, &search);
+            drop(store);
+            drop(ids);
+            // Slice the next page starting from the current offset
+            let next_page: Vec<PackageData> = all
+                .into_iter()
+                .skip(offset)
+                .take(FLATPAK_PAGE_SIZE)
+                .collect();
+            // Only deliver if the filter hasn't changed since the button was clicked
+            let current_serial = my_serial; // we captured it before spawning
+            let _ = tx.send(UiMessage::FlatpakPageAppended(next_page));
+            let _ = current_serial; // suppress unused warning
+        });
+    });
+
+    // Toggle individual flatpak selection (checkbox in flat list)
+    let win_toggle_fk = window.as_weak();
+    window.on_toggle_flatpak_selected(move |app_id, checked| {
+        if let Some(w) = win_toggle_fk.upgrade() {
+            let model = w.get_remote_apps();
+            let updated: Vec<PackageData> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .map(|mut p| {
+                    if p.name.as_str() == app_id.as_str() {
+                        p.selected = checked;
+                    }
+                    p
+                })
+                .collect();
+            let sel_count = updated.iter().filter(|p| p.selected).count() as i32;
+            let sel_installed = updated.iter().filter(|p| p.selected && p.installed).count() as i32;
+            let sel_uninstalled = updated.iter().filter(|p| p.selected && !p.installed).count() as i32;
+            w.set_remote_apps(ModelRc::new(VecModel::from(updated)));
+            w.set_selected_count(sel_count);
+            w.set_selected_installed_count(sel_installed);
+            w.set_selected_uninstalled_count(sel_uninstalled);
+        }
+    });
+
+    // Batch install selected flatpaks
+    let win_batch_fi = window.as_weak();
+    let tx_bfi = tx.clone();
+    window.on_batch_flatpak_install(move || {
+        if let Some(w) = win_batch_fi.upgrade() {
+            let model = w.get_remote_apps();
+            let ids: Vec<String> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .filter(|p| p.selected && !p.installed)
+                .map(|p| p.name.to_string())
+                .collect();
+            if ids.is_empty() {
+                return;
+            }
+            let tx = tx_bfi.clone();
+            let title = format!("Installing {} Flatpak(s)...", ids.len());
+            let _ = tx.send(UiMessage::ShowTerminal(title));
+            thread::spawn(move || {
+                let mut args = vec!["install".to_string(), "-y".to_string(), "flathub".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("flatpak")
+                    .args(&args)
+                    .status();
+            });
+        }
+    });
+
+    // Batch remove selected flatpaks
+    let win_batch_fr = window.as_weak();
+    let tx_bfr = tx.clone();
+    window.on_batch_flatpak_remove(move || {
+        if let Some(w) = win_batch_fr.upgrade() {
+            let model = w.get_remote_apps();
+            let ids: Vec<String> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .filter(|p| p.selected && p.installed)
+                .map(|p| p.name.to_string())
+                .collect();
+            if ids.is_empty() {
+                return;
+            }
+            let tx = tx_bfr.clone();
+            let title = format!("Removing {} Flatpak(s)...", ids.len());
+            let _ = tx.send(UiMessage::ShowTerminal(title));
+            thread::spawn(move || {
+                let mut args = vec!["uninstall".to_string(), "-y".to_string()];
+                args.extend(ids);
+                let _ = std::process::Command::new("flatpak")
+                    .args(&args)
+                    .status();
+            });
+        }
     });
 
     // Lookup detail from in-memory store (no network)
@@ -1959,6 +2310,26 @@ fn main() {
         });
     });
 
+    // Repo package search filter
+    let repo_full_filter = repo_packages_full.clone();
+    let win_filter_repo = window.as_weak();
+    window.on_filter_repo(move |search| {
+        let q = search.to_string().to_lowercase();
+        let full = repo_full_filter.borrow();
+        let filtered: Vec<PackageData> = if q.is_empty() {
+            full.clone()
+        } else {
+            full.iter().filter(|p| {
+                p.name.to_lowercase().contains(&q)
+                    || p.display_name.to_lowercase().contains(&q)
+                    || p.description.to_lowercase().contains(&q)
+            }).cloned().collect()
+        };
+        if let Some(w) = win_filter_repo.upgrade() {
+            w.set_repo_packages(ModelRc::new(VecModel::from(filtered)));
+        }
+    });
+
     // Repo package detail: run pacman -Si <pkg>
     let tx_repo_detail = tx.clone();
     let window_weak_rd = window.as_weak();
@@ -2022,15 +2393,6 @@ fn main() {
         }
     });
 
-    let tx_news = tx.clone();
-    window.on_fetch_news(move || {
-        let tx = tx_news.clone();
-        thread::spawn(move || {
-            let news = fetch_arch_news();
-            let _ = tx.send(UiMessage::NewsLoaded(news));
-        });
-    });
-
     let window_weak_ss = window.as_weak();
     window.on_save_settings(move || {
         if let Some(window) = window_weak_ss.upgrade() {
@@ -2052,6 +2414,7 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
         Ok(b) => b,
         Err(e) => {
             error!("Failed to initialize ALPM: {}", e);
+            let _ = tx.send(UiMessage::SetLoading(false));
             return;
         }
     };
@@ -2060,6 +2423,7 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
         Ok(b) => b,
         Err(e) => {
             error!("Failed to initialize Flatpak: {}", e);
+            let _ = tx.send(UiMessage::SetLoading(false));
             return;
         }
     };
@@ -2751,19 +3115,30 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
     let xml_bytes: Vec<u8> = if std::path::Path::new(&xml_path).exists() {
         match std::fs::read(&xml_path) {
             Ok(b) => b,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                eprintln!("[xpm] parse_appstream_xml: failed to read {}: {}", xml_path, e);
+                return Vec::new();
+            }
         }
     } else if std::path::Path::new(&gz_path).exists() {
         match std::fs::File::open(&gz_path) {
             Ok(f) => {
                 let mut dec = GzDecoder::new(f);
                 let mut bytes = Vec::new();
-                if dec.read_to_end(&mut bytes).is_err() { return Vec::new(); }
+                if let Err(e) = dec.read_to_end(&mut bytes) {
+                    eprintln!("[xpm] parse_appstream_xml: failed to decompress {}: {}", gz_path, e);
+                    return Vec::new();
+                }
                 bytes
             }
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                eprintln!("[xpm] parse_appstream_xml: failed to open {}: {}", gz_path, e);
+                return Vec::new();
+            }
         }
     } else {
+        eprintln!("[xpm] parse_appstream_xml: appstream data not found at {} or {}", xml_path, gz_path);
+        eprintln!("[xpm] hint: run 'flatpak update' to populate the appstream cache");
         return Vec::new();
     };
 
@@ -3144,7 +3519,34 @@ fn load_pacman_repos() -> Vec<String> {
     }
 }
 
+fn load_repo_descriptions(repo: &str) -> std::collections::HashMap<String, String> {
+    let out = std::process::Command::new("expac")
+        .args(["-S", "%r\t%n\t%d"])
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            return String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.splitn(3, '\t');
+                    let r = parts.next()?;
+                    let n = parts.next()?;
+                    let d = parts.next().unwrap_or("").trim();
+                    if r == repo && !d.is_empty() {
+                        Some((n.to_string(), d.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+    }
+    std::collections::HashMap::new()
+}
+
 fn load_repo_packages(repo: &str) -> Vec<PackageData> {
+    let desc_map = load_repo_descriptions(repo);
+    let desktop_map = build_desktop_name_map();
     let out = std::process::Command::new("pacman")
         .args(["-Sl", repo])
         .output();
@@ -3159,11 +3561,13 @@ fn load_repo_packages(repo: &str) -> Vec<PackageData> {
                     let name = parts[1];
                     let version = parts[2];
                     let installed = parts.get(3).map_or(false, |s| *s == "[installed]");
+                    let display_name = humanize_package_name(name, &desktop_map);
+                    let description = desc_map.get(name).cloned().unwrap_or_default();
                     Some(PackageData {
                         name: SharedString::from(name),
-                        display_name: SharedString::from(name),
+                        display_name: SharedString::from(&display_name),
                         version: SharedString::from(version),
-                        description: SharedString::from(""),
+                        description: SharedString::from(&description),
                         repository: SharedString::from(repo_name),
                         backend: 0,
                         installed,

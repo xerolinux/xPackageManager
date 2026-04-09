@@ -6,7 +6,6 @@ members = [
     "crates/xpm-flatpak",
     "crates/xpm-service",
     "crates/xpm-ui",
-    "crates/xpm-notify",
 ]
 
 [workspace.package]
@@ -26,7 +25,6 @@ thiserror = "2.0"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-quick-xml = "0.37"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 xpm-core = { path = "crates/xpm-core" }

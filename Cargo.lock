@@ -5970,10 +5970,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xpm-notify"
-version = "0.1.0"
-
-[[package]]
 name = "xpm-service"
 version = "0.1.0"
 dependencies = [

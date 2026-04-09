@@ -25,10 +25,23 @@ export struct StatsData {
     cache-size: string,
 }
 
-export struct NewsItem {
-    title: string,
+export struct ActivityItem {
+    action: string,
+    package: string,
     date: string,
-    url: string,
+}
+
+export struct SysInfo {
+    kernel: string,
+    uptime: string,
+    cpu: string,
+    ram-used: string,
+    ram-total: string,
+    gpu: string,
+    disk-used: string,
+    disk-total: string,
+    hostname: string,
+    distro: string,
 }
 
 export struct AppRow {
@@ -547,15 +560,24 @@ component RepoRow inherits Rectangle {
         padding-left: 14px;
         padding-right: 12px;
 
-        // Name — flex
-        Text {
-            text: pkg.display-name;
-            font-size: 13px;
-            font-weight: selected ? 700 : 500;
-            color: selected ? Cat.blue : Cat.text;
-            overflow: elide;
-            vertical-alignment: center;
+        // Name + description — flex
+        VerticalLayout {
             horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: pkg.display-name;
+                font-size: 13px;
+                font-weight: selected ? 700 : 500;
+                color: selected ? Cat.blue : Cat.text;
+                overflow: elide;
+            }
+            if pkg.description != "": Text {
+                text: pkg.description;
+                font-size: 10px;
+                color: Cat.overlay0;
+                overflow: elide;
+            }
         }
 
         // Version — 130px fixed
@@ -855,8 +877,10 @@ export component MainWindow inherits Window {
     in-out property <string> status-message: "Ready";
     in-out property <int> progress: 0;
     in-out property <StatsData> stats;
-    in-out property <[NewsItem]> news-items: [];
+    in-out property <[ActivityItem]> activity-items: [];
+    in-out property <SysInfo> sys-info;
     in-out property <string> search-text: "";
+    in-out property <string> installed-filter-text: "";
     in-out property <PackageData> local-package;
     in-out property <string> local-package-path: "";
     in-out property <bool> show-local-install: false;
@@ -903,6 +927,10 @@ export component MainWindow inherits Window {
     in-out property <string> selected-remote: "";
     in-out property <[PackageData]> remote-apps: [];
     in-out property <bool> remote-apps-loading: false;
+    in-out property <bool> flatpak-store-ready: false;
+    in-out property <int> flatpak-total-matches: 0;
+    in-out property <bool> flatpak-loading-more: false;
+    callback load-more-flatpaks;
     in-out property <[string]> flatpak-categories: ["All", "AudioVideo", "Development", "Education", "Game", "Graphics", "Network", "Office", "Science", "System", "Utility"];
     in-out property <string> selected-flatpak-category: "All";
     in-out property <string> flatpak-search: "";
@@ -918,6 +946,12 @@ export component MainWindow inherits Window {
     in-out property <image> flatpak-detail-icon;
     in-out property <[PackageData]> flatpak-addons: [];
     in-out property <[AppRow]> flatpak-app-rows: [];
+    in-out property <bool> show-addons-modal: false;
+    in-out property <int> flatpak-addons-installed-count: 0;
+    callback batch-flatpak-install;
+    callback batch-flatpak-remove;
+    callback install-selected-addons;
+    callback toggle-flatpak-selected(string, bool);
 
     // Repos browser (view 7/8)
     in-out property <[string]> pacman-repos: [];
@@ -928,6 +962,7 @@ export component MainWindow inherits Window {
     in-out property <PackageData> repo-detail-pkg;
     in-out property <string> repo-detail-description: "";
     in-out property <bool> repo-detail-loading: false;
+    in-out property <string> repo-search: "";
 
     callback refresh;
     callback search(string);
@@ -943,6 +978,8 @@ export component MainWindow inherits Window {
     callback load-flatpak-icon(string);
     callback browse-remote(string);
     callback filter-flatpak(string, string);
+    callback filter-installed(string);
+    callback filter-repo(string);
     callback load-pacman-repos;
     callback browse-repo(string);
     callback select-repo-pkg(string, int);
@@ -972,7 +1009,6 @@ export component MainWindow inherits Window {
     callback load-page(int);
     callback apply-theme(string);
     callback save-settings();
-    callback fetch-news;
 
     property <string> icon-home: "M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10";
     property <string> icon-grid: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z";
@@ -1230,15 +1266,84 @@ export component MainWindow inherits Window {
 
             Rectangle { height: 1px; background: Cat.surface0; opacity: 0.6; }
 
-            if loading: VerticalLayout {
-                vertical-stretch: 1;
-                alignment: center;
-                HorizontalLayout {
-                    alignment: center;
-                    Spinner { indeterminate: true; }
+            // ── Pinned search bar for Native Packages (view 0) ──────────────
+            if view == 0: Rectangle {
+                height: 48px;
+
+                TouchArea { clicked => { inst-ti.focus(); } }
+
+                Rectangle {
+                    x: 0;
+                    y: 8px;
+                    width: parent.width;
+                    height: 32px;
+                    border-radius: 16px;
+                    background: Cat.surface0;
+                    border-width: inst-ti.has-focus ? 1px : 0px;
+                    border-color: Cat.blue.with-alpha(0.4);
+                    clip: true;
+                    animate border-width { duration: 80ms; }
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            NavIcon {
+                                d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0";
+                                icon-color: inst-ti.has-focus ? Cat.blue.with-alpha(0.9) : Cat.overlay1;
+                                width: 13px;
+                                height: 13px;
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+
+                            if installed-filter-text == "" && !inst-ti.has-focus: Text {
+                                height: 32px;
+                                text: "Filter installed packages...";
+                                font-size: 12px;
+                                color: Cat.overlay0;
+                                vertical-alignment: center;
+                            }
+
+                            inst-ti := TextInput {
+                                height: 32px;
+                                text <=> installed-filter-text;
+                                font-size: 12px;
+                                color: Cat.text;
+                                single-line: true;
+                                vertical-alignment: center;
+                                selection-background-color: Cat.blue.with-alpha(0.3);
+                                selection-foreground-color: Cat.text;
+                                edited => { root.filter-installed(self.text); }
+                                accepted => { root.filter-installed(self.text); }
+                            }
+                        }
+
+                        if installed-filter-text != "": VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: clr-touch.has-hover ? Cat.surface1 : transparent;
+                                NavIcon { d: "M18 6L6 18M6 6l12 12"; icon-color: Cat.overlay1; width: 10px; height: 10px; x: 4px; y: 4px; }
+                                clr-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { installed-filter-text = ""; root.filter-installed(""); }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
+            // Search results empty state (view 2)
             if !loading && view == 2 && search-installed.length == 0 && search-available.length == 0: VerticalLayout {
                 vertical-stretch: 1;
                 alignment: center;
@@ -1260,7 +1365,32 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if !loading && (view == 0 || view == 1 || view == 10) && get-list().length == 0: VerticalLayout {
+            // Loading skeleton for view 0 / 1
+            if loading && (view == 0 || view == 1): VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 1px;
+                for i in [0, 1, 2, 3, 4, 5, 6, 7]: Rectangle {
+                    height: 52px;
+                    background: Math.mod(i, 2) == 0 ? Cat.surface0.with-alpha(0.15) : transparent;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 12px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle { width: 120px; height: 12px; border-radius: 4px; background: Cat.surface0.with-alpha(0.5); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle { width: 60px; height: 10px; border-radius: 4px; background: Cat.surface0.with-alpha(0.35); }
+                        }
+                    }
+                }
+            }
+
+            // Empty state for view 0/1 (not loading, no results)
+            if !loading && (view == 0 || view == 1) && get-list().length == 0: VerticalLayout {
                 vertical-stretch: 1;
                 alignment: center;
                 spacing: 8px;
@@ -1317,62 +1447,73 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Flatpaks (view 10) — Shelly-ALPM style with sidebar + card grid + inline detail
+            // Flatpaks (view 10) — flat list with pill search + multi-select + detail
             if view == 10: VerticalLayout {
                 vertical-stretch: 1;
                 spacing: 0;
 
-                // ── Top bar: search + remote selector ─────────────────────
+                // ── Pill search bar (same style as Repos) ──────────────────────────
                 Rectangle {
-                    height: 52px;
-                    background: Cat.mantle;
+                    height: 58px;
+                    background: transparent;
 
-                    HorizontalLayout {
-                        padding-left: 14px;
-                        padding-right: 14px;
-                        spacing: 10px;
+                    TouchArea { clicked => { fk-ti.focus(); } }
 
-                        VerticalLayout {
-                            alignment: center;
-                            horizontal-stretch: 1;
-                            Input {
-                                placeholder: "Search apps on Flathub...";
-                                text <=> flatpak-search;
-                                accepted(t) => {
-                                    show-flatpak-detail = false;
-                                    root.filter-flatpak(selected-flatpak-category, t);
-                                }
-                                edited(t) => {
-                                    show-flatpak-detail = false;
-                                    root.filter-flatpak(selected-flatpak-category, t);
+                    Rectangle {
+                        x: 14px;
+                        y: 11px;
+                        width: parent.width - 28px;
+                        height: 36px;
+                        border-radius: 18px;
+                        background: Cat.surface0;
+                        border-width: fk-ti.has-focus ? 1px : 0px;
+                        border-color: Cat.mauve.with-alpha(0.4);
+                        clip: true;
+                        animate border-width { duration: 80ms; }
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 10px;
+
+                            VerticalLayout {
+                                alignment: center;
+                                NavIcon {
+                                    d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0";
+                                    icon-color: fk-ti.has-focus ? Cat.mauve.with-alpha(0.9) : Cat.overlay1;
+                                    width: 14px;
+                                    height: 14px;
                                 }
                             }
-                        }
 
-                        if flatpak-remotes.length > 1: VerticalLayout {
-                            alignment: center;
-                            for r[ri] in flatpak-remotes: Rectangle {
-                                height: 28px;
-                                width: rmt-lbl.preferred-width + 18px;
-                                border-radius: 6px;
-                                background: selected-remote == r ? Cat.mauve.with-alpha(0.2) : (rmt-t.has-hover ? Cat.surface1 : Cat.surface0);
-                                animate background { duration: 80ms; }
-                                rmt-lbl := Text {
-                                    text: r;
-                                    font-size: 11px;
-                                    font-weight: selected-remote == r ? 700 : 400;
-                                    color: selected-remote == r ? Cat.mauve : Cat.subtext0;
-                                    horizontal-alignment: center;
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+
+                                if flatpak-search == "" && !fk-ti.has-focus: Text {
+                                    height: 36px;
+                                    text: "Search Flathub apps...";
+                                    font-size: 13px;
+                                    color: Cat.overlay0;
                                     vertical-alignment: center;
                                 }
-                                rmt-t := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        selected-remote = r;
-                                        selected-flatpak-category = "All";
-                                        flatpak-search = "";
+
+                                fk-ti := TextInput {
+                                    height: 36px;
+                                    text <=> flatpak-search;
+                                    font-size: 13px;
+                                    color: Cat.text;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                    selection-background-color: Cat.mauve.with-alpha(0.3);
+                                    selection-foreground-color: Cat.text;
+                                    accepted => {
                                         show-flatpak-detail = false;
-                                        root.browse-remote(r);
+                                        root.filter-flatpak(selected-flatpak-category, self.text);
+                                    }
+                                    edited => {
+                                        show-flatpak-detail = false;
+                                        root.filter-flatpak(selected-flatpak-category, self.text);
                                     }
                                 }
                             }
@@ -1380,40 +1521,117 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // ── Category pills bar ─────────────────────────────────────
+                // ── Category pills — centered ───────────────────────────────────────
                 Rectangle {
                     height: 44px;
-                    background: Cat.surface0.with-alpha(0.25);
 
-                    ScrollView {
-                        HorizontalLayout {
-                            padding-left: 14px;
-                            padding-right: 14px;
-                            spacing: 6px;
-                            alignment: start;
+                    HorizontalLayout {
+                        alignment: center;
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 6px;
 
-                            for cat[ci] in flatpak-categories: CategoryPill {
-                                label: cat;
-                                active: selected-flatpak-category == cat;
-                                clicked => {
-                                    selected-flatpak-category = cat;
-                                    show-flatpak-detail = false;
-                                    root.filter-flatpak(cat, flatpak-search);
+                        for cat[ci] in flatpak-categories: CategoryPill {
+                            label: cat;
+                            active: selected-flatpak-category == cat;
+                            clicked => {
+                                selected-flatpak-category = cat;
+                                show-flatpak-detail = false;
+                                root.filter-flatpak(cat, flatpak-search);
+                            }
+                        }
+                    }
+                }
+
+                // ── Loading — geeky terminal card ───────────────────────────────────
+                if remote-apps-loading || !flatpak-store-ready: VerticalLayout {
+                    vertical-stretch: 1;
+                    alignment: center;
+                    spacing: 0;
+
+                    // Centre the card
+                    HorizontalLayout {
+                        alignment: center;
+
+                        Rectangle {
+                            width: 320px;
+                            border-radius: 10px;
+                            background: Cat.crust.with-alpha(0.7);
+                            border-width: 1px;
+                            border-color: Cat.mauve.with-alpha(0.18);
+                            clip: true;
+
+                            VerticalLayout {
+                                padding: 20px;
+                                spacing: 14px;
+
+                                // Title bar dots
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: Cat.red.with-alpha(0.7); }
+                                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: Cat.yellow.with-alpha(0.7); }
+                                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: Cat.green.with-alpha(0.7); }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text { text: "appstream.xml"; font-size: 9px; color: Cat.overlay0; vertical-alignment: center; }
+                                }
+
+                                // Fake terminal lines
+                                VerticalLayout {
+                                    spacing: 5px;
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Text { text: "$"; font-size: 10px; color: Cat.mauve; vertical-alignment: center; }
+                                        Text { text: "flatpak remote-info flathub"; font-size: 10px; color: Cat.text; vertical-alignment: center; }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Text { text: "›"; font-size: 10px; color: Cat.overlay0; vertical-alignment: center; }
+                                        Text { text: "Parsing appstream metadata..."; font-size: 10px; color: Cat.subtext0; vertical-alignment: center; }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Text { text: "›"; font-size: 10px; color: Cat.overlay0; vertical-alignment: center; }
+                                        Text { text: "Indexing application catalogue"; font-size: 10px; color: Cat.subtext0; vertical-alignment: center; }
+                                    }
+                                }
+
+                                // Progress bar + spinner row
+                                HorizontalLayout {
+                                    spacing: 10px;
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        height: 3px;
+                                        border-radius: 2px;
+                                        background: Cat.surface1;
+                                        y: 8px;
+
+                                        Rectangle {
+                                            height: 3px;
+                                            border-radius: 2px;
+                                            background: @linear-gradient(90deg, Cat.mauve 0%, Cat.blue 100%);
+                                            width: 60px;
+                                            animate width { duration: 900ms; easing: ease-in-out; }
+                                        }
+                                    }
+
+                                    Spinner { indeterminate: true; width: 14px; height: 14px; }
+                                }
+
+                                // Status line
+                                Text {
+                                    text: remote-apps-loading ? "Fetching from remote..." : "Building index...";
+                                    font-size: 9.5px;
+                                    color: Cat.overlay0;
+                                    horizontal-alignment: center;
                                 }
                             }
                         }
                     }
                 }
 
-                // ── Loading state ──────────────────────────────────────────
-                if remote-apps-loading: VerticalLayout {
-                    vertical-stretch: 1;
-                    alignment: center;
-                    HorizontalLayout { alignment: center; Spinner { indeterminate: true; } }
-                    Text { text: "Parsing appstream data…"; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
-                }
-
-                // ── Detail view ────────────────────────────────────────────
+                // ── Detail view ──────────────────────────────────────────────────────
                 if !remote-apps-loading && show-flatpak-detail: ScrollView {
                     vertical-stretch: 1;
 
@@ -1488,13 +1706,13 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            // App header: icon + name/developer + install button
+                            // App header: icon + name + buttons
                             HorizontalLayout {
                                 spacing: 18px;
 
-                                // App icon (real or placeholder)
+                                // Icon
                                 VerticalLayout {
-                                    alignment: start;
+                                    alignment: center;
                                     Rectangle {
                                         width: 80px;
                                         height: 80px;
@@ -1551,9 +1769,12 @@ export component MainWindow inherits Window {
                                     }
                                 }
 
-                                // Install / Remove
+                                // Install/Remove + Add-Ons buttons
                                 VerticalLayout {
                                     alignment: center;
+                                    spacing: 8px;
+
+                                    // Install / Remove button
                                     if !flatpak-detail-installed: Rectangle {
                                         width: 120px;
                                         height: 38px;
@@ -1584,6 +1805,60 @@ export component MainWindow inherits Window {
                                             }
                                         }
                                     }
+
+                                    // Add-Ons button — only if addons exist
+                                    if flatpak-addons.length > 0: Rectangle {
+                                        width: 120px;
+                                        height: 34px;
+                                        border-radius: 10px;
+                                        property <int> installed-addon-count: flatpak-addons-installed-count;
+                                        background: installed-addon-count == flatpak-addons.length
+                                            ? Cat.green.with-alpha(0.15)
+                                            : installed-addon-count > 0
+                                                ? Cat.peach.with-alpha(0.15)
+                                                : Cat.surface0.with-alpha(0.6);
+                                        border-width: 1px;
+                                        border-color: installed-addon-count == flatpak-addons.length
+                                            ? Cat.green.with-alpha(0.3)
+                                            : installed-addon-count > 0
+                                                ? Cat.peach.with-alpha(0.3)
+                                                : Cat.surface1;
+                                        animate background { duration: 80ms; }
+
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            spacing: 6px;
+
+                                            // Status dot
+                                            Rectangle {
+                                                width: 7px;
+                                                height: 7px;
+                                                border-radius: 3.5px;
+                                                background: installed-addon-count == flatpak-addons.length
+                                                    ? Cat.green
+                                                    : installed-addon-count > 0
+                                                        ? Cat.peach
+                                                        : Cat.overlay0;
+                                            }
+
+                                            Text {
+                                                text: "Add-Ons";
+                                                font-size: 12px;
+                                                font-weight: 600;
+                                                color: installed-addon-count == flatpak-addons.length
+                                                    ? Cat.green
+                                                    : installed-addon-count > 0
+                                                        ? Cat.peach
+                                                        : Cat.subtext0;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        addon-btn-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.show-addons-modal = true; }
+                                        }
+                                    }
                                 }
                             }
 
@@ -1605,380 +1880,614 @@ export component MainWindow inherits Window {
                                 wrap: word-wrap;
                                 opacity: 0.9;
                             }
-
-                            // Addons section
-                            if flatpak-addons.length > 0: VerticalLayout {
-                                spacing: 10px;
-
-                                Rectangle { height: 1px; background: Cat.surface0; opacity: 0.6; }
-
-                                Text {
-                                    text: "Add-ons & Extensions (" + flatpak-addons.length + ")";
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                    color: Cat.text;
-                                }
-
-                                for addon[ai] in flatpak-addons: Rectangle {
-                                    height: 64px;
-                                    border-radius: 8px;
-                                    background: addon-t.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.5);
-                                    animate background { duration: 70ms; }
-
-                                    HorizontalLayout {
-                                        padding: 12px;
-                                        spacing: 10px;
-
-                                        VerticalLayout {
-                                            horizontal-stretch: 1;
-                                            spacing: 3px;
-                                            alignment: center;
-                                            Text { text: addon.display-name; font-size: 13px; font-weight: 600; color: Cat.text; overflow: elide; }
-                                            Text { text: addon.description; font-size: 11px; color: Cat.subtext0; overflow: elide; }
-                                        }
-
-                                        VerticalLayout {
-                                            alignment: center;
-                                            if !addon.installed: Rectangle {
-                                                width: 80px; height: 28px; border-radius: 6px;
-                                                background: addon-inst-t.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.2);
-                                                animate background { duration: 70ms; }
-                                                Text { text: "Install"; font-size: 11px; font-weight: 600; color: addon-inst-t.has-hover ? #ffffff : Cat.mauve; horizontal-alignment: center; vertical-alignment: center; }
-                                                addon-inst-t := TouchArea { mouse-cursor: pointer; clicked => { root.request-install(addon.name, 1); } }
-                                            }
-                                            if addon.installed: Rectangle {
-                                                width: 80px; height: 28px; border-radius: 6px;
-                                                background: Cat.green.with-alpha(0.12);
-                                                Text { text: "Installed"; font-size: 11px; font-weight: 600; color: Cat.green; horizontal-alignment: center; vertical-alignment: center; }
-                                            }
-                                        }
-                                    }
-
-                                    addon-t := TouchArea { }
-                                }
-                            }
                         }
                     }
                 }
 
-                // ── App grid ───────────────────────────────────────────────
-                if !remote-apps-loading && !show-flatpak-detail: ScrollView {
+                // ── Flat app list (replaces AppTile grid) ────────────────────────────
+                if !remote-apps-loading && flatpak-store-ready && !show-flatpak-detail: VerticalLayout {
                     vertical-stretch: 1;
+                    spacing: 0;
 
-                    VerticalLayout {
-                        padding: 6px;
-                        spacing: 0;
+                    // Hero watermark area
+                    Rectangle {
+                        height: 72px;
+                        clip: true;
 
-                        if flatpak-app-rows.length == 0: VerticalLayout {
-                            vertical-stretch: 1;
-                            alignment: center;
-                            Text { text: "No apps found."; font-size: 13px; color: Cat.overlay0; horizontal-alignment: center; }
+                        // "Flatpaks" watermark
+                        Text {
+                            text: "Flatpaks";
+                            font-size: 52px;
+                            font-weight: 900;
+                            color: Cat.mauve.with-alpha(0.05);
+                            x: parent.width - self.preferred-width - 10px;
+                            y: (parent.height - self.preferred-height) / 2;
                         }
 
-                        for row[ri] in flatpak-app-rows: HorizontalLayout {
+                        // Package glyph
+                        NavIcon {
+                            d: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5";
+                            icon-color: Cat.mauve.with-alpha(0.07);
+                            width: 44px;
+                            height: 44px;
+                            x: parent.width - 54px;
+                            y: (parent.height - 44px) / 2;
+                        }
+
+                        // Column headers
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 14px;
+                            spacing: 10px;
+
+                            VerticalLayout {
+                                alignment: center;
+                                width: 44px; // avatar placeholder
+                            }
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "APPLICATION";
+                                font-size: 9.5px;
+                                font-weight: 700;
+                                color: Cat.overlay0;
+                                letter-spacing: 0.8px;
+                                vertical-alignment: center;
+                            }
+
+                            if flatpak-total-matches > 0 && flatpak-total-matches > remote-apps.length: Text {
+                                text: remote-apps.length + " / " + flatpak-total-matches;
+                                font-size: 9px;
+                                color: Cat.overlay0;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "STATUS";
+                                font-size: 9.5px;
+                                font-weight: 700;
+                                color: Cat.overlay0;
+                                letter-spacing: 0.8px;
+                                vertical-alignment: center;
+                                width: 70px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        // Bottom separator
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            width: parent.width;
+                            background: Cat.surface0;
+                            opacity: 0.6;
+                        }
+                    }
+
+                    if remote-apps.length == 0: VerticalLayout {
+                        vertical-stretch: 1;
+                        alignment: center;
+                        Text { text: "No apps found."; font-size: 13px; color: Cat.overlay0; horizontal-alignment: center; }
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
                             spacing: 0;
 
-                            AppTile {
-                                horizontal-stretch: 1;
-                                pkg: row.a;
-                                clicked => {
-                                    current-flatpak-id = row.a.name;
-                                    flatpak-detail-installed = row.a.installed;
-                                    flatpak-detail-name = row.a.display-name;
-                                    flatpak-detail-summary = row.a.description;
-                                    flatpak-detail-description = "";
-                                    flatpak-detail-developer = "";
-                                    flatpak-screenshot = @image-url("");
-                                    flatpak-detail-icon = @image-url("");
-                                    flatpak-addons = [];
-                                    root.load-flatpak-detail(row.a.name);
-                                    root.load-flatpak-icon(row.a.name);
-                                    show-flatpak-detail = true;
+                            for pkg[i] in remote-apps: Rectangle {
+                                height: 62px;
+                                background: fk-row-touch.has-hover ? Cat.surface0.with-alpha(0.4) : transparent;
+                                animate background { duration: 60ms; }
+
+                                HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 14px;
+                                    spacing: 10px;
+
+                                    // Checkbox
+                                    VerticalLayout {
+                                        alignment: center;
+                                        CheckBox {
+                                            checked: pkg.selected;
+                                            toggled(val) => {
+                                                root.toggle-flatpak-selected(pkg.name, val);
+                                            }
+                                        }
+                                    }
+
+                                    // Avatar (letter + category color)
+                                    VerticalLayout {
+                                        alignment: center;
+                                        AppAvatar {
+                                            initial: pkg.required-by;
+                                            category: pkg.installed-size;
+                                            width: 40px;
+                                            height: 40px;
+                                            border-radius: 10px;
+                                        }
+                                    }
+
+                                    // Name + app id + description
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 2px;
+
+                                        Text {
+                                            text: pkg.display-name;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                            color: Cat.text;
+                                            overflow: elide;
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Text {
+                                                text: pkg.name;
+                                                font-size: 10px;
+                                                color: Cat.overlay0;
+                                                overflow: elide;
+                                            }
+                                            if pkg.description != "": Text {
+                                                text: "·";
+                                                font-size: 10px;
+                                                color: Cat.overlay0;
+                                            }
+                                            if pkg.description != "": Text {
+                                                text: pkg.description;
+                                                font-size: 10px;
+                                                color: Cat.subtext0;
+                                                opacity: 0.75;
+                                                overflow: elide;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                    }
+
+                                    // Install/Remove button
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 72px;
+                                            height: 28px;
+                                            border-radius: 6px;
+                                            background: pkg.installed
+                                                ? Cat.red.with-alpha(0.15)
+                                                : Cat.mauve.with-alpha(0.15);
+
+                                            Text {
+                                                text: pkg.installed ? "Remove" : "Install";
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                color: pkg.installed ? Cat.red : Cat.mauve;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+
+                                            TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    if pkg.installed {
+                                                        root.request-remove(pkg.name, 1);
+                                                    } else {
+                                                        root.request-install(pkg.name, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Row tap → open detail
+                                fk-row-touch := TouchArea {
+                                    clicked => {
+                                        current-flatpak-id = pkg.name;
+                                        flatpak-detail-installed = pkg.installed;
+                                        flatpak-detail-name = pkg.display-name;
+                                        flatpak-detail-summary = pkg.description;
+                                        flatpak-detail-description = "";
+                                        flatpak-detail-developer = "";
+                                        flatpak-screenshot = @image-url("");
+                                        flatpak-detail-icon = @image-url("");
+                                        flatpak-addons = [];
+                                        root.load-flatpak-detail(pkg.name);
+                                        root.load-flatpak-icon(pkg.name);
+                                        show-flatpak-detail = true;
+                                    }
+                                }
+
+                                // Row separator
+                                Rectangle {
+                                    x: 16px;
+                                    y: parent.height - 1px;
+                                    width: parent.width - 32px;
+                                    height: 1px;
+                                    background: Cat.surface0;
+                                    opacity: 0.5;
                                 }
                             }
 
-                            if row.count >= 2: AppTile {
-                                horizontal-stretch: 1;
-                                pkg: row.b;
-                                clicked => {
-                                    current-flatpak-id = row.b.name;
-                                    flatpak-detail-installed = row.b.installed;
-                                    flatpak-detail-name = row.b.display-name;
-                                    flatpak-detail-summary = row.b.description;
-                                    flatpak-detail-description = "";
-                                    flatpak-detail-developer = "";
-                                    flatpak-screenshot = @image-url("");
-                                    flatpak-detail-icon = @image-url("");
-                                    flatpak-addons = [];
-                                    root.load-flatpak-detail(row.b.name);
-                                    root.load-flatpak-icon(row.b.name);
-                                    show-flatpak-detail = true;
-                                }
-                            }
-                            if row.count < 2: Rectangle { horizontal-stretch: 1; }
+                            // Load More button — shown when there are more results beyond the current page
+                            if flatpak-total-matches > remote-apps.length: Rectangle {
+                                height: 56px;
+                                background: transparent;
 
-                            if row.count >= 3: AppTile {
-                                horizontal-stretch: 1;
-                                pkg: row.c;
-                                clicked => {
-                                    current-flatpak-id = row.c.name;
-                                    flatpak-detail-installed = row.c.installed;
-                                    flatpak-detail-name = row.c.display-name;
-                                    flatpak-detail-summary = row.c.description;
-                                    flatpak-detail-description = "";
-                                    flatpak-detail-developer = "";
-                                    flatpak-screenshot = @image-url("");
-                                    flatpak-detail-icon = @image-url("");
-                                    flatpak-addons = [];
-                                    root.load-flatpak-detail(row.c.name);
-                                    root.load-flatpak-icon(row.c.name);
-                                    show-flatpak-detail = true;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    padding: 10px;
+
+                                    Rectangle {
+                                        width: 180px;
+                                        height: 36px;
+                                        border-radius: 8px;
+                                        background: load-more-touch.has-hover && !flatpak-loading-more
+                                            ? Cat.mauve.with-alpha(0.18)
+                                            : Cat.surface0.with-alpha(0.5);
+                                        border-width: 1px;
+                                        border-color: Cat.mauve.with-alpha(0.2);
+                                        animate background { duration: 100ms; }
+
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            spacing: 6px;
+
+                                            if flatpak-loading-more: Spinner {
+                                                indeterminate: true;
+                                                width: 14px;
+                                                height: 14px;
+                                            }
+
+                                            Text {
+                                                text: flatpak-loading-more
+                                                    ? "Loading..."
+                                                    : "Load More  (" + (flatpak-total-matches - remote-apps.length) + " remaining)";
+                                                font-size: 12px;
+                                                font-weight: 600;
+                                                color: flatpak-loading-more ? Cat.overlay0 : Cat.mauve;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        load-more-touch := TouchArea {
+                                            mouse-cursor: flatpak-loading-more ? default : pointer;
+                                            clicked => {
+                                                if !flatpak-loading-more {
+                                                    flatpak-loading-more = true;
+                                                    root.load-more-flatpaks();
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                            if row.count < 3: Rectangle { horizontal-stretch: 1; }
                         }
                     }
                 }
             }
 
-            // Repos browser — professional column view with right detail panel
-            if view == 7 || view == 8: HorizontalLayout {
+            // Repos browser — Flatpak-style layout with search + repo tabs + hero
+            if view == 7 || view == 8: VerticalLayout {
                 vertical-stretch: 1;
                 spacing: 0;
 
-                // ── Left: repo list + package table ────────────────────────
-                VerticalLayout {
-                    horizontal-stretch: 1;
+                // ── Pill-shaped search bar ─────────────────────────────────
+                Rectangle {
+                    height: 58px;
+                    background: transparent;
 
-                    // Repo selector bar
+                    TouchArea { clicked => { rs-ti.focus(); } }
+
                     Rectangle {
-                        height: 44px;
-                        background: Cat.mantle;
-
-                        if pacman-repos.length == 0: HorizontalLayout {
-                            padding-left: 14px;
-                            spacing: 10px;
-                            alignment: center;
-                            Spinner { indeterminate: true; }
-                            Text { text: "Loading repositories..."; font-size: 12px; color: Cat.overlay0; vertical-alignment: center; }
-                        }
-
-                        if pacman-repos.length > 0: ScrollView {
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                spacing: 5px;
-                                alignment: start;
-
-                                for repo[i] in pacman-repos: Rectangle {
-                                    width: rp-lbl.preferred-width + 18px;
-                                    height: 28px;
-                                    border-radius: 6px;
-                                    background: selected-repo == repo ?
-                                        Cat.blue.with-alpha(0.85) : (rp-t.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.5));
-                                    animate background { duration: 70ms; }
-
-                                    rp-lbl := Text {
-                                        text: repo;
-                                        font-size: 11.5px;
-                                        font-weight: selected-repo == repo ? 700 : 400;
-                                        color: selected-repo == repo ? #ffffff : Cat.subtext0;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                    rp-t := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            selected-repo = repo;
-                                            view = 8;
-                                            show-repo-detail = false;
-                                            root.browse-repo(repo);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Column header
-                    if view == 8: Rectangle {
-                        height: 32px;
-                        background: Cat.surface0.with-alpha(0.6);
+                        x: 14px;
+                        y: 11px;
+                        width: parent.width - 28px;
+                        height: 36px;
+                        border-radius: 18px;
+                        background: Cat.surface0;
+                        border-width: rs-ti.has-focus ? 1px : 0px;
+                        border-color: Cat.blue.with-alpha(0.4);
+                        clip: true;
+                        animate border-width { duration: 80ms; }
 
                         HorizontalLayout {
                             padding-left: 14px;
-                            padding-right: 12px;
+                            padding-right: 14px;
+                            spacing: 10px;
 
-                            Text { text: "Name"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-stretch: 1; }
-                            Rectangle { width: 130px;
-                                Text { text: "Version"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; }
+                            VerticalLayout {
+                                alignment: center;
+                                NavIcon {
+                                    d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0";
+                                    icon-color: rs-ti.has-focus ? Cat.blue.with-alpha(0.9) : Cat.overlay1;
+                                    width: 14px;
+                                    height: 14px;
+                                }
                             }
-                            Rectangle { width: 90px;
-                                Text { text: "Repo"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; }
-                            }
-                            Rectangle { width: 80px;
-                                Text { text: "Status"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: center; }
-                            }
-                        }
-                    }
 
-                    // Loading state
-                    if repo-loading: VerticalLayout {
-                        vertical-stretch: 1;
-                        alignment: center;
-                        HorizontalLayout { alignment: center; Spinner { indeterminate: true; } }
-                        Text { text: "Loading " + selected-repo + "..."; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
-                    }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
 
-                    // Empty / select prompt
-                    if !repo-loading && view == 7: VerticalLayout {
-                        vertical-stretch: 1;
-                        alignment: center;
-                        Text { text: "Select a repository above"; font-size: 14px; font-weight: 600; color: Cat.overlay0; horizontal-alignment: center; }
-                        Text { text: "to browse available packages"; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
-                    }
+                                if repo-search == "" && !rs-ti.has-focus: Text {
+                                    height: 36px;
+                                    text: selected-repo != "" ? "Search in " + selected-repo + "..." : "Select a repository to search...";
+                                    font-size: 13px;
+                                    color: Cat.overlay0;
+                                    vertical-alignment: center;
+                                }
 
-                    // Package list
-                    if !repo-loading && view == 8 && repo-packages.length > 0: ListView {
-                        vertical-stretch: 1;
-                        for p[i] in repo-packages: RepoRow {
-                            pkg: p;
-                            selected: show-repo-detail && repo-detail-pkg.name == p.name;
-                            clicked => {
-                                repo-detail-pkg = p;
-                                show-repo-detail = true;
-                                root.select-repo-pkg(p.name, p.backend);
+                                rs-ti := TextInput {
+                                    height: 36px;
+                                    text <=> repo-search;
+                                    font-size: 13px;
+                                    color: Cat.text;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                    selection-background-color: Cat.blue.with-alpha(0.3);
+                                    selection-foreground-color: Cat.text;
+                                    accepted => { root.filter-repo(self.text); }
+                                    edited => { root.filter-repo(self.text); }
+                                }
                             }
                         }
-                    }
-
-                    if !repo-loading && view == 8 && repo-packages.length == 0: VerticalLayout {
-                        vertical-stretch: 1;
-                        alignment: center;
-                        Text { text: "No packages found"; font-size: 13px; color: Cat.overlay0; horizontal-alignment: center; }
                     }
                 }
 
-                // ── Right detail panel (300px) ─────────────────────────────
-                if show-repo-detail: Rectangle {
-                    width: 300px;
-                    background: Cat.mantle;
+                // ── Repo tabs as centered pills ─────────────────────────────
+                Rectangle {
+                    height: 50px;
 
-                    // Vertical divider
-                    Rectangle {
-                        x: 0;
-                        y: 0;
-                        width: 1px;
-                        height: parent.height;
-                        background: Cat.surface0;
+                    if pacman-repos.length == 0: HorizontalLayout {
+                        padding-left: 14px;
+                        spacing: 8px;
+                        alignment: center;
+                        NavIcon {
+                            d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15";
+                            icon-color: Cat.overlay0;
+                            width: 14px;
+                            height: 14px;
+                        }
+                        Text { text: "Loading repositories..."; font-size: 12px; color: Cat.overlay0; vertical-alignment: center; }
                     }
 
+                    if pacman-repos.length > 0: HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        padding: 10px;
+
+                        for repo[i] in pacman-repos: Rectangle {
+                            width: rp-lbl.preferred-width + 28px;
+                            height: 30px;
+                            border-radius: 15px;
+                            border-width: 1px;
+                            border-color: selected-repo == repo ? Cat.blue.with-alpha(0.5) : Cat.surface1;
+                            background: selected-repo == repo ? Cat.blue.with-alpha(0.12) :
+                                        (rp-t.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.5));
+                            animate background { duration: 70ms; }
+
+                            rp-lbl := Text {
+                                text: repo;
+                                font-size: 12px;
+                                font-weight: selected-repo == repo ? 700 : 400;
+                                color: selected-repo == repo ? Cat.blue : Cat.subtext0;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            rp-t := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    selected-repo = repo;
+                                    view = 8;
+                                    show-repo-detail = false;
+                                    repo-search = "";
+                                    root.browse-repo(repo);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Main area: left content + right detail ───────────────────
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    spacing: 0;
+
+                    // Left column
                     VerticalLayout {
-                        padding: 20px;
-                        spacing: 14px;
+                        horizontal-stretch: 1;
 
-                        // Close button
-                        HorizontalLayout {
-                            Rectangle { horizontal-stretch: 1; }
-                            Rectangle {
-                                width: 28px;
-                                height: 28px;
-                                border-radius: 6px;
-                                background: cls-t.has-hover ? Cat.surface1 : transparent;
-                                animate background { duration: 70ms; }
-                                NavIcon { d: "M18 6L6 18M6 6l12 12"; icon-color: Cat.overlay1; width: 14px; height: 14px; x: 7px; y: 7px; }
-                                cls-t := TouchArea { mouse-cursor: pointer; clicked => { show-repo-detail = false; } }
-                            }
-                        }
-
-                        // Package name
-                        Text {
-                            text: repo-detail-pkg.display-name;
-                            font-size: 20px;
-                            font-weight: 700;
-                            color: Cat.text;
-                            wrap: word-wrap;
-                        }
-
-                        // Version + repo badges
-                        HorizontalLayout {
+                        // Loading state
+                        if repo-loading: VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: center;
                             spacing: 8px;
-                            alignment: start;
+                            NavIcon {
+                                d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15";
+                                icon-color: Cat.overlay0;
+                                width: 24px; height: 24px;
+                                x: (parent.width - 24px) / 2;
+                            }
+                            Text { text: "Loading " + selected-repo + "..."; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
+                        }
 
+                        // Empty / select prompt
+                        if !repo-loading && view == 7: VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: center;
+                            spacing: 6px;
+                            NavIcon {
+                                d: "M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z";
+                                icon-color: Cat.surface2;
+                                width: 32px; height: 32px;
+                                x: (parent.width - 32px) / 2;
+                            }
+                            Text { text: "Select a repository above"; font-size: 14px; font-weight: 600; color: Cat.overlay0; horizontal-alignment: center; }
+                            Text { text: "to browse available packages"; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
+                        }
+
+                        // Package list with hero decoration
+                        if !repo-loading && view == 8: VerticalLayout {
+                            vertical-stretch: 1;
+
+                            // Hero decoration
                             Rectangle {
-                                width: ver-t.preferred-width + 14px;
-                                height: 24px;
-                                border-radius: 5px;
-                                background: Cat.mauve.with-alpha(0.12);
-                                ver-t := Text {
-                                    text: repo-detail-pkg.version;
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    color: Cat.mauve;
-                                    horizontal-alignment: center;
+                                height: 110px;
+                                clip: true;
+                                background: transparent;
+
+                                // Matrix columns
+                                Text { x: 20px; y: 0; text: "01\n10\n01\n10\n01\n10\n01\n10\n01\n10"; font-size: 10px; color: Cat.blue; opacity: 0.04; }
+                                Text { x: 80px; y: -15px; text: "10\n01\n10\n01\n10\n01\n10\n01\n10\n01"; font-size: 10px; color: Cat.blue; opacity: 0.04; }
+                                Text { x: 140px; y: 5px; text: "01\n10\n01\n10\n01\n10\n01\n10\n01\n10"; font-size: 10px; color: Cat.blue; opacity: 0.04; }
+                                Text { x: 200px; y: -10px; text: "10\n01\n10\n01\n10\n01\n10\n01\n10\n01"; font-size: 10px; color: Cat.blue; opacity: 0.03; }
+                                Text { x: 260px; y: 0; text: "01\n10\n01\n10\n01\n10\n01\n10\n01\n10"; font-size: 10px; color: Cat.blue; opacity: 0.03; }
+                                Text { x: 320px; y: -5px; text: "10\n01\n10\n01\n10\n01\n10\n01\n10\n01"; font-size: 10px; color: Cat.blue; opacity: 0.03; }
+
+                                // Package glyph
+                                NavIcon {
+                                    d: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4";
+                                    icon-color: Cat.blue;
+                                    opacity: 0.07;
+                                    width: 90px;
+                                    height: 90px;
+                                    x: parent.width - 120px;
+                                    y: 10px;
+                                }
+
+                                // "Arch Packages" watermark
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: "Arch Packages";
+                                    font-size: 52px;
+                                    font-weight: 900;
+                                    color: Cat.text;
+                                    opacity: 0.05;
+                                    horizontal-alignment: left;
                                     vertical-alignment: center;
+                                    x: 14px;
                                 }
                             }
 
+                            // Column header
                             Rectangle {
-                                width: rdt.preferred-width + 12px;
-                                height: 24px;
-                                border-radius: 5px;
-                                background: Cat.surface0;
-                                rdt := Text {
-                                    text: repo-detail-pkg.repository;
-                                    font-size: 11px;
-                                    color: Cat.overlay1;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                height: 30px;
+                                background: Cat.surface0.with-alpha(0.5);
+
+                                HorizontalLayout {
+                                    padding-left: 14px;
+                                    padding-right: 12px;
+
+                                    Text { text: "Name"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-stretch: 1; }
+                                    Rectangle { width: 130px;
+                                        Text { text: "Version"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; }
+                                    }
+                                    Rectangle { width: 90px;
+                                        Text { text: "Repo"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; }
+                                    }
+                                    Rectangle { width: 80px;
+                                        Text { text: "Status"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: center; }
+                                    }
+                                }
+                            }
+
+                            // Package rows
+                            if repo-packages.length == 0: VerticalLayout {
+                                vertical-stretch: 1;
+                                alignment: center;
+                                Text { text: "No packages found"; font-size: 13px; color: Cat.overlay0; horizontal-alignment: center; }
+                            }
+
+                            if repo-packages.length > 0: ListView {
+                                vertical-stretch: 1;
+                                for p[i] in repo-packages: RepoRow {
+                                    pkg: p;
+                                    selected: show-repo-detail && repo-detail-pkg.name == p.name;
+                                    clicked => {
+                                        repo-detail-pkg = p;
+                                        show-repo-detail = true;
+                                        root.select-repo-pkg(p.name, p.backend);
+                                    }
                                 }
                             }
                         }
+                    }
 
-                        Rectangle { height: 1px; background: Cat.surface0; }
+                    // ── Right detail panel (300px) ─────────────────────────────
+                    if show-repo-detail: Rectangle {
+                        width: 300px;
+                        background: Cat.mantle;
 
-                        // Description
-                        if repo-detail-loading: HorizontalLayout {
-                            alignment: start;
-                            Spinner { indeterminate: true; }
-                        }
+                        Rectangle { x: 0; y: 0; width: 1px; height: parent.height; background: Cat.surface0; }
 
-                        if !repo-detail-loading && repo-detail-description != "": Text {
-                            text: repo-detail-description;
-                            font-size: 13px;
-                            color: Cat.subtext0;
-                            wrap: word-wrap;
-                        }
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 14px;
 
-                        if !repo-detail-loading && repo-detail-description == "": Text {
-                            text: "No description available.";
-                            font-size: 12px;
-                            color: Cat.overlay0;
-                        }
-
-                        Rectangle { vertical-stretch: 1; }
-
-                        // Install / Remove button
-                        if !repo-detail-pkg.installed: Rectangle {
-                            height: 40px;
-                            border-radius: 8px;
-                            background: inst-r-t.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85);
-                            animate background { duration: 80ms; }
-                            Text { text: "Install"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
-                            inst-r-t := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.request-install(repo-detail-pkg.name, repo-detail-pkg.backend); }
+                            HorizontalLayout {
+                                Rectangle { horizontal-stretch: 1; }
+                                Rectangle {
+                                    width: 28px; height: 28px; border-radius: 6px;
+                                    background: cls-t.has-hover ? Cat.surface1 : transparent;
+                                    animate background { duration: 70ms; }
+                                    NavIcon { d: "M18 6L6 18M6 6l12 12"; icon-color: Cat.overlay1; width: 14px; height: 14px; x: 7px; y: 7px; }
+                                    cls-t := TouchArea { mouse-cursor: pointer; clicked => { show-repo-detail = false; } }
+                                }
                             }
-                        }
-                        if repo-detail-pkg.installed: Rectangle {
-                            height: 40px;
-                            border-radius: 8px;
-                            background: rm-r-t.has-hover ? Cat.red : Cat.red.with-alpha(0.85);
-                            animate background { duration: 80ms; }
-                            Text { text: "Remove"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
-                            rm-r-t := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.request-remove(repo-detail-pkg.name, repo-detail-pkg.backend); }
+
+                            Text {
+                                text: repo-detail-pkg.display-name;
+                                font-size: 20px; font-weight: 700; color: Cat.text; wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px; alignment: start;
+
+                                Rectangle {
+                                    width: ver-t.preferred-width + 14px; height: 24px; border-radius: 5px;
+                                    background: Cat.mauve.with-alpha(0.12);
+                                    ver-t := Text { text: repo-detail-pkg.version; font-size: 11px; font-weight: 600; color: Cat.mauve; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+
+                                Rectangle {
+                                    width: rdt.preferred-width + 12px; height: 24px; border-radius: 5px;
+                                    background: Cat.surface0;
+                                    rdt := Text { text: repo-detail-pkg.repository; font-size: 11px; color: Cat.overlay1; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: Cat.surface0; }
+
+                            if repo-detail-loading: HorizontalLayout { alignment: start; Spinner { indeterminate: true; } }
+
+                            if !repo-detail-loading && repo-detail-description != "": Text {
+                                text: repo-detail-description;
+                                font-size: 13px; color: Cat.subtext0; wrap: word-wrap;
+                            }
+
+                            if !repo-detail-loading && repo-detail-description == "": Text {
+                                text: "No description available.";
+                                font-size: 12px; color: Cat.overlay0;
+                            }
+
+                            Rectangle { vertical-stretch: 1; }
+
+                            if !repo-detail-pkg.installed: Rectangle {
+                                height: 40px; border-radius: 8px;
+                                background: inst-r-t.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85);
+                                animate background { duration: 80ms; }
+                                Text { text: "Install"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                inst-r-t := TouchArea { mouse-cursor: pointer; clicked => { root.request-install(repo-detail-pkg.name, repo-detail-pkg.backend); } }
+                            }
+                            if repo-detail-pkg.installed: Rectangle {
+                                height: 40px; border-radius: 8px;
+                                background: rm-r-t.has-hover ? Cat.red : Cat.red.with-alpha(0.85);
+                                animate background { duration: 80ms; }
+                                Text { text: "Remove"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                rm-r-t := TouchArea { mouse-cursor: pointer; clicked => { root.request-remove(repo-detail-pkg.name, repo-detail-pkg.backend); } }
                             }
                         }
                     }
@@ -2326,7 +2835,8 @@ export component MainWindow inherits Window {
                                     alignment: center;
                                     spacing: 4px;
 
-                                    Text {
+                                    if loading: Rectangle { width: 52px; height: 20px; border-radius: 5px; background: Cat.blue.with-alpha(0.18); x: (parent.width - 52px) / 2; }
+                                    if !loading: Text {
                                         text: stats.pacman-count;
                                         font-size: 28px;
                                         font-weight: 700;
@@ -2354,7 +2864,8 @@ export component MainWindow inherits Window {
                                     alignment: center;
                                     spacing: 4px;
 
-                                    Text {
+                                    if loading: Rectangle { width: 40px; height: 20px; border-radius: 5px; background: Cat.teal.with-alpha(0.18); x: (parent.width - 40px) / 2; }
+                                    if !loading: Text {
                                         text: stats.flatpak-count;
                                         font-size: 28px;
                                         font-weight: 700;
@@ -2382,7 +2893,8 @@ export component MainWindow inherits Window {
                                     alignment: center;
                                     spacing: 4px;
 
-                                    Text {
+                                    if loading: Rectangle { width: 36px; height: 20px; border-radius: 5px; background: Cat.overlay0.with-alpha(0.12); x: (parent.width - 36px) / 2; }
+                                    if !loading: Text {
                                         text: stats.orphan-count;
                                         font-size: 28px;
                                         font-weight: 700;
@@ -2410,7 +2922,8 @@ export component MainWindow inherits Window {
                                     alignment: center;
                                     spacing: 4px;
 
-                                    Text {
+                                    if loading: Rectangle { width: 36px; height: 20px; border-radius: 5px; background: Cat.overlay0.with-alpha(0.12); x: (parent.width - 36px) / 2; }
+                                    if !loading: Text {
                                         text: stats.update-count;
                                         font-size: 28px;
                                         font-weight: 700;
@@ -2461,7 +2974,8 @@ export component MainWindow inherits Window {
                                         font-weight: 600;
                                         color: Cat.mauve;
                                     }
-                                    Text {
+                                    if loading: Rectangle { width: 110px; height: 11px; border-radius: 3px; background: Cat.overlay0.with-alpha(0.1); }
+                                    if !loading: Text {
                                         text: stats.update-count > 0 ? stats.update-count + " updates pending" : "System is up to date";
                                         font-size: 11px;
                                         color: Cat.overlay0;
@@ -2493,7 +3007,8 @@ export component MainWindow inherits Window {
                                         font-weight: 600;
                                         color: Cat.blue;
                                     }
-                                    Text {
+                                    if loading: Rectangle { width: 70px; height: 11px; border-radius: 3px; background: Cat.overlay0.with-alpha(0.1); }
+                                    if !loading: Text {
                                         text: stats.cache-size + " used";
                                         font-size: 11px;
                                         color: Cat.overlay0;
@@ -2526,7 +3041,8 @@ export component MainWindow inherits Window {
                                         font-weight: 600;
                                         color: stats.orphan-count > 0 ? Cat.red : Cat.overlay0;
                                     }
-                                    Text {
+                                    if loading: Rectangle { width: 130px; height: 11px; border-radius: 3px; background: Cat.overlay0.with-alpha(0.1); }
+                                    if !loading: Text {
                                         text: stats.orphan-count + " orphaned packages";
                                         font-size: 11px;
                                         color: Cat.overlay0;
@@ -2536,118 +3052,279 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // Arch Linux News
+                    // ── SYSTEM ──────────────────────────────────────────────
                     VerticalLayout {
                         spacing: 8px;
 
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 8px;
+                        SectionLabel { section-title: "SYSTEM"; }
 
-                            SectionLabel {
-                                section-title: "ARCH LINUX NEWS";
-                                horizontal-stretch: 1;
-                                vertical-alignment: center;
+                        // Geeky system card
+                        Rectangle {
+                            border-radius: 12px;
+                            background: Cat.crust.with-alpha(0.55);
+                            border-width: 1px;
+                            border-color: Cat.mauve.with-alpha(0.12);
+                            clip: true;
+
+                            // Subtle grid watermark
+                            Rectangle {
+                                x: parent.width - 140px;
+                                y: -10px;
+                                width: 140px;
+                                height: parent.height + 20px;
+                                background: Cat.mauve.with-alpha(0.025);
+                                border-radius: 0;
                             }
 
-                            Rectangle {
-                                width: news-refresh-label.preferred-width + 18px;
-                                height: 22px;
-                                border-radius: 5px;
-                                background: news-refresh-touch.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.6);
-                                animate background { duration: 80ms; }
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 0;
 
-                                news-refresh-label := Text {
-                                    text: "Refresh";
-                                    font-size: 10px;
-                                    color: Cat.overlay1;
+                                // Header row: hostname + distro badge
+                                HorizontalLayout {
+                                    spacing: 10px;
+
+                                    // Terminal chevron
+                                    Text {
+                                        text: "▶";
+                                        font-size: 10px;
+                                        color: Cat.mauve.with-alpha(0.7);
+                                        vertical-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: sys-info.hostname != "" ? sys-info.hostname : "localhost";
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: Cat.mauve;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    if sys-info.distro != "": Rectangle {
+                                        width: distro-lbl.preferred-width + 14px;
+                                        height: 20px;
+                                        border-radius: 4px;
+                                        background: Cat.mauve.with-alpha(0.1);
+                                        border-width: 1px;
+                                        border-color: Cat.mauve.with-alpha(0.25);
+                                        distro-lbl := Text {
+                                            text: sys-info.distro;
+                                            font-size: 9.5px;
+                                            font-weight: 600;
+                                            color: Cat.mauve;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                Rectangle { height: 10px; }
+                                Rectangle { height: 1px; background: Cat.mauve.with-alpha(0.08); }
+                                Rectangle { height: 10px; }
+
+                                // Grid of specs: 2 columns
+                                HorizontalLayout {
+                                    spacing: 24px;
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 9px;
+
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: "OS "; font-size: 9px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.6px; vertical-alignment: center; width: 52px; }
+                                            Text { text: sys-info.kernel; font-size: 10.5px; font-weight: 500; color: Cat.teal; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: "CPU"; font-size: 9px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.6px; vertical-alignment: center; width: 52px; }
+                                            Text { text: sys-info.cpu; font-size: 10.5px; font-weight: 500; color: Cat.text; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: "MEM"; font-size: 9px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.6px; vertical-alignment: center; width: 52px; }
+                                            Text { text: sys-info.ram-used + " / " + sys-info.ram-total; font-size: 10.5px; font-weight: 500; color: Cat.green; vertical-alignment: center; horizontal-stretch: 1; }
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 9px;
+
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: "UP "; font-size: 9px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.6px; vertical-alignment: center; width: 52px; }
+                                            Text { text: sys-info.uptime; font-size: 10.5px; font-weight: 500; color: Cat.yellow; vertical-alignment: center; horizontal-stretch: 1; }
+                                        }
+
+                                        if sys-info.gpu != "": HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: "GPU"; font-size: 9px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.6px; vertical-alignment: center; width: 52px; }
+                                            Text { text: sys-info.gpu; font-size: 10.5px; font-weight: 500; color: Cat.text; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                        }
+
+                                        if sys-info.disk-total != "": HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: "DSK"; font-size: 9px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.6px; vertical-alignment: center; width: 52px; }
+                                            Text { text: sys-info.disk-used + " / " + sys-info.disk-total; font-size: 10.5px; font-weight: 500; color: Cat.sapphire; vertical-alignment: center; horizontal-stretch: 1; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── RECENT ACTIVITY ──────────────────────────────────────
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        SectionLabel { section-title: "RECENT ACTIVITY"; }
+
+                        VerticalLayout {
+                            spacing: 0;
+
+                            if activity-items.length == 0: Rectangle {
+                                height: 44px;
+                                border-radius: 8px;
+                                background: Cat.surface0.with-alpha(0.3);
+                                Text {
+                                    text: "No activity found";
+                                    font-size: 11px;
+                                    color: Cat.overlay0;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
-
-                                news-refresh-touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.fetch-news(); }
-                                }
-                            }
-                        }
-
-                        if news-items.length == 0: Rectangle {
-                            height: 56px;
-                            border-radius: 8px;
-                            background: Cat.surface0.with-alpha(0.3);
-
-                            Text {
-                                text: "No news loaded — click Refresh to fetch";
-                                font-size: 12px;
-                                color: Cat.overlay0;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        for item[i] in news-items: Rectangle {
-                            height: 58px;
-                            border-radius: 8px;
-                            background: news-item-touch.has-hover ? Cat.surface0.with-alpha(0.6) : Cat.surface0.with-alpha(0.3);
-                            animate background { duration: 80ms; }
-
-                            news-item-touch := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.open-url(item.url); }
                             }
 
-                            HorizontalLayout {
-                                padding-left: 14px;
-                                padding-right: 14px;
-                                spacing: 10px;
+                            for item[i] in activity-items: Rectangle {
+                                height: 38px;
 
-                                VerticalLayout {
-                                    alignment: center;
-                                    horizontal-stretch: 1;
-                                    spacing: 3px;
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 10px;
+
+                                    Rectangle {
+                                        width: action-lbl.preferred-width + 12px;
+                                        height: 18px;
+                                        border-radius: 5px;
+                                        y: (parent.height - 18px) / 2;
+                                        background: item.action == "installed" ? Cat.green.with-alpha(0.18)
+                                            : item.action == "removed" ? Cat.red.with-alpha(0.18)
+                                            : Cat.peach.with-alpha(0.18);
+
+                                        action-lbl := Text {
+                                            text: item.action;
+                                            font-size: 9.5px;
+                                            font-weight: 600;
+                                            color: item.action == "installed" ? Cat.green
+                                                : item.action == "removed" ? Cat.red
+                                                : Cat.peach;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
 
                                     Text {
-                                        text: item.title;
-                                        font-size: 12.5px;
+                                        text: item.package;
+                                        font-size: 12px;
                                         font-weight: 500;
                                         color: Cat.text;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
                                         overflow: elide;
                                     }
+
                                     Text {
                                         text: item.date;
-                                        font-size: 10.5px;
+                                        font-size: 10px;
                                         color: Cat.overlay0;
+                                        vertical-alignment: center;
                                     }
                                 }
 
-                                VerticalLayout {
-                                    alignment: center;
-                                    NavIcon {
-                                        d: icon-link;
-                                        icon-color: Cat.overlay0;
-                                        width: 13px;
-                                        height: 13px;
-                                    }
+                                if i < activity-items.length - 1: Rectangle {
+                                    x: 12px;
+                                    y: parent.height - 1px;
+                                    width: parent.width - 24px;
+                                    height: 1px;
+                                    background: Cat.surface0;
+                                    opacity: 0.5;
                                 }
-                            }
-
-                            if i < news-items.length - 1: Rectangle {
-                                x: 14px;
-                                y: parent.height - 1px;
-                                width: parent.width - 28px;
-                                height: 1px;
-                                background: Cat.surface0;
-                                opacity: 0.5;
                             }
                         }
                     }
                 }
-            }
 
+            // Catch-all stretch: keeps all content pinned to top when no view provides a flex child
+            if view == 2 || view == 5 || view == 3 || view == 4: Rectangle { vertical-stretch: 1; }
         }
     }
 
+    // ── Top-right loading / progress indicator ──────────────────────────────
+    if loading || busy: Rectangle {
+        x: parent.width - self.width - 16px;
+        y: 12px;
+        width: 220px;
+        height: 34px;
+        border-radius: 8px;
+        background: Cat.surface0.with-alpha(0.92);
+        border-width: 1px;
+        border-color: Cat.mauve.with-alpha(0.25);
+        drop-shadow-blur: 12px;
+        drop-shadow-color: Cat.crust.with-alpha(0.4);
+        drop-shadow-offset-y: 2px;
+        clip: true;
+
+        // Progress fill
+        Rectangle {
+            x: 0;
+            y: parent.height - 2px;
+            height: 2px;
+            border-radius: 1px;
+            background: Cat.mauve;
+            width: busy && progress > 0
+                ? parent.width * progress / 100
+                : parent.width * 0.35;
+            animate width { duration: 350ms; easing: ease-out; }
+        }
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 10px;
+            spacing: 8px;
+
+            // Pulsing dot
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: Cat.mauve;
+                y: (parent.height - 6px) / 2;
+                animate background { duration: 600ms; }
+            }
+
+            Text {
+                text: progress-text != "" ? progress-text : "Loading...";
+                font-size: 11px;
+                color: Cat.subtext0;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+
+            if busy && progress > 0: Text {
+                text: progress + "%";
+                font-size: 11px;
+                font-weight: 700;
+                color: Cat.mauve;
+                vertical-alignment: center;
+            }
+        }
+    }
 
     if selected-count > 0: Rectangle {
         x: (parent.width - 360px) / 2;
@@ -2702,7 +3379,10 @@ export component MainWindow inherits Window {
                 primary: selected-uninstalled-count > 0;
                 enabled: selected-uninstalled-count > 0;
                 min-width: 60px;
-                clicked => { root.bulk-install(); }
+                clicked => {
+                    if view == 10 { root.batch-flatpak-install(); }
+                    else { root.bulk-install(); }
+                }
             }
 
             Btn {
@@ -2710,7 +3390,207 @@ export component MainWindow inherits Window {
                 danger: selected-installed-count > 0;
                 enabled: selected-installed-count > 0;
                 min-width: 64px;
-                clicked => { root.bulk-remove(); }
+                clicked => {
+                    if view == 10 { root.batch-flatpak-remove(); }
+                    else { root.bulk-remove(); }
+                }
+            }
+        }
+    }
+
+    if show-addons-modal: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Cat.crust.with-alpha(0.65);
+
+        // Clicking backdrop closes
+        TouchArea { clicked => { root.show-addons-modal = false; } }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 480px;
+            height: min(520px, parent.height - 60px);
+            background: Cat.base;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: Cat.surface1;
+            drop-shadow-blur: 40px;
+            drop-shadow-color: Cat.crust.with-alpha(0.7);
+            drop-shadow-offset-y: 10px;
+
+            // Intercept clicks so modal doesn't close
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 0;
+
+                // Header
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    NavIcon {
+                        d: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5";
+                        icon-color: Cat.mauve;
+                        width: 20px;
+                        height: 20px;
+                    }
+
+                    Text {
+                        text: "Add-Ons & Extensions";
+                        font-size: 16px;
+                        font-weight: 700;
+                        color: Cat.text;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 6px;
+                        background: close-modal-t.has-hover ? Cat.surface1 : transparent;
+                        NavIcon { d: "M18 6L6 18M6 6l12 12"; icon-color: Cat.overlay1; width: 14px; height: 14px; x: 7px; y: 7px; }
+                        close-modal-t := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.show-addons-modal = false; }
+                        }
+                    }
+                }
+
+                Rectangle { height: 16px; }
+
+                // Addon list (scrollable)
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 0;
+
+                        for addon[ai] in flatpak-addons: Rectangle {
+                            height: 62px;
+                            border-radius: 8px;
+                            background: addon-modal-t.has-hover
+                                ? Cat.surface0.with-alpha(0.6)
+                                : transparent;
+                            animate background { duration: 60ms; }
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 12px;
+
+                                // Status indicator dot
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 4px;
+                                        background: addon.installed ? Cat.green : Cat.overlay0.with-alpha(0.3);
+                                    }
+                                }
+
+                                // Name + description
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 3px;
+                                    alignment: center;
+                                    Text {
+                                        text: addon.display-name;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: Cat.text;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: addon.description;
+                                        font-size: 11px;
+                                        color: Cat.subtext0;
+                                        overflow: elide;
+                                    }
+                                }
+
+                                // Installed badge OR Install button
+                                VerticalLayout {
+                                    alignment: center;
+                                    if addon.installed: Rectangle {
+                                        width: 78px;
+                                        height: 28px;
+                                        border-radius: 6px;
+                                        background: Cat.green.with-alpha(0.12);
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            spacing: 4px;
+                                            NavIcon {
+                                                d: "M20 6L9 17l-5-5";
+                                                icon-color: Cat.green;
+                                                width: 12px;
+                                                height: 12px;
+                                            }
+                                            Text { text: "Installed"; font-size: 10.5px; font-weight: 600; color: Cat.green; vertical-alignment: center; }
+                                        }
+                                    }
+                                    if !addon.installed: Rectangle {
+                                        width: 78px;
+                                        height: 28px;
+                                        border-radius: 6px;
+                                        background: addon-inst-t.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.18);
+                                        animate background { duration: 60ms; }
+                                        Text {
+                                            text: "Install";
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            color: addon-inst-t.has-hover ? #ffffff : Cat.mauve;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        addon-inst-t := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.request-install(addon.name, 1);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Separator
+                            if ai < flatpak-addons.length - 1: Rectangle {
+                                x: 8px;
+                                y: parent.height - 1px;
+                                width: parent.width - 16px;
+                                height: 1px;
+                                background: Cat.surface0;
+                                opacity: 0.5;
+                            }
+
+                            addon-modal-t := TouchArea {}
+                        }
+                    }
+                }
+
+                Rectangle { height: 16px; }
+
+                // Bottom: close button
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    Rectangle {
+                        width: 80px;
+                        height: 34px;
+                        border-radius: 8px;
+                        background: close-btn-t.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.6);
+                        animate background { duration: 60ms; }
+                        Text { text: "Close"; font-size: 12px; font-weight: 500; color: Cat.subtext0; horizontal-alignment: center; vertical-alignment: center; }
+                        close-btn-t := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.show-addons-modal = false; }
+                        }
+                    }
+                }
             }
         }
     }
@@ -3372,4 +4252,5 @@ export component MainWindow inherits Window {
             }
         }
     }
+}
 }
