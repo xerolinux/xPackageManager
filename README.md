@@ -22,17 +22,9 @@ sudo pacman -S rust flatpak
 ### Build with Cargo
 
 ```bash
-cargo build --release
-```
-
-## Running
-
-```bash
-# Development
-cargo run --bin xpm-ui
-
-# Release
-./target/release/xpm-ui
+git clone https://github.com/xerolinux/xPackageManager
+cd xPackageManager/
+cargo run --bin xpackagemanager
 ```
 
 ## Architecture
