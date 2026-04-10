@@ -1230,6 +1230,52 @@ fn update_selection_in_models(window: &MainWindow, name: &str, backend: i32, sel
     update_selection_in_model(&window.get_flatpak_packages(), name, backend, selected);
 }
 
+/// Given the last line of terminal output containing a prompt like `[Y/n]` or `(yes/no)`,
+/// return the default answer string (the uppercase / first option).
+/// Returns None if no recognisable prompt is found.
+fn detect_prompt_default(line: &str) -> Option<String> {
+    // Look for [...] bracket patterns last on the line: [Y/n], [y/N], [Y/N], [yes/no] etc.
+    let line = line.trim_end_matches(|c: char| c == ' ' || c == ':');
+    if let Some(start) = line.rfind('[') {
+        if let Some(rel_end) = line[start..].find(']') {
+            let inner = &line[start + 1..start + rel_end];
+            // Split by '/' and pick the uppercase variant as default
+            for part in inner.split('/') {
+                let part = part.trim();
+                if !part.is_empty() && part.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return Some(part.to_lowercase());
+                }
+            }
+            // All lowercase — first option is default
+            if let Some(first) = inner.split('/').next() {
+                let first = first.trim();
+                if !first.is_empty() {
+                    return Some(first.to_string());
+                }
+            }
+        }
+    }
+    // (yes/no) paren style
+    if let Some(start) = line.rfind('(') {
+        if let Some(rel_end) = line[start..].find(')') {
+            let inner = &line[start + 1..start + rel_end];
+            for part in inner.split('/') {
+                let part = part.trim();
+                if !part.is_empty() && part.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return Some(part.to_lowercase());
+                }
+            }
+            if let Some(first) = inner.split('/').next() {
+                let first = first.trim();
+                if !first.is_empty() {
+                    return Some(first.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn parse_conflict_summary(output: &str) -> (String, bool) {
     let mut lines = Vec::new();
     let mut is_file_conflict = false;
@@ -1717,6 +1763,35 @@ fn main() {
                         window.set_terminal_done(true);
                         window.set_terminal_success(success);
                         if success {
+                            // Optimistic instant removal
+                            if let Some((action, names, backend)) = conflict_ctx_timer.lock().unwrap().clone() {
+                                let is_remove = action == "remove" || action == "bulk-remove";
+                                if is_remove && !names.is_empty() {
+                                    let name_set: std::collections::HashSet<&str> =
+                                        names.iter().map(|s| s.as_str()).collect();
+                                    if backend == 1 {
+                                        // Filter installed_flatpaks (the Installed tab in view 10)
+                                        let current: Vec<PackageData> = window.get_installed_flatpaks()
+                                            .iter()
+                                            .filter(|p| !name_set.contains(p.name.as_str()))
+                                            .collect();
+                                        window.set_installed_flatpaks(ModelRc::new(VecModel::from(current)));
+                                    } else {
+                                        {
+                                            let mut inst = full_installed_timer.borrow_mut();
+                                            inst.retain(|p| !name_set.contains(p.name.as_str()));
+                                        }
+                                        let ps = page_size as usize;
+                                        let inst = full_installed_timer.borrow();
+                                        let total = ((inst.len() + ps - 1) / ps).max(1) as i32;
+                                        let page: Vec<PackageData> = inst.iter().take(ps).cloned().collect();
+                                        drop(inst);
+                                        window.set_installed_packages(ModelRc::new(VecModel::from(page)));
+                                        window.set_current_page(0);
+                                        window.set_total_pages(total);
+                                    }
+                                }
+                            }
                             let tx = tx_timer.clone();
                             let search_query = window.get_search_text().to_string();
                             thread::spawn(move || {
@@ -1726,6 +1801,9 @@ fn main() {
                                     if !search_query.is_empty() {
                                         search_packages_async(&tx, &search_query).await;
                                     }
+                                    // Refresh installed flatpaks list too
+                                    let pkgs = tokio::task::spawn_blocking(load_installed_flatpaks).await.unwrap_or_default();
+                                    let _ = tx.send(UiMessage::InstalledFlatpaksLoaded(pkgs));
                                 });
                             });
                         }
@@ -1778,12 +1856,12 @@ fn main() {
                                     let name_set: std::collections::HashSet<&str> =
                                         names.iter().map(|s| s.as_str()).collect();
                                     if backend == 1 {
-                                        // Flatpak removal — filter flatpak_packages
-                                        let current: Vec<PackageData> = window.get_flatpak_packages()
+                                        // Flatpak removal — filter installed_flatpaks
+                                        let current: Vec<PackageData> = window.get_installed_flatpaks()
                                             .iter()
                                             .filter(|p| !name_set.contains(p.name.as_str()))
                                             .collect();
-                                        window.set_flatpak_packages(ModelRc::new(VecModel::from(current)));
+                                        window.set_installed_flatpaks(ModelRc::new(VecModel::from(current)));
                                     } else {
                                         // Native pacman removal — filter full installed list + re-page
                                         {
@@ -1824,6 +1902,8 @@ fn main() {
                                     if !search_query.is_empty() {
                                         search_packages_async(&tx, &search_query).await;
                                     }
+                                    let pkgs = tokio::task::spawn_blocking(load_installed_flatpaks).await.unwrap_or_default();
+                                    let _ = tx.send(UiMessage::InstalledFlatpaksLoaded(pkgs));
                                 });
                             });
                         }
@@ -2211,12 +2291,15 @@ fn main() {
     let tx_fp_remove = tx.clone();
     let fp_remove_input = terminal_input_sender.clone();
     let fp_remove_pid = terminal_child_pid.clone();
+    let fp_remove_ctx = conflict_context.clone();
     window.on_remove_flatpak(move |app_id, also_delete_data| {
         let tx = tx_fp_remove.clone();
         let id = app_id.to_string();
         let input = fp_remove_input.clone();
         let pid = fp_remove_pid.clone();
+        let ctx = fp_remove_ctx.clone();
         thread::spawn(move || {
+            *ctx.lock().unwrap() = Some(("remove".to_string(), vec![id.clone()], 1));
             let title = format!("Removing {}", id);
             let mut args = vec!["uninstall", "--noninteractive", "--assumeyes", &id];
             if also_delete_data { args.push("--delete-data"); }
@@ -2509,8 +2592,21 @@ fn main() {
         let is_password = window_weak_te.upgrade()
             .map(|w| w.get_terminal_show_password())
             .unwrap_or(false);
-        if !is_password && !text.is_empty() {
-            let _ = tx_term_echo.send(UiMessage::TerminalOutput(format!("{}\n", text)));
+        if !is_password {
+            if !text.is_empty() {
+                let _ = tx_term_echo.send(UiMessage::TerminalOutput(format!("{}\n", text)));
+            } else {
+                // Empty input + Enter: detect default from the last prompt line and echo it.
+                // The PTY writer always appends \n, so the program receives its default anyway;
+                // we just want to show the user what was "selected".
+                let output = window_weak_te.upgrade()
+                    .map(|w| w.get_terminal_output().to_string())
+                    .unwrap_or_default();
+                let last_line = output.lines().last().unwrap_or("").trim_end();
+                if let Some(default) = detect_prompt_default(last_line) {
+                    let _ = tx_term_echo.send(UiMessage::TerminalOutput(format!("{}\n", default)));
+                }
+            }
         }
         if let Some(sender) = term_input.lock().unwrap().as_ref() {
             let _ = sender.send(text);
