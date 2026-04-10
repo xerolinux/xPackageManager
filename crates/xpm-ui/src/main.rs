@@ -9,6 +9,7 @@ use std::io::BufReader;
 use std::path::Path;
 use serde_json::Value;
 use std::rc::Rc;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::sync::{mpsc, Arc, Mutex};
@@ -38,6 +39,8 @@ enum UiMessage {
     ShowTerminal(String),
     TerminalOutput(String),
     TerminalDone(bool),
+    TerminalPasswordMode(bool),
+    TerminalFocusInput,
     HideTerminal,
     ShowProgressPopup(String),
     OperationProgress(i32, String),
@@ -74,6 +77,50 @@ enum UiMessage {
     InstalledFlatpaksLoaded(Vec<PackageData>),
     DepTreeLoaded { deps: Vec<DepNode>, reqby: Vec<DepNode>, root_version: String },
 }
+
+// Plain-text fzf replacement for programs (like downgrade) that pipe through fzf.
+// fzf uses alternate-screen TUI sequences that are invisible after strip_ansi.
+// This script reads the list from stdin, prints it to /dev/tty (our PTY),
+// asks the user to type a number, and outputs the matching line to stdout.
+const FAKE_FZF_SCRIPT: &str = r#"#!/usr/bin/env bash
+lines=()
+while IFS= read -r line; do lines+=("$line"); done
+printf "\n" >/dev/tty
+for ((i=${#lines[@]}-1; i>=0; i--)); do
+    printf "%s\n" "${lines[$i]}" >/dev/tty
+done
+printf "\nEnter number to select (0 to cancel): " >/dev/tty
+# Disable PTY echo — the UI handles local echo itself to avoid duplicates
+stty -echo </dev/tty 2>/dev/null
+read -r num </dev/tty
+stty echo </dev/tty 2>/dev/null
+[[ -z "$num" || "$num" == "0" ]] && exit 1
+for line in "${lines[@]}"; do
+    if [[ "$line" =~ (^|[^0-9])"$num"\) ]]; then
+        printf "%s\n" "$line"
+        exit 0
+    fi
+done
+exit 1
+"#;
+
+// Non-password interactive prompts that need input focus but not masking
+const TERMINAL_INPUT_PROMPT_PATTERNS: &[&str] = &[
+    "Enter number to select",   // fake fzf selection prompt
+    "to cancel)",               // "0 to cancel)"
+];
+
+// Password / auth prompts that require the user to type a secret
+const PASSWORD_PROMPT_PATTERNS: &[&str] = &[
+    "[sudo] password",
+    "Password:",
+    "password for ",
+    "Enter password",
+    "Fingerprint",          // fprintd/Howdy timeout fallback
+    "PIN:",
+    "PKCS#11",
+    "passphrase for key",
+];
 
 const PACMAN_AUTO_CONFIRM_PATTERNS: &[&str] = &[
     "Proceed with installation? [Y/n]",
@@ -696,6 +743,7 @@ fn run_in_terminal(
     *pid_holder.lock().unwrap() = Some(child_pid);
 
     let (in_tx, in_rx) = mpsc::channel::<String>();
+    let in_tx_auto = in_tx.clone(); // clone for auto-confirm in reader
     *input_sender.lock().unwrap() = Some(in_tx);
 
     let tx_reader = tx.clone();
@@ -705,16 +753,35 @@ fn run_in_terminal(
         let mut file = unsafe { std::fs::File::from_raw_fd(master_fd_reader) };
         let mut buf = [0u8; 4096];
         loop {
+            // Poll with 100ms timeout — avoids blocking when process awaits input
+            let ready = unsafe {
+                let mut pfd = libc::pollfd { fd: master_fd_reader, events: libc::POLLIN, revents: 0 };
+                libc::poll(&mut pfd as *mut libc::pollfd, 1, 20)
+            };
+            if ready < 0 { break; } // error / signal
+            if ready == 0 { continue; } // timeout — keep polling
             match file.read(&mut buf) {
                 Ok(0) => break,
-                                      Ok(n) => {
-                                          let text = String::from_utf8_lossy(&buf[..n]);
-                                          let cleaned = strip_ansi(&text);
-                                          if !cleaned.is_empty() {
-                                              let _ = tx_reader.send(UiMessage::TerminalOutput(cleaned));
-                                          }
-                                      }
-                                      Err(_) => break,
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    let cleaned = strip_ansi(&text);
+                    if !cleaned.is_empty() {
+                        // Auto-confirm known safe pacman prompts
+                        if PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p)) {
+                            let _ = in_tx_auto.send("y".to_string());
+                        }
+                        // Detect password / auth prompts — surface to UI
+                        if PASSWORD_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) {
+                            let _ = tx_reader.send(UiMessage::TerminalPasswordMode(true));
+                        }
+                        // Detect interactive selection prompts — refocus input (no masking)
+                        if TERMINAL_INPUT_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) {
+                            let _ = tx_reader.send(UiMessage::TerminalFocusInput);
+                        }
+                        let _ = tx_reader.send(UiMessage::TerminalOutput(cleaned));
+                    }
+                }
+                Err(_) => break,
             }
         }
         std::mem::forget(file);
@@ -754,6 +821,7 @@ fn run_in_terminal(
     let _ = reader_handle.join();
     let _ = writer_handle.join();
 
+    let _ = tx.send(UiMessage::TerminalPasswordMode(false));
     let _ = tx.send(UiMessage::TerminalDone(success));
 }
 
@@ -782,7 +850,7 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
         }
         ("remove", _) | ("bulk-remove", _) => {
             ("pkexec".to_string(), {
-                let mut args = vec!["pacman".to_string(), "-R".to_string()];
+                let mut args = vec!["pacman".to_string(), "-R".to_string(), "--noconfirm".to_string()];
                 args.extend(names.iter().cloned());
                 args
             })
@@ -791,12 +859,12 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
             ("flatpak".to_string(), vec!["update".to_string(), "-y".to_string()])
         }
         ("update-all", _) => {
-            ("pkexec".to_string(), vec!["pacman".to_string(), "-Syu".to_string()])
+            ("pkexec".to_string(), vec!["pacman".to_string(), "-Syu".to_string(), "--noconfirm".to_string()])
         }
         ("force-install", _) => {
             ("pkexec".to_string(), {
                 let mut args = vec!["pacman".to_string(), "-S".to_string(),
-                    "--overwrite".to_string(), "*".to_string()];
+                    "--overwrite".to_string(), "*".to_string(), "--noconfirm".to_string()];
                 args.extend(names.iter().cloned());
                 args
             })
@@ -804,12 +872,13 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
         ("force-update-all", _) => {
             ("pkexec".to_string(), vec![
                 "pacman".to_string(), "-Syu".to_string(),
-                "--overwrite".to_string(), "*".to_string(),
+                "--overwrite".to_string(), "*".to_string(), "--noconfirm".to_string(),
             ])
         }
         _ => {
+            // install / update / bulk-install
             ("pkexec".to_string(), {
-                let mut args = vec!["pacman".to_string(), "-S".to_string()];
+                let mut args = vec!["pacman".to_string(), "-S".to_string(), "--noconfirm".to_string()];
                 args.extend(names.iter().cloned());
                 args
             })
@@ -863,123 +932,128 @@ fn run_managed_operation(
         let mut buf = [0u8; 4096];
         let mut current_percent: i32 = 0;
         let mut pending_output = String::new();
-        let mut last_output_flush = std::time::Instant::now();
+        // initialise to 100ms in the past so the very first data chunk flushes immediately
+        let mut last_output_flush = std::time::Instant::now() - std::time::Duration::from_millis(100);
         const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-        const MAX_OUTPUT_LINES: usize = 120;
+        const MAX_OUTPUT_LINES: usize = 500;
 
         loop {
+            // Poll with 100ms timeout — prevents blocking when process waits for user input.
+            // Without this, a prompt like ":: Replace X with Y? [Y/n]" never reaches the UI
+            // because read() blocks waiting for the next byte that never comes.
+            let ready = unsafe {
+                let mut pfd = libc::pollfd { fd: master_fd_reader, events: libc::POLLIN, revents: 0 };
+                libc::poll(&mut pfd as *mut libc::pollfd, 1, 20)
+            };
+            if ready < 0 { break; } // error / interrupted
+
+            let now = std::time::Instant::now();
+
+            if ready == 0 {
+                // Timeout — process may be waiting for input. Flush pending output so
+                // the prompt text becomes visible in the UI.
+                if !pending_output.is_empty() {
+                    let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
+                    last_output_flush = now;
+                }
+                continue;
+            }
+
             match file.read(&mut buf) {
                 Ok(0) => break,
-                                      Ok(n) => {
-                                          let text = String::from_utf8_lossy(&buf[..n]);
-                                          let cleaned = strip_ansi(&text);
-                                          if cleaned.is_empty() {
-                                              continue;
-                                          }
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    let cleaned = strip_ansi(&text);
+                    if cleaned.is_empty() { continue; }
 
-                                          {
-                                              let mut buf = output_buffer_r.lock().unwrap();
-                                              if buf.len() < 65536 {
-                                                  buf.push_str(&cleaned);
-                                              }
-                                          }
+                    // Accumulate in conflict-detection buffer
+                    {
+                        let mut ob = output_buffer_r.lock().unwrap();
+                        if ob.len() < 65536 { ob.push_str(&cleaned); }
+                    }
 
-                                          // Apply VT100 carriage-return semantics so pacman's
-                                          // in-place progress updates overwrite instead of appending.
-                                          pending_output = apply_terminal_text(&pending_output, &cleaned);
+                    // Apply VT100 carriage-return semantics (pacman progress bars)
+                    pending_output = apply_terminal_text(&pending_output, &cleaned);
 
-                                          // Trim to MAX_OUTPUT_LINES to avoid unbounded growth
-                                          let line_count = pending_output.split('\n').count();
-                                          if line_count > MAX_OUTPUT_LINES {
-                                              let skip = line_count - MAX_OUTPUT_LINES;
-                                              let start = pending_output
-                                                  .split('\n')
-                                                  .take(skip)
-                                                  .map(|l| l.len() + 1)
-                                                  .sum::<usize>();
-                                              pending_output.drain(..start.min(pending_output.len()));
-                                          }
+                    // Trim to MAX_OUTPUT_LINES
+                    let line_count = pending_output.split('\n').count();
+                    if line_count > MAX_OUTPUT_LINES {
+                        let skip = line_count - MAX_OUTPUT_LINES;
+                        let start = pending_output.split('\n').take(skip).map(|l| l.len() + 1).sum::<usize>();
+                        pending_output.drain(..start.min(pending_output.len()));
+                    }
 
-                                          let now = std::time::Instant::now();
-                                          if !pending_output.is_empty()
-                                              && now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL
-                                          {
-                                              let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
-                                              last_output_flush = now;
-                                          }
+                    // Conflict detection
+                    let lower = cleaned.to_lowercase();
+                    if CONFLICT_PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase())) {
+                        *escalated_r.lock().unwrap() = true;
+                    }
 
-                                          let lower = cleaned.to_lowercase();
-                                          let has_conflict = CONFLICT_PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase()));
-                                          if has_conflict {
-                                              *escalated_r.lock().unwrap() = true;
-                                              // don't switch to terminal — let it finish, then show conflict dialog
-                                          }
+                    // Prompt / auto-confirm detection — must happen BEFORE flush so
+                    // force_flush can push the prompt text to the UI immediately.
+                    let is_auto_confirm = PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
+                    let mut force_flush = false;
 
-                                          {
+                    if is_auto_confirm {
+                        let _ = in_tx_r.send("y".to_string());
+                        let _ = tx_reader.send(UiMessage::ProgressHidePrompt);
+                        force_flush = true;
+                    } else {
+                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p))
+                            || (cleaned.contains("[y/N]") && !is_auto_confirm);
+                        if needs_user_input {
+                            let prompt_text = cleaned.lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .last()
+                                .unwrap_or(&cleaned)
+                                .trim()
+                                .to_string();
+                            let _ = tx_reader.send(UiMessage::ProgressPrompt(prompt_text));
+                            force_flush = true; // must be visible before waiting for user
+                        }
+                    }
 
-                                              let is_auto_confirm = PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
-                                              if is_auto_confirm {
-                                                  let _ = in_tx_r.send("y".to_string());
-                                                  let _ = tx_reader.send(UiMessage::ProgressHidePrompt);
-                                              } else {
-                                                  let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p))
-                                                  || (cleaned.contains("[y/N]") && !is_auto_confirm);
-                                                  if needs_user_input {
-                                                      let prompt_text = cleaned.lines()
-                                                      .filter(|l| !l.trim().is_empty())
-                                                      .last()
-                                                      .unwrap_or(&cleaned)
-                                                      .trim()
-                                                      .to_string();
-                                                      let _ = tx_reader.send(UiMessage::ProgressPrompt(prompt_text));
-                                                  }
-                                              }
+                    // Progress percent tracking
+                    for line in cleaned.split('\n') {
+                        let clean_line = line.split('\r').last().unwrap_or(line);
+                        let lower_line = clean_line.to_lowercase();
+                        let trimmed = clean_line.trim().to_string();
+                        let new_percent = if lower_line.contains("resolving dependencies") { 10 }
+                            else if lower_line.contains("looking for conflicting") { 15 }
+                            else if lower_line.contains("downloading") {
+                                parse_progress_fraction(line, 20, 50, total_packages).unwrap_or(35)
+                            }
+                            else if lower_line.contains("checking keyring") || lower_line.contains("checking integrity") { 52 }
+                            else if lower_line.contains("checking package integrity") { 55 }
+                            else if lower_line.contains("loading package files") { 58 }
+                            else if lower_line.contains("installing") || lower_line.contains("upgrading")
+                                || lower_line.contains("removing") || lower_line.contains("reinstalling") {
+                                parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72)
+                            }
+                            else if lower_line.contains("running post-transaction hooks") { 88 }
+                            else if lower_line.contains("arming conditionpathexists")
+                                || lower_line.contains("updating linux module") || lower_line.contains("dkms") { 90 }
+                            else if lower_line.contains("updating linux initcpios") || lower_line.contains("mkinitcpio") { 92 }
+                            else if lower_line.contains("updating grub") || lower_line.contains("grub-mkconfig") { 95 }
+                            else if lower_line.contains("updating the info")
+                                || lower_line.contains("updating the desktop") || lower_line.contains("updating mime") { 97 }
+                            else { current_percent };
 
-                                              for line in cleaned.split('\n') {
-                                                  // strip embedded \r so stage text shown in the UI is clean
-                                                  let clean_line = line.split('\r').last().unwrap_or(line);
-                                                  let lower_line = clean_line.to_lowercase();
-                                                  let trimmed = clean_line.trim().to_string();
-                                                  let new_percent = if lower_line.contains("resolving dependencies") {
-                                                      10
-                                                  } else if lower_line.contains("looking for conflicting") {
-                                                      15
-                                                  } else if lower_line.contains("downloading") {
-                                                      parse_progress_fraction(line, 20, 50, total_packages)
-                                                      .unwrap_or(35)
-                                                  } else if lower_line.contains("checking keyring") || lower_line.contains("checking integrity") {
-                                                      52
-                                                  } else if lower_line.contains("checking package integrity") {
-                                                      55
-                                                  } else if lower_line.contains("loading package files") {
-                                                      58
-                                                  } else if lower_line.contains("installing") || lower_line.contains("upgrading") || lower_line.contains("removing") || lower_line.contains("reinstalling") {
-                                                      parse_progress_fraction(line, 60, 85, total_packages)
-                                                      .unwrap_or(72)
-                                                  } else if lower_line.contains("running post-transaction hooks") {
-                                                      88
-                                                  } else if lower_line.contains("arming conditionpathexists") || lower_line.contains("updating linux module") || lower_line.contains("dkms") {
-                                                      90
-                                                  } else if lower_line.contains("updating linux initcpios") || lower_line.contains("mkinitcpio") {
-                                                      92
-                                                  } else if lower_line.contains("updating grub") || lower_line.contains("grub-mkconfig") {
-                                                      95
-                                                  } else if lower_line.contains("updating the info") || lower_line.contains("updating the desktop") || lower_line.contains("updating mime") {
-                                                      97
-                                                  } else {
-                                                      current_percent
-                                                  };
+                        if new_percent > current_percent {
+                            current_percent = new_percent;
+                            let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, trimmed));
+                        } else if new_percent == current_percent && current_percent >= 88 && !trimmed.is_empty() {
+                            let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, trimmed));
+                        }
+                    }
 
-                                                  if new_percent > current_percent {
-                                                      current_percent = new_percent;
-                                                      let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, trimmed));
-                                                  } else if new_percent == current_percent && current_percent >= 88 && !trimmed.is_empty() {
-                                                      let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, trimmed));
-                                                  }
-                                              }
-                                          }
-                                      }
-                                      Err(_) => break,
+                    // Flush output to UI — immediately on prompts, throttled otherwise
+                    if force_flush || now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
+                        let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
+                        last_output_flush = now;
+                    }
+                }
+                Err(_) => break,
             }
         }
         if !pending_output.is_empty() {
@@ -1615,15 +1689,27 @@ fn main() {
                         window.set_terminal_output(SharedString::from(""));
                         window.set_terminal_done(false);
                         window.set_terminal_success(false);
+                        window.set_terminal_show_password(false);
                         window.set_show_terminal(true);
+                        window.set_terminal_focus_pending(true);
                         pending_terminal.clear();
                     }
                     UiMessage::TerminalOutput(text) => {
                         pending_terminal.push_str(&text);
-                        if pending_terminal.len() > 65536 {
-                            let cut = pending_terminal.len() - 32768;
+                        // cap the accumulation buffer at 512 KB so we don't grow without bound
+                        if pending_terminal.len() > 524288 {
+                            let cut = pending_terminal.len() - 262144;
                             pending_terminal.drain(..cut);
                         }
+                    }
+                    UiMessage::TerminalPasswordMode(on) => {
+                        window.set_terminal_show_password(on);
+                        if on {
+                            window.set_terminal_focus_pending(true);
+                        }
+                    }
+                    UiMessage::TerminalFocusInput => {
+                        window.set_terminal_focus_pending(true);
                     }
                     UiMessage::TerminalDone(success) => {
                         flush_now = true;
@@ -1838,15 +1924,22 @@ fn main() {
             }
 
             if !pending_terminal.is_empty()
-                && (flush_now || last_term_flush.elapsed() >= std::time::Duration::from_millis(150))
+                && (flush_now || last_term_flush.elapsed() >= std::time::Duration::from_millis(50))
                 {
                     let text = std::mem::take(&mut pending_terminal);
                     let current = window.get_terminal_output().to_string();
                     let combined = apply_terminal_text(&current, &text);
-                    let trimmed = if combined.len() > 16384 {
-                        combined[combined.len() - 16384..].to_string()
-                    } else {
-                        combined
+                    // Keep last 500 lines rather than a fixed byte limit
+                    const MAX_TERM_LINES: usize = 500;
+                    let trimmed = {
+                        let lc = combined.split('\n').count();
+                        if lc > MAX_TERM_LINES {
+                            let skip = lc - MAX_TERM_LINES;
+                            let start = combined.split('\n').take(skip).map(|l| l.len() + 1).sum::<usize>();
+                            combined[start.min(combined.len())..].to_string()
+                        } else {
+                            combined
+                        }
                     };
                     window.set_terminal_output(SharedString::from(&trimmed));
                     last_term_flush = std::time::Instant::now();
@@ -2374,8 +2467,19 @@ fn main() {
     });
 
     let term_input = terminal_input_sender.clone();
+    let tx_term_echo = tx.clone();
+    let window_weak_te = window.as_weak();
     window.on_terminal_send_input(move |text| {
         let text = text.to_string();
+        // Local echo: show what the user typed in the terminal output immediately.
+        // PTY echo is unreliable after sudo's tcsetattr — don't rely on it.
+        // Skip echo when in password mode (don't reveal the typed secret).
+        let is_password = window_weak_te.upgrade()
+            .map(|w| w.get_terminal_show_password())
+            .unwrap_or(false);
+        if !is_password && !text.is_empty() {
+            let _ = tx_term_echo.send(UiMessage::TerminalOutput(format!("{}\n", text)));
+        }
         if let Some(sender) = term_input.lock().unwrap().as_ref() {
             let _ = sender.send(text);
         }
@@ -2960,15 +3064,34 @@ fn main() {
         let input = dg_input.clone();
         let pid = dg_pid.clone();
         thread::spawn(move || {
-            let cmd = format!("sudo downgrade {}", name);
+            // downgrade uses fzf (TUI) for version selection, which is invisible after
+            // strip_ansi. We install a plain-text fzf replacement into a temp dir
+            // and prepend it to PATH so downgrade uses our version instead.
+            let fake_dir = format!("/tmp/xpm-fzf-{}", std::process::id());
+            let fzf_path = format!("{}/fzf", fake_dir);
+            let _ = std::fs::create_dir_all(&fake_dir);
+            let _ = std::fs::write(&fzf_path, FAKE_FZF_SCRIPT);
+            if let Ok(meta) = std::fs::metadata(&fzf_path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(&fzf_path, perms);
+            }
+            // Use pkexec so polkit handles auth graphically (Howdy → password fallback)
+            // rather than prompting in the PTY. pkexec resets PATH so we re-export inside.
+            let bash_cmd = format!(
+                "export PATH={dir}:\"$PATH\"; /usr/bin/downgrade {name}",
+                dir = fake_dir,
+                name = name,
+            );
             run_in_terminal(
                 &tx,
                 &format!("Downgrade {}", name),
-                "bash",
-                &["-c", &cmd],
+                "pkexec",
+                &["bash", "-c", &bash_cmd],
                 &input,
                 &pid,
             );
+            let _ = std::fs::remove_dir_all(&fake_dir);
         });
     });
 

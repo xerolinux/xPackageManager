@@ -120,15 +120,19 @@ component Input inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <string> placeholder: "";
     out property <bool> has-focus: input.has-focus;
+    in property <bool> is-password: false;
     callback accepted(string);
     callback edited(string);
+    public function grab-focus() { input.focus(); }
 
     height: 34px;
     background: Cat.surface0;
     border-radius: 8px;
-    border-width: input.has-focus ? 1px : 0;
-    border-color: Cat.mauve.with-alpha(0.5);
-    animate border-width { duration: 80ms; }
+    border-width: 1px;
+    border-color: input.has-focus
+        ? (is-password ? Cat.yellow.with-alpha(0.7) : Cat.mauve.with-alpha(0.6))
+        : Cat.surface2;
+    animate border-color { duration: 80ms; }
 
     TouchArea { clicked => { input.focus(); } }
 
@@ -151,6 +155,7 @@ component Input inherits Rectangle {
         font-size: 13px;
         vertical-alignment: center;
         single-line: true;
+        input-type: root.is-password ? InputType.password : InputType.text;
         selection-background-color: Cat.mauve.with-alpha(0.3);
         selection-foreground-color: Cat.text;
         accepted => { root.accepted(self.text); }
@@ -792,6 +797,8 @@ export component MainWindow inherits Window {
     in-out property <string> terminal-output: "";
     in-out property <bool> terminal-done: false;
     in-out property <bool> terminal-success: false;
+    in-out property <bool> terminal-show-password: false;
+    in-out property <bool> terminal-focus-pending: false;
     in-out property <bool> setting-aur-enabled: false;
     in-out property <bool> setting-flatpak-enabled: true;
     in-out property <bool> setting-check-updates-on-start: false;
@@ -5696,6 +5703,17 @@ export component MainWindow inherits Window {
         height: 100%;
         background: Cat.crust.with-alpha(0.6);
 
+        // Safe deferred focus — fires from Timer callback (not during property evaluation)
+        // so it never triggers Slint's "Recursion detected" panic.
+        Timer {
+            interval: 8ms;
+            running: root.terminal-focus-pending && !root.terminal-done;
+            triggered => {
+                root.terminal-focus-pending = false;
+                term-input.grab-focus();
+            }
+        }
+
         TouchArea {}
 
         Rectangle {
@@ -5780,30 +5798,55 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if !terminal-done: Rectangle {
-                    height: 38px;
-                    background: Cat.mantle;
-
-                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; }
+                // Input bar — always visible while operation runs, hidden when done.
+                // Password mode only when a sudo/auth prompt is detected.
+                Rectangle {
+                    visible: !terminal-done;
+                    height: terminal-done ? 0px : 52px;
+                    background: root.terminal-show-password
+                        ? Cat.yellow.with-alpha(0.12)
+                        : Cat.crust;
+                    border-width: 1px;
+                    border-color: root.terminal-show-password
+                        ? Cat.yellow.with-alpha(0.5)
+                        : Cat.surface1;
 
                     HorizontalLayout {
                         padding-left: 12px;
                         padding-right: 12px;
+                        padding-top: 9px;
+                        padding-bottom: 9px;
                         spacing: 8px;
 
-                        Input {
+                        // Label — lock icon for password, chevron otherwise
+                        Text {
+                            text: root.terminal-show-password ? "🔒" : "❯";
+                            font-size: root.terminal-show-password ? 14px : 13px;
+                            color: root.terminal-show-password ? Cat.yellow : Cat.overlay1;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                            width: 18px;
+                        }
+
+                        term-input := Input {
                             horizontal-stretch: 1;
-                            placeholder: "Type response...";
+                            placeholder: root.terminal-show-password
+                                ? "Enter password and press Enter..."
+                                : "Type input and press Enter...";
+                            is-password: root.terminal-show-password;
                             accepted(text) => {
                                 root.terminal-send-input(text);
                                 self.text = "";
+                                root.terminal-show-password = false;
                             }
                         }
                     }
                 }
 
-                if terminal-done: Rectangle {
-                    height: 32px;
+                // Done bar — shown when operation completes
+                Rectangle {
+                    visible: terminal-done;
+                    height: terminal-done ? 32px : 0px;
                     background: terminal-success ? Cat.green.with-alpha(0.1) : Cat.red.with-alpha(0.1);
 
                     HorizontalLayout {
