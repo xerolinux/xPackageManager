@@ -2168,6 +2168,33 @@ export component MainWindow inherits Window {
                                 background: fk-row-touch.has-hover ? Cat.surface0.with-alpha(0.4) : transparent;
                                 animate background { duration: 60ms; }
 
+                                // Row tap → open detail (defined first so it's behind the checkbox)
+                                fk-row-touch := TouchArea {
+                                    clicked => {
+                                        current-flatpak-id = pkg.name;
+                                        flatpak-detail-installed = pkg.installed;
+                                        flatpak-detail-name = pkg.display-name;
+                                        flatpak-detail-summary = pkg.description;
+                                        flatpak-detail-description = "";
+                                        flatpak-detail-developer = "";
+                                        flatpak-detail-version = "";
+                                        flatpak-detail-version-date = "";
+                                        flatpak-detail-changelog = "";
+                                        flatpak-detail-url-homepage = "";
+                                        flatpak-detail-url-bug = "";
+                                        flatpak-detail-url-translate = "";
+                                        flatpak-detail-url-vcs = "";
+                                        flatpak-detail-tags = [];
+                                        flatpak-screenshot = @image-url("");
+                                        flatpak-detail-icon = @image-url("");
+                                        flatpak-addons = [];
+                                        flatpak-addons-installed = [];
+                                        root.load-flatpak-detail(pkg.name);
+                                        root.load-flatpak-icon(pkg.name);
+                                        show-flatpak-detail = true;
+                                    }
+                                }
+
                                 HorizontalLayout {
                                     padding-left: 16px;
                                     padding-right: 14px;
@@ -2264,33 +2291,6 @@ export component MainWindow inherits Window {
                                                 }
                                             }
                                         }
-                                    }
-                                }
-
-                                // Row tap → open detail
-                                fk-row-touch := TouchArea {
-                                    clicked => {
-                                        current-flatpak-id = pkg.name;
-                                        flatpak-detail-installed = pkg.installed;
-                                        flatpak-detail-name = pkg.display-name;
-                                        flatpak-detail-summary = pkg.description;
-                                        flatpak-detail-description = "";
-                                        flatpak-detail-developer = "";
-                                        flatpak-detail-version = "";
-                                        flatpak-detail-version-date = "";
-                                        flatpak-detail-changelog = "";
-                                        flatpak-detail-url-homepage = "";
-                                        flatpak-detail-url-bug = "";
-                                        flatpak-detail-url-translate = "";
-                                        flatpak-detail-url-vcs = "";
-                                        flatpak-detail-tags = [];
-                                        flatpak-screenshot = @image-url("");
-                                        flatpak-detail-icon = @image-url("");
-                                        flatpak-addons = [];
-                                        flatpak-addons-installed = [];
-                                        root.load-flatpak-detail(pkg.name);
-                                        root.load-flatpak-icon(pkg.name);
-                                        show-flatpak-detail = true;
                                     }
                                 }
 

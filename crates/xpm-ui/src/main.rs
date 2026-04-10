@@ -122,21 +122,20 @@ const PASSWORD_PROMPT_PATTERNS: &[&str] = &[
     "passphrase for key",
 ];
 
-const PACMAN_AUTO_CONFIRM_PATTERNS: &[&str] = &[
-    "Proceed with installation? [Y/n]",
-"Proceed with download? [Y/n]",
-":: Proceed with installation? [Y/n]",
-":: Proceed with download? [Y/n]",
-"Do you want to remove these packages? [y/N]",
-":: Do you want to remove these packages? [y/N]",
-];
+const PACMAN_AUTO_CONFIRM_PATTERNS: &[&str] = &[];
 
 const PACMAN_USER_PROMPT_PATTERNS: &[&str] = &[
+    "Proceed with installation? [Y/n]",
+    "Proceed with download? [Y/n]",
+    ":: Proceed with installation? [Y/n]",
+    ":: Proceed with download? [Y/n]",
+    "Do you want to remove these packages? [y/N]",
+    ":: Do you want to remove these packages? [y/N]",
     ":: Replace",
-":: Import",
-"Enter a number",
-"Enter a selection",
-"Terminate batch job",
+    ":: Import",
+    "Enter a number",
+    "Enter a selection",
+    "Terminate batch job",
 ];
 
 const CONFLICT_PATTERNS: &[&str] = &[
@@ -850,7 +849,7 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
         }
         ("remove", _) | ("bulk-remove", _) => {
             ("pkexec".to_string(), {
-                let mut args = vec!["pacman".to_string(), "-R".to_string(), "--noconfirm".to_string()];
+                let mut args = vec!["pacman".to_string(), "-R".to_string()];
                 args.extend(names.iter().cloned());
                 args
             })
@@ -859,7 +858,7 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
             ("flatpak".to_string(), vec!["update".to_string(), "-y".to_string()])
         }
         ("update-all", _) => {
-            ("pkexec".to_string(), vec!["pacman".to_string(), "-Syu".to_string(), "--noconfirm".to_string()])
+            ("pkexec".to_string(), vec!["pacman".to_string(), "-Syu".to_string()])
         }
         ("force-install", _) => {
             ("pkexec".to_string(), {
@@ -878,7 +877,7 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
         _ => {
             // install / update / bulk-install
             ("pkexec".to_string(), {
-                let mut args = vec!["pacman".to_string(), "-S".to_string(), "--noconfirm".to_string()];
+                let mut args = vec!["pacman".to_string(), "-S".to_string()];
                 args.extend(names.iter().cloned());
                 args
             })
@@ -1682,6 +1681,7 @@ fn main() {
     let repo_full_timer = repo_packages_full.clone();
     let filter_serial_timer = flatpak_filter_serial.clone();
     let conflict_ctx_timer = conflict_context.clone();
+    let flatpak_ids_timer = flatpak_installed_ids.clone();
 
     timer.start(TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
         if let Some(window) = window_weak.upgrade() {
@@ -1794,14 +1794,22 @@ fn main() {
                             }
                             let tx = tx_timer.clone();
                             let search_query = window.get_search_text().to_string();
+                            let ids_ref = flatpak_ids_timer.clone();
                             thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().expect("Runtime");
                                 rt.block_on(async {
-                                    load_packages_async(&tx, false).await;
-                                    if !search_query.is_empty() {
-                                        search_packages_async(&tx, &search_query).await;
-                                    }
-                                    // Refresh installed flatpaks list too
+                                    // Refresh flatpak installed ids first — used by search + browse
+                                    let new_ids = tokio::task::spawn_blocking(get_flatpak_installed_ids).await.unwrap_or_default();
+                                    *ids_ref.lock().unwrap() = new_ids;
+                                    // Run load + search concurrently
+                                    tokio::join!(
+                                        load_packages_async(&tx, false),
+                                        async {
+                                            if !search_query.is_empty() {
+                                                search_packages_async(&tx, &search_query).await;
+                                            }
+                                        }
+                                    );
                                     let pkgs = tokio::task::spawn_blocking(load_installed_flatpaks).await.unwrap_or_default();
                                     let _ = tx.send(UiMessage::InstalledFlatpaksLoaded(pkgs));
                                 });
@@ -1895,13 +1903,22 @@ fn main() {
                         {
                             let tx = tx_timer.clone();
                             let search_query = window.get_search_text().to_string();
+                            let ids_ref = flatpak_ids_timer.clone();
                             thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().expect("Runtime");
                                 rt.block_on(async {
-                                    load_packages_async(&tx, false).await;
-                                    if !search_query.is_empty() {
-                                        search_packages_async(&tx, &search_query).await;
-                                    }
+                                    // Refresh flatpak installed ids first — used by search + browse
+                                    let new_ids = tokio::task::spawn_blocking(get_flatpak_installed_ids).await.unwrap_or_default();
+                                    *ids_ref.lock().unwrap() = new_ids;
+                                    // Run load + search concurrently
+                                    tokio::join!(
+                                        load_packages_async(&tx, false),
+                                        async {
+                                            if !search_query.is_empty() {
+                                                search_packages_async(&tx, &search_query).await;
+                                            }
+                                        }
+                                    );
                                     let pkgs = tokio::task::spawn_blocking(load_installed_flatpaks).await.unwrap_or_default();
                                     let _ = tx.send(UiMessage::InstalledFlatpaksLoaded(pkgs));
                                 });
