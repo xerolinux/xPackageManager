@@ -71,12 +71,6 @@ sudo pacman -Syy coming-soon-lol
 - QML views for different package management tasks
 - Native Qt theming support
 
-## TODO
-
-- [ ] Ability to `downgrade` pkgs.
-- [ ] System update notifications.
-- [ ] Dependency tree visualization.
-
 ## License
 
 GPL-3.0-or-later

@@ -44,12 +44,10 @@ enum UiMessage {
     ProgressPrompt(String),
     ProgressHidePrompt,
     OperationDone(bool),
-    ShowTerminalFallback(String),
     ActivityLoaded(Vec<ActivityItem>),
     SysInfoLoaded(SysInfo),
     ShowConflict { summary: String, can_force: bool },
     FlatpakRemotesLoaded(Vec<String>),
-    RemoteAppsLoaded(Vec<PackageData>),
     RemoteAppsFiltered { serial: u64, apps: Vec<PackageData>, total_matches: usize },
     FlatpakDetailReady {
         name: String,
@@ -65,6 +63,7 @@ enum UiMessage {
     RepoPackagesLoaded(Vec<PackageData>),
     RepoPkgDetail(String),
     InstalledFlatpaksLoaded(Vec<PackageData>),
+    DepTreeLoaded { deps: Vec<DepNode>, reqby: Vec<DepNode>, root_version: String },
 }
 
 const PACMAN_AUTO_CONFIRM_PATTERNS: &[&str] = &[
@@ -272,20 +271,7 @@ fn strip_ansi(input: &str) -> String {
     lines.join("\n")
 }
 
-fn is_progress_bar_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    if trimmed.is_empty() { return true; }
-    let total = trimmed.chars().count();
-    if total < 3 { return false; }
-    let bar_chars = trimmed.chars().filter(|&c|
-        c == '#' || c == '.' || c == '-' || c == '=' || c == '>'
-        || c == '█' || c == '░' || c == '▒' || c == '▓' || c == '▏'
-        || c == '▎' || c == '▍' || c == '▌' || c == '▋' || c == '▊'
-        || c == '▉' || c == '━' || c == '─' || c == '╸' || c == '╺'
-        || c == ' '
-    ).count();
-    bar_chars > total / 2
-}
+
 
 fn apply_terminal_text(buffer: &str, new_text: &str) -> String {
     let (prefix, current_line) = match buffer.rfind('\n') {
@@ -315,6 +301,287 @@ fn apply_terminal_text(buffer: &str, new_text: &str) -> String {
 
     result.push_str(&line);
     result
+}
+
+// ── Dependency tree helpers ───────────────────────────────────────────────
+
+fn clean_dep_name(s: &str) -> String {
+    let s = s.trim();
+    // strip version constraints  >= <= > < =
+    for sep in &[">=", "<=", ">", "<", "="] {
+        if let Some((name, _)) = s.split_once(sep) {
+            return name.trim().to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// Trim VCS/AUR version suffixes for display.
+/// "5.2.1+r604+g0b99615a8aef-1" → "5.2.1"
+/// "2.43+r5+g856c426a7534-1"   → "2.43"
+fn trim_version(v: &str) -> String {
+    v.split('+').next().unwrap_or(v).trim_end_matches('-').to_string()
+}
+
+/// Run `pacman -Q` once and return HashMap<name, version> for all installed pkgs.
+fn all_installed_map() -> HashMap<String, String> {
+    let Ok(out) = std::process::Command::new("pacman").arg("-Q").output() else {
+        return HashMap::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.splitn(2, ' ');
+            let name = it.next()?.to_string();
+            let ver  = it.next()?.trim().to_string();
+            Some((name, ver))
+        })
+        .collect()
+}
+
+/// Parse `pacman -Qi <pkg>` (or multi-pkg) output.
+/// Returns (depends, optional_deps, required_by) for the FIRST package block.
+fn parse_qi_block(text: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut depends: Vec<String>  = Vec::new();
+    let mut optional: Vec<String> = Vec::new();
+    let mut reqby: Vec<String>    = Vec::new();
+    let mut state = 0u8; // 1=depends, 2=optional, 3=reqby
+
+    for line in text.lines() {
+        // Continuation line (value continues on next line with leading spaces)
+        if line.starts_with(' ') || line.starts_with('\t') {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            match state {
+                1 => depends.extend(tokens.iter().filter(|&&t| t != "None").map(|&t| clean_dep_name(t))),
+                2 => optional.extend(tokens.iter().filter(|&&t| t != "None").map(|&t| {
+                    clean_dep_name(t.split(':').next().unwrap_or(t))
+                })),
+                3 => reqby.extend(tokens.iter().filter(|&&t| t != "None").map(|&t| t.to_string())),
+                _ => {}
+            }
+            continue;
+        }
+
+        // New key-value line
+        state = 0;
+        if let Some(val) = line.strip_prefix("Depends On").and_then(|r| r.splitn(2, ':').nth(1)) {
+            state = 1;
+            depends.extend(val.split_whitespace().filter(|&t| t != "None").map(clean_dep_name));
+        } else if let Some(val) = line.strip_prefix("Optional Deps").and_then(|r| r.splitn(2, ':').nth(1)) {
+            state = 2;
+            optional.extend(val.split_whitespace().filter(|&t| t != "None").map(|t| {
+                clean_dep_name(t.split(':').next().unwrap_or(t))
+            }));
+        } else if let Some(val) = line.strip_prefix("Required By").and_then(|r| r.splitn(2, ':').nth(1)) {
+            state = 3;
+            reqby.extend(val.split_whitespace().filter(|&t| t != "None").map(|t| t.to_string()));
+        }
+    }
+    (depends, optional, reqby)
+}
+
+/// Batch-query deps for many packages in a single `pacman -Qi` call.
+/// Returns HashMap<pkg_name, Vec<dep_name>>.
+fn batch_deps(names: &[&str]) -> HashMap<String, Vec<String>> {
+    if names.is_empty() { return HashMap::new(); }
+    let Ok(out) = std::process::Command::new("pacman")
+        .arg("-Qi").args(names).output()
+    else { return HashMap::new(); };
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut result: HashMap<String, Vec<String>> = HashMap::new();
+    let mut cur_name = String::new();
+    let mut cur_deps: Vec<String> = Vec::new();
+    let mut in_depends = false;
+
+    for line in text.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if in_depends {
+                cur_deps.extend(line.split_whitespace()
+                    .filter(|&t| t != "None").map(clean_dep_name));
+            }
+            continue;
+        }
+        in_depends = false;
+
+        if let Some(val) = line.strip_prefix("Name").and_then(|r| r.splitn(2, ':').nth(1)) {
+            if !cur_name.is_empty() {
+                result.insert(cur_name.clone(), std::mem::take(&mut cur_deps));
+            }
+            cur_name = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("Depends On").and_then(|r| r.splitn(2, ':').nth(1)) {
+            in_depends = true;
+            cur_deps.extend(val.split_whitespace().filter(|&t| t != "None").map(clean_dep_name));
+        }
+    }
+    if !cur_name.is_empty() {
+        result.insert(cur_name, cur_deps);
+    }
+    result
+}
+
+/// Parse `pacman -Si <pkg>` output for a non-installed package.
+/// Returns (depends, optional_deps) — no required-by for uninstalled packages.
+fn parse_si_block(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut depends: Vec<String> = Vec::new();
+    let mut optional: Vec<String> = Vec::new();
+    let mut state = 0u8; // 1=depends, 2=optional
+
+    for line in text.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            let val = line.trim();
+            match state {
+                1 => depends.extend(val.split_whitespace()
+                    .filter(|&t| t != "None")
+                    .map(|t| clean_dep_name(t.split(':').next().unwrap_or(t)))),
+                2 => optional.extend(val.split_whitespace()
+                    .filter(|&t| t != "None")
+                    .map(|t| clean_dep_name(t.split(':').next().unwrap_or(t)))),
+                _ => {}
+            }
+            continue;
+        }
+        if let Some(val) = line.strip_prefix("Depends On").and_then(|r| r.splitn(2, ':').nth(1)) {
+            state = 1;
+            depends.extend(val.split_whitespace()
+                .filter(|&t| t != "None")
+                .map(|t| clean_dep_name(t.split(':').next().unwrap_or(t))));
+        } else if let Some(val) = line.strip_prefix("Optional Deps").and_then(|r| r.splitn(2, ':').nth(1)) {
+            state = 2;
+            optional.extend(val.split_whitespace()
+                .filter(|&t| t != "None")
+                .map(|t| clean_dep_name(t.split(':').next().unwrap_or(t))));
+        } else if line.contains(':') && !line.starts_with(' ') {
+            state = 0;
+        }
+    }
+    (depends, optional)
+}
+
+/// Build the full dep tree data for `pkg_name`.
+/// Returns (dep_nodes, reqby_nodes, root_version).
+/// Root is NOT included in dep_nodes — rendered separately as a pill card.
+fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
+    let installed = all_installed_map();
+    let pkg_installed = installed.contains_key(pkg_name);
+
+    // Query root package info — try -Qi for installed, -Si for non-installed
+    let (direct_deps, opt_deps, reqby_names, root_version) = if pkg_installed {
+        let root_version = installed.get(pkg_name).map(|v| trim_version(v)).unwrap_or_default();
+        let Ok(root_out) = std::process::Command::new("pacman")
+            .args(["-Qi", pkg_name]).output()
+        else {
+            return (vec![], vec![], root_version);
+        };
+        let root_text = String::from_utf8_lossy(&root_out.stdout);
+        let (d, o, r) = parse_qi_block(&root_text);
+        (d, o, r, root_version)
+    } else {
+        let Ok(root_out) = std::process::Command::new("pacman")
+            .args(["-Si", pkg_name]).output()
+        else {
+            return (vec![], vec![], String::new());
+        };
+        let root_text = String::from_utf8_lossy(&root_out.stdout);
+        let ver = root_text.lines()
+            .find(|l| l.starts_with("Version"))
+            .and_then(|l| l.splitn(2, ':').nth(1))
+            .map(|v| trim_version(v.trim()))
+            .unwrap_or_default();
+        let (d, o) = parse_si_block(&root_text);
+        (d, o, vec![], ver)
+    };
+
+    // Batch-query level-2 deps (only installed packages respond to -Qi)
+    let all_l1: Vec<String> = direct_deps.iter().chain(opt_deps.iter()).cloned().collect();
+    let l1_installed: Vec<&str> = all_l1.iter()
+        .filter(|n| installed.contains_key(n.as_str()))
+        .map(|n| n.as_str()).collect();
+    let l2_map = batch_deps(&l1_installed);
+
+    let mut dep_nodes: Vec<DepNode> = Vec::new();
+
+    // ── Hard (required) dependencies ────────────────────────────────────────
+    let hard_total = direct_deps.len();
+    let grand_total = direct_deps.len() + opt_deps.len();
+    for (idx, dep_name) in direct_deps.iter().enumerate() {
+        let is_last_l1 = idx == grand_total - 1; // last of ALL level-1 nodes
+        let connector = if is_last_l1 && opt_deps.is_empty() { "└─ " } else { "├─ " };
+        let ver = installed.get(dep_name.as_str()).map(|v| trim_version(v)).unwrap_or_default();
+
+        dep_nodes.push(DepNode {
+            name: SharedString::from(dep_name.as_str()),
+            version: SharedString::from(&ver),
+            depth: 1,
+            installed: !ver.is_empty(),
+            is_optional: false,
+            prefix: SharedString::from(connector),
+            is_root: false,
+        });
+
+        if let Some(sub_deps) = l2_map.get(dep_name.as_str()) {
+            let parent_last = opt_deps.is_empty() && idx == hard_total - 1;
+            let parent_cont = if parent_last { "   " } else { "│  " };
+            let nsub = sub_deps.len();
+            for (j, sub) in sub_deps.iter().enumerate() {
+                let sc = if j == nsub - 1 { "└─ " } else { "├─ " };
+                let sv = installed.get(sub.as_str()).map(|v| trim_version(v)).unwrap_or_default();
+                dep_nodes.push(DepNode {
+                    name: SharedString::from(sub.as_str()),
+                    version: SharedString::from(&sv),
+                    depth: 2,
+                    installed: !sv.is_empty(),
+                    is_optional: false,
+                    prefix: SharedString::from(format!("{}{}", parent_cont, sc)),
+                    is_root: false,
+                });
+            }
+        }
+    }
+
+    // ── Optional dependencies separator + entries ────────────────────────────
+    if !opt_deps.is_empty() {
+        dep_nodes.push(DepNode {
+            name: SharedString::from("Optional Dependencies"),
+            version: SharedString::from(""),
+            depth: -1,
+            installed: false,
+            is_optional: true,
+            prefix: SharedString::from(""),
+            is_root: false,
+        });
+
+        let nopt = opt_deps.len();
+        for (idx, dep_name) in opt_deps.iter().enumerate() {
+            let connector = if idx == nopt - 1 { "└╌ " } else { "├╌ " };
+            let ver = installed.get(dep_name.as_str()).map(|v| trim_version(v)).unwrap_or_default();
+            dep_nodes.push(DepNode {
+                name: SharedString::from(dep_name.as_str()),
+                version: SharedString::from(&ver),
+                depth: 1,
+                installed: !ver.is_empty(),
+                is_optional: true,
+                prefix: SharedString::from(connector),
+                is_root: false,
+            });
+        }
+    }
+
+    // ── Required-by (flat list) ──────────────────────────────────────────────
+    let reqby_nodes: Vec<DepNode> = reqby_names.iter().map(|name| {
+        let ver = installed.get(name.as_str()).map(|v| trim_version(v)).unwrap_or_default();
+        DepNode {
+            name: SharedString::from(name.as_str()),
+            version: SharedString::from(&ver),
+            depth: 1,
+            installed: true,
+            is_optional: false,
+            prefix: SharedString::from(""),
+            is_root: false,
+        }
+    }).collect();
+
+    (dep_nodes, reqby_nodes, root_version)
 }
 
 fn spawn_in_pty(cmd: &str, args: &[&str]) -> Result<(i32, u32), String> {
@@ -1411,17 +1678,6 @@ fn main() {
                     UiMessage::SysInfoLoaded(info) => {
                         window.set_sys_info(info);
                     }
-                    UiMessage::ShowTerminalFallback(accumulated) => {
-                        window.set_show_progress_popup(false);
-                        window.set_terminal_title(window.get_progress_popup_title());
-                        window.set_terminal_output(SharedString::from(""));
-                        window.set_terminal_done(false);
-                        window.set_terminal_success(false);
-                        window.set_show_terminal(true);
-                        pending_terminal.clear();
-                        pending_terminal.push_str(&accumulated);
-                        flush_now = true;
-                    }
                     UiMessage::FlatpakRemotesLoaded(remotes) => {
                         window.set_flatpak_remotes(ModelRc::new(VecModel::from(
                             remotes.iter().map(|r| SharedString::from(r.as_str())).collect::<Vec<_>>()
@@ -1429,11 +1685,6 @@ fn main() {
                         if let Some(first) = remotes.first() {
                             window.set_selected_remote(SharedString::from(first.as_str()));
                         }
-                    }
-                    UiMessage::RemoteAppsLoaded(apps) => {
-                        window.set_remote_apps(ModelRc::new(VecModel::from(apps)));
-                        window.set_remote_apps_loading(false);
-                        window.set_flatpak_store_ready(true);
                     }
                     UiMessage::RemoteAppsFiltered { serial, apps, total_matches } => {
                         // u64::MAX is a sentinel used by preload/browse paths — always accept
@@ -1484,7 +1735,13 @@ fn main() {
                     }
                     UiMessage::RepoPackagesLoaded(pkgs) => {
                         *repo_full_timer.borrow_mut() = pkgs.clone();
-                        window.set_repo_packages(ModelRc::new(VecModel::from(pkgs)));
+                        const INITIAL_LIMIT: usize = 150;
+                        let has_more = pkgs.len() > INITIAL_LIMIT;
+                        let extra = pkgs.len().saturating_sub(INITIAL_LIMIT) as i32;
+                        let displayed = if has_more { pkgs[..INITIAL_LIMIT].to_vec() } else { pkgs };
+                        window.set_repo_packages(ModelRc::new(VecModel::from(displayed)));
+                        window.set_repo_has_more(has_more);
+                        window.set_repo_extra_count(extra);
                         window.set_repo_loading(false);
                         window.set_repo_search(SharedString::from(""));
                     }
@@ -1494,6 +1751,12 @@ fn main() {
                     }
                     UiMessage::InstalledFlatpaksLoaded(pkgs) => {
                         window.set_installed_flatpaks(ModelRc::new(VecModel::from(pkgs)));
+                    }
+                    UiMessage::DepTreeLoaded { deps, reqby, root_version } => {
+                        window.set_dep_tree_loading(false);
+                        window.set_dep_tree_root_version(SharedString::from(&root_version));
+                        window.set_dep_tree_nodes(ModelRc::new(VecModel::from(deps)));
+                        window.set_dep_reqby_nodes(ModelRc::new(VecModel::from(reqby)));
                     }
                 }
             }
@@ -1727,6 +1990,22 @@ fn main() {
         thread::spawn(move || {
             let title = format!("Removing {}", n);
             run_managed_operation(&tx, &title, "remove", &[n], backend, &input, &pid, &ctx);
+        });
+    });
+
+    let tx_fp_remove = tx.clone();
+    let fp_remove_input = terminal_input_sender.clone();
+    let fp_remove_pid = terminal_child_pid.clone();
+    window.on_remove_flatpak(move |app_id, also_delete_data| {
+        let tx = tx_fp_remove.clone();
+        let id = app_id.to_string();
+        let input = fp_remove_input.clone();
+        let pid = fp_remove_pid.clone();
+        thread::spawn(move || {
+            let title = format!("Removing {}", id);
+            let mut args = vec!["uninstall", "--noninteractive", "--assumeyes", &id];
+            if also_delete_data { args.push("--delete-data"); }
+            run_in_terminal(&tx, &title, "flatpak", &args, &input, &pid);
         });
     });
 
@@ -2455,6 +2734,17 @@ fn main() {
 
     let tx_repo_pkgs = tx.clone();
     let window_weak_repo = window.as_weak();
+    let load_more_full = repo_packages_full.clone();
+    let win_load_more = window.as_weak();
+    window.on_load_more_repo_pkgs(move || {
+        let all = load_more_full.borrow().clone();
+        if let Some(w) = win_load_more.upgrade() {
+            w.set_repo_packages(ModelRc::new(VecModel::from(all)));
+            w.set_repo_has_more(false);
+            w.set_repo_extra_count(0);
+        }
+    });
+
     window.on_browse_repo(move |repo| {
         let tx = tx_repo_pkgs.clone();
         let repo_str = repo.to_string();
@@ -2593,6 +2883,16 @@ fn main() {
         });
     });
 
+    let tx_deptree = tx.clone();
+    window.on_load_dep_tree(move |pkg_name| {
+        let name = pkg_name.to_string();
+        let tx = tx_deptree.clone();
+        thread::spawn(move || {
+            let (deps, reqby, root_version) = build_dep_tree(&name);
+            let _ = tx.send(UiMessage::DepTreeLoaded { deps, reqby, root_version });
+        });
+    });
+
     window.on_save_settings(move || {
         if let Some(window) = window_weak_ss.upgrade() {
             let config = build_config(&window);
@@ -2606,6 +2906,10 @@ fn main() {
 
     info!("Running application");
     window.run().expect("Failed to run application");
+    // Background threads may still be alive when Slint's Qt backend tears down
+    // its thread-local storage, producing QThreadStorage warnings. Exit immediately
+    // so the process terminates cleanly instead of unwinding through Qt's cleanup.
+    std::process::exit(0);
 }
 
 async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) {
@@ -3350,7 +3654,6 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
         developer: String,
         screenshot_url: String,
         screenshot_source_url: String,
-        got_screenshot: bool,
         icon_name: String,
         extends: String,
     }
@@ -3396,7 +3699,6 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
                             developer: String::new(),
                             screenshot_url: String::new(),
                             screenshot_source_url: String::new(),
-                            got_screenshot: false,
                             icon_name: String::new(),
                             extends: String::new(),
                         });
@@ -3668,31 +3970,6 @@ fn apps_to_package_data(
         .collect()
 }
 
-fn to_app_rows(apps: Vec<PackageData>) -> Vec<AppRow> {
-    let empty = PackageData {
-        name: SharedString::from(""),
-        display_name: SharedString::from(""),
-        version: SharedString::from(""),
-        description: SharedString::from(""),
-        repository: SharedString::from(""),
-        backend: 0,
-        installed: false,
-        has_update: false,
-        installed_size: SharedString::from(""),
-        licenses: SharedString::from(""),
-        url: SharedString::from(""),
-        dependencies: SharedString::from(""),
-        required_by: SharedString::from(""),
-        selected: false,
-    };
-    apps.chunks(3).map(|chunk| AppRow {
-        a: chunk.get(0).cloned().unwrap_or_else(|| empty.clone()),
-        b: chunk.get(1).cloned().unwrap_or_else(|| empty.clone()),
-        c: chunk.get(2).cloned().unwrap_or_else(|| empty.clone()),
-        count: chunk.len() as i32,
-    }).collect()
-}
-
 fn load_remote_apps(remote: &str) -> (Vec<CachedRemoteApp>, std::collections::HashSet<String>) {
     let apps = fetch_remote_apps_cached(remote);
     let installed = get_flatpak_installed_ids();
@@ -3746,9 +4023,10 @@ fn load_repo_descriptions(repo: &str) -> std::collections::HashMap<String, Strin
 fn load_repo_packages(repo: &str) -> Vec<PackageData> {
     let desc_map = load_repo_descriptions(repo);
     let desktop_map = build_desktop_name_map();
-    let out = std::process::Command::new("pacman")
-        .args(["-Sl", repo])
-        .output();
+    let mut cmd = std::process::Command::new("pacman");
+    cmd.arg("-Sl");
+    if !repo.is_empty() { cmd.arg(repo); }
+    let out = cmd.output();
     match out {
         Ok(o) => {
             String::from_utf8_lossy(&o.stdout)

@@ -51,6 +51,16 @@ export struct AppRow {
     count: int,
 }
 
+export struct DepNode {
+    name: string,
+    version: string,
+    depth: int,
+    installed: bool,
+    is-optional: bool,
+    prefix: string,
+    is-root: bool,
+}
+
 export global Cat {
     // Core backgrounds — derived from system Palette
     out property <color> base: Palette.background;
@@ -222,19 +232,22 @@ component NavButton inherits Rectangle {
             horizontal-stretch: 1;
         }
 
-        if badge != "": Rectangle {
-            width: 22px;
-            height: 18px;
-            border-radius: 9px;
-            background: Cat.red;
-            VerticalLayout {
-                alignment: center;
-                Text {
-                    text: badge;
-                    font-size: 10px;
-                    font-weight: 700;
-                    color: Cat.crust;
-                    horizontal-alignment: center;
+        if badge != "": VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 22px;
+                height: 18px;
+                border-radius: 9px;
+                background: Cat.red;
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: badge;
+                        font-size: 10px;
+                        font-weight: 700;
+                        color: Cat.crust;
+                        horizontal-alignment: center;
+                    }
                 }
             }
         }
@@ -435,91 +448,6 @@ component AppAvatar inherits Rectangle {
     }
 }
 
-component AppTile inherits Rectangle {
-    in property <PackageData> pkg;
-    callback clicked();
-
-    height: 88px;
-    border-radius: 0;
-    background: tile-touch.has-hover ? Cat.surface0.with-alpha(0.45) : transparent;
-    animate background { duration: 60ms; }
-
-    HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 14px;
-        spacing: 14px;
-
-        VerticalLayout {
-            alignment: center;
-            AppAvatar {
-                initial: pkg.required-by;
-                category: pkg.installed-size;
-            }
-        }
-
-        VerticalLayout {
-            horizontal-stretch: 1;
-            spacing: 3px;
-            alignment: center;
-
-            HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: pkg.display-name;
-                    font-size: 14px;
-                    font-weight: 700;
-                    color: Cat.text;
-                    overflow: elide;
-                    horizontal-stretch: 1;
-                    vertical-alignment: center;
-                }
-                if pkg.installed: Rectangle {
-                    height: 20px;
-                    width: inst-t.preferred-width + 12px;
-                    border-radius: 4px;
-                    background: Cat.green.with-alpha(0.15);
-                    inst-t := Text {
-                        text: "Installed";
-                        font-size: 9.5px;
-                        font-weight: 600;
-                        color: Cat.green;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            Text {
-                text: pkg.name;
-                font-size: 10px;
-                color: Cat.overlay0;
-                overflow: elide;
-            }
-
-            Text {
-                text: pkg.description;
-                font-size: 12px;
-                color: Cat.subtext0;
-                overflow: elide;
-                wrap: no-wrap;
-            }
-        }
-    }
-
-    // Bottom divider
-    Rectangle {
-        y: parent.height - 1px;
-        height: 1px;
-        width: parent.width;
-        background: Cat.surface0.with-alpha(0.35);
-    }
-
-    tile-touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
 component CategoryPill inherits Rectangle {
     in property <string> label;
     in property <bool> active: false;
@@ -548,106 +476,77 @@ component CategoryPill inherits Rectangle {
 
 component RepoRow inherits Rectangle {
     in property <PackageData> pkg;
-    in property <bool> selected: false;
-    callback clicked();
+    callback install();
+    callback remove();
+    callback show-tree();
 
     height: 46px;
-    background: selected ? Cat.blue.with-alpha(0.1) :
-                (row-touch.has-hover ? Cat.surface0.with-alpha(0.35) : transparent);
+    background: row-touch.has-hover ? Cat.surface0.with-alpha(0.3) : transparent;
     animate background { duration: 60ms; }
 
+    // TouchArea first so action buttons sit on top
+    row-touch := TouchArea {}
+
     HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 12px;
+        padding-left: 14px; padding-right: 12px;
 
-        // Name + description — flex
+        // Name + description
         VerticalLayout {
-            horizontal-stretch: 1;
-            alignment: center;
-            spacing: 2px;
-            Text {
-                text: pkg.display-name;
-                font-size: 13px;
-                font-weight: selected ? 700 : 500;
-                color: selected ? Cat.blue : Cat.text;
-                overflow: elide;
-            }
-            if pkg.description != "": Text {
-                text: pkg.description;
-                font-size: 10px;
-                color: Cat.overlay0;
-                overflow: elide;
-            }
+            horizontal-stretch: 1; alignment: center; spacing: 2px;
+            Text { text: pkg.display-name; font-size: 13px; font-weight: 500; color: Cat.text; overflow: elide; }
+            if pkg.description != "": Text { text: pkg.description; font-size: 10px; color: Cat.overlay0; overflow: elide; }
         }
 
-        // Version — 130px fixed
+        // Version — 120px
         Rectangle {
-            width: 130px;
-            Text {
-                text: pkg.version;
-                font-size: 11px;
-                color: Cat.mauve.with-alpha(0.75);
-                overflow: elide;
-                vertical-alignment: center;
-                horizontal-alignment: right;
-            }
+            width: 120px;
+            Text { text: pkg.version; font-size: 11px; color: Cat.mauve.with-alpha(0.75); overflow: elide; vertical-alignment: center; horizontal-alignment: right; }
         }
 
-        // Repo badge — 90px
-        Rectangle {
-            width: 90px;
-            Rectangle {
-                width: rep-t.preferred-width + 10px;
-                height: 18px;
-                border-radius: 4px;
-                background: Cat.surface0;
-                x: parent.width - self.width;
-                y: (parent.height - self.height) / 2;
-                rep-t := Text {
-                    text: pkg.repository;
-                    font-size: 9.5px;
-                    color: Cat.overlay1;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
-        // Installed badge — 80px
+        // Repo badge — 80px
         Rectangle {
             width: 80px;
-            if pkg.installed: Rectangle {
-                width: 68px;
-                height: 20px;
-                border-radius: 4px;
-                background: Cat.green.with-alpha(0.12);
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                Text {
-                    text: "Installed";
-                    font-size: 9.5px;
-                    font-weight: 600;
-                    color: Cat.green;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+            Rectangle {
+                width: rep-t.preferred-width + 10px; height: 18px; border-radius: 4px; background: Cat.surface0;
+                x: parent.width - self.width; y: (parent.height - self.height) / 2;
+                rep-t := Text { text: pkg.repository; font-size: 9.5px; color: Cat.overlay1; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+
+        // Action buttons — 160px (Tree + Install/Remove side by side)
+        VerticalLayout {
+            alignment: center; width: 160px;
+            HorizontalLayout {
+                spacing: 6px;
+                // Tree button
+                Rectangle {
+                    width: 52px; height: 26px; border-radius: 6px;
+                    background: rr-tree-ta.has-hover ? Cat.teal.with-alpha(0.25) : Cat.teal.with-alpha(0.12);
+                    border-width: 1px; border-color: Cat.teal.with-alpha(0.35);
+                    animate background { duration: 60ms; }
+                    VerticalLayout { alignment: center; Text { text: "Tree"; font-size: 11px; font-weight: 600; color: Cat.teal; horizontal-alignment: center; } }
+                    rr-tree-ta := TouchArea { mouse-cursor: pointer; clicked => { root.show-tree(); } }
+                }
+                // Install / Remove button
+                if !pkg.installed: Rectangle {
+                    width: 78px; height: 26px; border-radius: 6px;
+                    background: rr-inst-ta.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.75);
+                    animate background { duration: 60ms; }
+                    VerticalLayout { alignment: center; Text { text: "Install"; font-size: 11px; font-weight: 600; color: #fff; horizontal-alignment: center; } }
+                    rr-inst-ta := TouchArea { mouse-cursor: pointer; clicked => { root.install(); } }
+                }
+                if pkg.installed: Rectangle {
+                    width: 78px; height: 26px; border-radius: 6px;
+                    background: rr-rm-ta.has-hover ? Cat.red : Cat.red.with-alpha(0.75);
+                    animate background { duration: 60ms; }
+                    VerticalLayout { alignment: center; Text { text: "Remove"; font-size: 11px; font-weight: 600; color: #fff; horizontal-alignment: center; } }
+                    rr-rm-ta := TouchArea { mouse-cursor: pointer; clicked => { root.remove(); } }
                 }
             }
         }
     }
 
-    // Bottom separator
-    Rectangle {
-        y: parent.height - 1px;
-        height: 1px;
-        width: parent.width - 20px;
-        x: 10px;
-        background: Cat.surface0.with-alpha(0.5);
-    }
-
-    row-touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
+    Rectangle { y: parent.height - 1px; height: 1px; width: parent.width - 20px; x: 10px; background: Cat.surface0.with-alpha(0.5); }
 }
 
 component SettingsRow inherits Rectangle {
@@ -902,6 +801,12 @@ export component MainWindow inherits Window {
     in-out property <int> selected-uninstalled-count: 0;
     in-out property <bool> multi-select-mode: true;
 
+    // Flatpak remove confirmation dialog
+    in-out property <bool> fp-confirm-open: false;
+    in-out property <string> fp-confirm-id: "";
+    in-out property <string> fp-confirm-name: "";
+    callback remove-flatpak(string, bool);  // (app_id, also_delete_data)
+
     in-out property <bool> show-conflict-dialog: false;
     in-out property <string> conflict-summary: "";
     in-out property <bool> conflict-can-force: false;
@@ -960,11 +865,22 @@ export component MainWindow inherits Window {
     in-out property <int> repos-view: 0; // 0=browse, 1=installed
     callback downgrade-package(string);
 
+    // Dependency tree (view 12)
+    in-out property <string> dep-tree-pkg: "";
+    in-out property <string> dep-tree-root-version: "";
+    in-out property <[DepNode]> dep-tree-nodes: [];
+    in-out property <[DepNode]> dep-reqby-nodes: [];
+    in-out property <bool> dep-tree-loading: false;
+    in-out property <int> dep-tree-tab: 0;
+    callback load-dep-tree(string);
+
     // Repos browser (view 7/8)
     in-out property <[string]> pacman-repos: [];
     in-out property <string> selected-repo: "";
     in-out property <[PackageData]> repo-packages: [];
     in-out property <bool> repo-loading: false;
+    in-out property <bool> repo-has-more: false;
+    in-out property <int> repo-extra-count: 0;
     in-out property <bool> show-repo-detail: false;
     in-out property <PackageData> repo-detail-pkg;
     in-out property <string> repo-detail-description: "";
@@ -989,6 +905,7 @@ export component MainWindow inherits Window {
     callback filter-repo(string);
     callback load-pacman-repos;
     callback browse-repo(string);
+    callback load-more-repo-pkgs;
     callback select-repo-pkg(string, int);
     callback terminal-send-input(string);
     callback terminal-close;
@@ -1043,6 +960,16 @@ export component MainWindow inherits Window {
     property <string> icon-refresh: "M1 4v6h6M23 20v-6h-6M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 0 1 3.51 15";
 
     property <string> icon-flatpak: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5";
+
+    // Drives the indeterminate shimmer on the loading chip (sweeps -40% → 105%)
+    property <float> _load-shimmer: -0.4;
+    Timer {
+        interval: 40ms;
+        running: loading || (busy && progress == 0);
+        triggered => {
+            _load-shimmer = _load-shimmer >= 1.05 ? -0.4 : _load-shimmer + 0.038;
+        }
+    }
 
     function get-list() -> [PackageData] {
         if view == 0 { return installed-packages; }
@@ -1126,8 +1053,9 @@ export component MainWindow inherits Window {
                 label: "Browse Repos";
                 active: view == 7 || view == 8;
                 clicked => {
-                    view = 7; selected-index = -1;
+                    view = 7; repos-view = 0; selected-index = -1;
                     if pacman-repos.length == 0 { root.load-pacman-repos(); }
+                    if repo-packages.length == 0 && !repo-loading { root.browse-repo(""); }
                 }
             }
 
@@ -1151,7 +1079,7 @@ export component MainWindow inherits Window {
 
             NavButton {
                 icon-path: icon-gear;
-                label: "Settings";
+                label: "App Settings";
                 active: view == 5;
                 clicked => { view = 5; }
             }
@@ -1760,11 +1688,13 @@ export component MainWindow inherits Window {
                                     border-width: 1px;
                                     border-color: Cat.surface0;
                                     animate background { duration: 80ms; }
-                                    HorizontalLayout {
+                                    VerticalLayout {
                                         alignment: center;
-                                        spacing: 6px;
-                                        NavIcon { d: "M19 12H5M12 19l-7-7 7-7"; icon-color: Cat.subtext0; width: 13px; height: 13px; }
-                                        bk-lbl := Text { text: "All Apps"; font-size: 12px; color: Cat.subtext0; vertical-alignment: center; }
+                                        HorizontalLayout {
+                                            alignment: center; spacing: 6px;
+                                            NavIcon { d: "M19 12H5M12 19l-7-7 7-7"; icon-color: Cat.subtext0; width: 13px; height: 13px; }
+                                            bk-lbl := Text { text: "All Apps"; font-size: 12px; color: Cat.subtext0; }
+                                        }
                                     }
                                     bk-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -1978,16 +1908,6 @@ export component MainWindow inherits Window {
                     Rectangle {
                         height: 72px;
                         clip: true;
-
-                        // "Flatpaks" watermark
-                        Text {
-                            text: "Flatpaks";
-                            font-size: 52px;
-                            font-weight: 900;
-                            color: Cat.mauve.with-alpha(0.05);
-                            x: parent.width - self.preferred-width - 10px;
-                            y: (parent.height - self.preferred-height) / 2;
-                        }
 
                         // Package glyph
                         NavIcon {
@@ -2328,6 +2248,9 @@ export component MainWindow inherits Window {
                                 background: ifk-touch.has-hover ? Cat.surface0.with-alpha(0.4) : transparent;
                                 animate background { duration: 60ms; }
 
+                                // TouchArea FIRST so Remove button's TouchArea sits on top of it
+                                ifk-touch := TouchArea {}
+
                                 HorizontalLayout {
                                     padding-left: 16px;
                                     padding-right: 14px;
@@ -2408,13 +2331,15 @@ export component MainWindow inherits Window {
 
                                             ifk-rm-touch := TouchArea {
                                                 mouse-cursor: pointer;
-                                                clicked => { root.request-remove(pkg.name, 1); }
+                                                clicked => {
+                                                    root.fp-confirm-id = pkg.name;
+                                                    root.fp-confirm-name = pkg.display-name;
+                                                    root.fp-confirm-open = true;
+                                                }
                                             }
                                         }
                                     }
                                 }
-
-                                ifk-touch := TouchArea {}
 
                                 Rectangle {
                                     x: 16px;
@@ -2597,6 +2522,35 @@ export component MainWindow inherits Window {
                         spacing: 8px;
                         padding: 10px;
 
+                        // "All" pill — shows combined packages from all repos
+                        Rectangle {
+                            width: all-pill-lbl.preferred-width + 28px;
+                            height: 30px;
+                            border-radius: 15px;
+                            border-width: 1px;
+                            border-color: selected-repo == "" ? Cat.blue.with-alpha(0.5) : Cat.surface1;
+                            background: selected-repo == "" ? Cat.blue.with-alpha(0.12) :
+                                        (all-pill-ta.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.5));
+                            animate background { duration: 70ms; }
+                            all-pill-lbl := Text {
+                                text: "All";
+                                font-size: 12px;
+                                font-weight: selected-repo == "" ? 700 : 400;
+                                color: selected-repo == "" ? Cat.blue : Cat.subtext0;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            all-pill-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    selected-repo = "";
+                                    view = 8;
+                                    repo-search = "";
+                                    root.browse-repo("");
+                                }
+                            }
+                        }
+
                         for repo[i] in pacman-repos: Rectangle {
                             width: rp-lbl.preferred-width + 28px;
                             height: 30px;
@@ -2629,205 +2583,66 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // ── Main area: left content + right detail ───────────────────
-                HorizontalLayout {
+                // ── Package list ─────────────────────────────────────────────
+                VerticalLayout {
                     vertical-stretch: 1;
-                    spacing: 0;
 
-                    // Left column
-                    VerticalLayout {
-                        horizontal-stretch: 1;
+                    // Loading state
+                    if repo-loading: VerticalLayout {
+                        vertical-stretch: 1; alignment: center; spacing: 8px;
+                        Spinner { width: 24px; height: 24px; indeterminate: true; x: (parent.width - 24px) / 2; }
+                        Text { text: selected-repo != "" ? "Loading " + selected-repo + "..." : "Loading packages..."; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
+                    }
 
-                        // Loading state
-                        if repo-loading: VerticalLayout {
-                            vertical-stretch: 1;
-                            alignment: center;
-                            spacing: 8px;
-                            NavIcon {
-                                d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15";
-                                icon-color: Cat.overlay0;
-                                width: 24px; height: 24px;
-                                x: (parent.width - 24px) / 2;
-                            }
-                            Text { text: "Loading " + selected-repo + "..."; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
+                    // Column header
+                    if !repo-loading: Rectangle {
+                        height: 30px;
+                        background: Cat.surface0.with-alpha(0.5);
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 12px;
+                            Text { text: "Name"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-stretch: 1; }
+                            Rectangle { width: 120px; Text { text: "Version"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; } }
+                            Rectangle { width: 80px; Text { text: "Repo"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; } }
+                            Rectangle { width: 90px; Text { text: "Action"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: center; } }
                         }
+                    }
 
-                        // Empty / select prompt
-                        if !repo-loading && view == 7: VerticalLayout {
-                            vertical-stretch: 1;
-                            alignment: center;
-                            spacing: 6px;
-                            NavIcon {
-                                d: "M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z";
-                                icon-color: Cat.surface2;
-                                width: 32px; height: 32px;
-                                x: (parent.width - 32px) / 2;
-                            }
-                            Text { text: "Select a repository above"; font-size: 14px; font-weight: 600; color: Cat.overlay0; horizontal-alignment: center; }
-                            Text { text: "to browse available packages"; font-size: 12px; color: Cat.overlay0; horizontal-alignment: center; }
-                        }
+                    if !repo-loading && repo-packages.length == 0: VerticalLayout {
+                        vertical-stretch: 1; alignment: center;
+                        Text { text: "No packages found"; font-size: 13px; color: Cat.overlay0; horizontal-alignment: center; }
+                    }
 
-                        // Package list with hero decoration
-                        if !repo-loading && view == 8: VerticalLayout {
-                            vertical-stretch: 1;
-
-                            // Hero decoration
-                            Rectangle {
-                                height: 110px;
-                                clip: true;
-                                background: transparent;
-
-                                // Matrix columns
-                                Text { x: 20px; y: 0; text: "01\n10\n01\n10\n01\n10\n01\n10\n01\n10"; font-size: 10px; color: Cat.blue; opacity: 0.04; }
-                                Text { x: 80px; y: -15px; text: "10\n01\n10\n01\n10\n01\n10\n01\n10\n01"; font-size: 10px; color: Cat.blue; opacity: 0.04; }
-                                Text { x: 140px; y: 5px; text: "01\n10\n01\n10\n01\n10\n01\n10\n01\n10"; font-size: 10px; color: Cat.blue; opacity: 0.04; }
-                                Text { x: 200px; y: -10px; text: "10\n01\n10\n01\n10\n01\n10\n01\n10\n01"; font-size: 10px; color: Cat.blue; opacity: 0.03; }
-                                Text { x: 260px; y: 0; text: "01\n10\n01\n10\n01\n10\n01\n10\n01\n10"; font-size: 10px; color: Cat.blue; opacity: 0.03; }
-                                Text { x: 320px; y: -5px; text: "10\n01\n10\n01\n10\n01\n10\n01\n10\n01"; font-size: 10px; color: Cat.blue; opacity: 0.03; }
-
-                                // Package glyph
-                                NavIcon {
-                                    d: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4";
-                                    icon-color: Cat.blue;
-                                    opacity: 0.07;
-                                    width: 90px;
-                                    height: 90px;
-                                    x: parent.width - 120px;
-                                    y: 10px;
-                                }
-
-                                // "Arch Packages" watermark
-                                Text {
-                                    width: parent.width;
-                                    height: parent.height;
-                                    text: "Arch Packages";
-                                    font-size: 52px;
-                                    font-weight: 900;
-                                    color: Cat.text;
-                                    opacity: 0.05;
-                                    horizontal-alignment: left;
-                                    vertical-alignment: center;
-                                    x: 14px;
-                                }
-                            }
-
-                            // Column header
-                            Rectangle {
-                                height: 30px;
-                                background: Cat.surface0.with-alpha(0.5);
-
-                                HorizontalLayout {
-                                    padding-left: 14px;
-                                    padding-right: 12px;
-
-                                    Text { text: "Name"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-stretch: 1; }
-                                    Rectangle { width: 130px;
-                                        Text { text: "Version"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; }
-                                    }
-                                    Rectangle { width: 90px;
-                                        Text { text: "Repo"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: right; }
-                                    }
-                                    Rectangle { width: 80px;
-                                        Text { text: "Status"; font-size: 10px; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.5px; vertical-alignment: center; horizontal-alignment: center; }
-                                    }
-                                }
-                            }
-
-                            // Package rows
-                            if repo-packages.length == 0: VerticalLayout {
-                                vertical-stretch: 1;
-                                alignment: center;
-                                Text { text: "No packages found"; font-size: 13px; color: Cat.overlay0; horizontal-alignment: center; }
-                            }
-
-                            if repo-packages.length > 0: ListView {
-                                vertical-stretch: 1;
-                                for p[i] in repo-packages: RepoRow {
-                                    pkg: p;
-                                    selected: show-repo-detail && repo-detail-pkg.name == p.name;
-                                    clicked => {
-                                        repo-detail-pkg = p;
-                                        show-repo-detail = true;
-                                        root.select-repo-pkg(p.name, p.backend);
-                                    }
-                                }
+                    if !repo-loading && repo-packages.length > 0: ListView {
+                        vertical-stretch: 1;
+                        for p[i] in repo-packages: RepoRow {
+                            pkg: p;
+                            install => { root.request-install(p.name, p.backend); }
+                            remove => { root.request-remove(p.name, p.backend); }
+                            show-tree => {
+                                dep-tree-pkg = p.name;
+                                dep-tree-tab = 0;
+                                dep-tree-nodes = [];
+                                dep-reqby-nodes = [];
+                                dep-tree-loading = true;
+                                view = 12;
+                                root.load-dep-tree(p.name);
                             }
                         }
                     }
 
-                    // ── Right detail panel (300px) ─────────────────────────────
-                    if show-repo-detail: Rectangle {
-                        width: 300px;
-                        background: Cat.mantle;
-
-                        Rectangle { x: 0; y: 0; width: 1px; height: parent.height; background: Cat.surface0; }
-
-                        VerticalLayout {
-                            padding: 20px;
-                            spacing: 14px;
-
-                            HorizontalLayout {
-                                Rectangle { horizontal-stretch: 1; }
-                                Rectangle {
-                                    width: 28px; height: 28px; border-radius: 6px;
-                                    background: cls-t.has-hover ? Cat.surface1 : transparent;
-                                    animate background { duration: 70ms; }
-                                    NavIcon { d: "M18 6L6 18M6 6l12 12"; icon-color: Cat.overlay1; width: 14px; height: 14px; x: 7px; y: 7px; }
-                                    cls-t := TouchArea { mouse-cursor: pointer; clicked => { show-repo-detail = false; } }
-                                }
-                            }
-
-                            Text {
-                                text: repo-detail-pkg.display-name;
-                                font-size: 20px; font-weight: 700; color: Cat.text; wrap: word-wrap;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px; alignment: start;
-
-                                Rectangle {
-                                    width: ver-t.preferred-width + 14px; height: 24px; border-radius: 5px;
-                                    background: Cat.mauve.with-alpha(0.12);
-                                    ver-t := Text { text: repo-detail-pkg.version; font-size: 11px; font-weight: 600; color: Cat.mauve; horizontal-alignment: center; vertical-alignment: center; }
-                                }
-
-                                Rectangle {
-                                    width: rdt.preferred-width + 12px; height: 24px; border-radius: 5px;
-                                    background: Cat.surface0;
-                                    rdt := Text { text: repo-detail-pkg.repository; font-size: 11px; color: Cat.overlay1; horizontal-alignment: center; vertical-alignment: center; }
-                                }
-                            }
-
-                            Rectangle { height: 1px; background: Cat.surface0; }
-
-                            if repo-detail-loading: HorizontalLayout { alignment: start; Spinner { indeterminate: true; } }
-
-                            if !repo-detail-loading && repo-detail-description != "": Text {
-                                text: repo-detail-description;
-                                font-size: 13px; color: Cat.subtext0; wrap: word-wrap;
-                            }
-
-                            if !repo-detail-loading && repo-detail-description == "": Text {
-                                text: "No description available.";
-                                font-size: 12px; color: Cat.overlay0;
-                            }
-
-                            Rectangle { vertical-stretch: 1; }
-
-                            if !repo-detail-pkg.installed: Rectangle {
-                                height: 40px; border-radius: 8px;
-                                background: inst-r-t.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85);
-                                animate background { duration: 80ms; }
-                                Text { text: "Install"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
-                                inst-r-t := TouchArea { mouse-cursor: pointer; clicked => { root.request-install(repo-detail-pkg.name, repo-detail-pkg.backend); } }
-                            }
-                            if repo-detail-pkg.installed: Rectangle {
-                                height: 40px; border-radius: 8px;
-                                background: rm-r-t.has-hover ? Cat.red : Cat.red.with-alpha(0.85);
-                                animate background { duration: 80ms; }
-                                Text { text: "Remove"; font-size: 14px; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
-                                rm-r-t := TouchArea { mouse-cursor: pointer; clicked => { root.request-remove(repo-detail-pkg.name, repo-detail-pkg.backend); } }
-                            }
+                    // Load More button
+                    if !repo-loading && repo-has-more: Rectangle {
+                        height: 44px;
+                        background: Cat.surface0.with-alpha(0.3);
+                        Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 200px; height: 28px; border-radius: 8px;
+                            background: lm-ta.has-hover ? Cat.blue.with-alpha(0.2) : Cat.blue.with-alpha(0.1);
+                            border-width: 1px; border-color: Cat.blue.with-alpha(0.3);
+                            animate background { duration: 60ms; }
+                            Text { text: "Load " + repo-extra-count + " more packages"; font-size: 11px; font-weight: 600; color: Cat.blue; horizontal-alignment: center; vertical-alignment: center; }
+                            lm-ta := TouchArea { mouse-cursor: pointer; clicked => { root.load-more-repo-pkgs(); } }
                         }
                     }
                 }
@@ -3081,6 +2896,40 @@ export component MainWindow inherits Window {
                                                 color: Cat.subtext0;
                                                 horizontal-alignment: center;
                                                 vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Tree button
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 54px;
+                                            height: 28px;
+                                            border-radius: 6px;
+                                            background: ri-tr-touch.has-hover
+                                                ? Cat.sapphire.with-alpha(0.28)
+                                                : Cat.sapphire.with-alpha(0.15);
+                                            animate background { duration: 60ms; }
+                                            Text {
+                                                text: "Tree";
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                color: Cat.sapphire;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            ri-tr-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    dep-tree-pkg = pkg.name;
+                                                    dep-tree-tab = 0;
+                                                    dep-tree-nodes = [];
+                                                    dep-reqby-nodes = [];
+                                                    dep-tree-loading = true;
+                                                    view = 12;
+                                                    root.load-dep-tree(pkg.name);
+                                                }
                                             }
                                         }
                                     }
@@ -3365,6 +3214,366 @@ export component MainWindow inherits Window {
                 }
             }
 
+            // ─── View 12: Dependency Tree ─────────────────────────────────────
+            if view == 12: Rectangle {
+                vertical-stretch: 1;
+                border-radius: 14px;
+                background: Cat.base.with-alpha(0.82);
+                border-width: 1px;
+                border-color: Cat.surface0.with-alpha(0.5);
+                clip: true;
+
+              VerticalLayout {
+
+                // ── Header — pill card + back button ─────────────────────────
+                Rectangle {
+                    height: 88px;
+                    background: Cat.crust;
+
+                    HorizontalLayout {
+                        padding-left: 14px; padding-right: 14px;
+                        padding-top: 12px; padding-bottom: 12px;
+                        spacing: 12px;
+
+                        // Back button — VerticalLayout centers the 30px button in the 64px height
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 76px; height: 30px; border-radius: 8px;
+                                background: dt-back-ta.has-hover ? Cat.surface1 : Cat.surface0;
+                                animate background { duration: 80ms; }
+                                VerticalLayout {
+                                    alignment: center;
+                                    HorizontalLayout {
+                                        alignment: center; spacing: 6px;
+                                        NavIcon { d: "M19 12H5M12 19l-7-7 7-7"; icon-color: Cat.subtext0; width: 14px; height: 14px; }
+                                        Text { text: "Back"; font-size: 12px; font-weight: 600; color: Cat.subtext0; }
+                                    }
+                                }
+                                dt-back-ta := TouchArea { mouse-cursor: pointer; clicked => { view = 7; repos-view = 1; } }
+                            }
+                        }
+
+                        // Pill card — horizontal-stretch:1 now works (no alignment: center on parent)
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 14px;
+                            background: Cat.mauve.with-alpha(0.1);
+                            border-width: 1px; border-color: Cat.mauve.with-alpha(0.28);
+
+                            HorizontalLayout {
+                                padding-left: 16px; padding-right: 16px; spacing: 12px;
+
+                                // Icon badge
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 38px; height: 38px; border-radius: 10px;
+                                        background: Cat.mauve.with-alpha(0.16);
+                                        NavIcon { d: icon-package; icon-color: Cat.mauve; width: 20px; height: 20px; x: 9px; y: 9px; }
+                                    }
+                                }
+
+                                // Package name + version/status
+                                VerticalLayout {
+                                    alignment: center; horizontal-stretch: 1; spacing: 3px;
+                                    Text { text: dep-tree-pkg; font-size: 15px; font-weight: 700; color: Cat.mauve; overflow: elide; }
+                                    Text {
+                                        text: dep-tree-loading ? "Resolving dependency tree…"
+                                            : (dep-tree-root-version == "" ? "version unknown" : dep-tree-root-version);
+                                        font-size: 11px; color: Cat.overlay1;
+                                    }
+                                }
+
+                                // Stat badges (hidden while loading)
+                                if !dep-tree-loading: VerticalLayout {
+                                    alignment: center; spacing: 5px;
+                                    Rectangle {
+                                        height: 20px; width: 82px; border-radius: 5px;
+                                        background: Cat.blue.with-alpha(0.14);
+                                        border-width: 1px; border-color: Cat.blue.with-alpha(0.22);
+                                        Text { text: dep-tree-nodes.length + " deps"; font-size: 10px; font-weight: 600; color: Cat.blue; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                    Rectangle {
+                                        height: 20px; width: 82px; border-radius: 5px;
+                                        background: Cat.green.with-alpha(0.12);
+                                        border-width: 1px; border-color: Cat.green.with-alpha(0.2);
+                                        Text { text: dep-reqby-nodes.length + " req by"; font-size: 10px; font-weight: 600; color: Cat.green; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                }
+
+                                // Loading spinner
+                                if dep-tree-loading: VerticalLayout {
+                                    alignment: center;
+                                    Spinner { width: 22px; height: 22px; indeterminate: true; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Tab strip ────────────────────────────────────────────────
+                Rectangle {
+                    height: 40px;
+                    background: Cat.mantle;
+
+                    HorizontalLayout {
+                        padding-left: 14px; spacing: 0px;
+
+                        Rectangle {
+                            width: 130px; height: 40px;
+                            background: transparent;
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: "Depends On"; font-size: 12px; font-weight: dep-tree-tab == 0 ? 700 : 400; color: dep-tree-tab == 0 ? Cat.blue : Cat.overlay1; horizontal-alignment: center; }
+                            }
+                            if dep-tree-tab == 0: Rectangle { y: parent.height - 2px; height: 2px; background: Cat.blue; }
+                            dt-tab0 := TouchArea { clicked => { dep-tree-tab = 0; } }
+                        }
+
+                        Rectangle {
+                            width: 130px; height: 40px;
+                            background: transparent;
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: "Required By"; font-size: 12px; font-weight: dep-tree-tab == 1 ? 700 : 400; color: dep-tree-tab == 1 ? Cat.green : Cat.overlay1; horizontal-alignment: center; }
+                            }
+                            if dep-tree-tab == 1: Rectangle { y: parent.height - 2px; height: 2px; background: Cat.green; }
+                            dt-tab1 := TouchArea { clicked => { dep-tree-tab = 1; } }
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                }
+
+                // ── Legend row (clearly separated from tabs) ──────────────────
+                Rectangle {
+                    height: 28px;
+                    background: Cat.crust;
+
+                    HorizontalLayout {
+                        padding-left: 16px; padding-right: 16px; spacing: 0px;
+                        Rectangle { horizontal-stretch: 1; }
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                spacing: 16px;
+                                HorizontalLayout { spacing: 5px; VerticalLayout { alignment: center; Rectangle { width: 7px; height: 7px; border-radius: 3px; background: Cat.green; } } Text { text: "installed"; font-size: 10px; color: Cat.overlay0; vertical-alignment: center; } }
+                                HorizontalLayout { spacing: 5px; VerticalLayout { alignment: center; Rectangle { width: 7px; height: 7px; border-radius: 3px; background: Cat.red; } } Text { text: "missing"; font-size: 10px; color: Cat.overlay0; vertical-alignment: center; } }
+                                HorizontalLayout { spacing: 5px; VerticalLayout { alignment: center; Rectangle { width: 7px; height: 7px; border-radius: 3px; background: Cat.peach; } } Text { text: "optional"; font-size: 10px; color: Cat.overlay0; vertical-alignment: center; } }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Cat.surface0; }
+
+                // ── Loading ──────────────────────────────────────────────────
+                if dep-tree-loading: Rectangle {
+                    vertical-stretch: 1;
+                    Text { text: "Resolving…"; horizontal-alignment: center; vertical-alignment: center; color: Cat.overlay0; font-size: 12px; }
+                }
+
+                // ── Depends On tab ───────────────────────────────────────────
+                if !dep-tree-loading && dep-tree-tab == 0: VerticalLayout {
+                    vertical-stretch: 1;
+
+                    // ── Dependency tree list ──────────────────────────────────
+                    if dep-tree-nodes.length == 0: Rectangle {
+                        vertical-stretch: 1;
+                        Text { text: "No dependencies found."; horizontal-alignment: center; vertical-alignment: center; color: Cat.overlay0; font-size: 13px; }
+                    }
+
+                    if dep-tree-nodes.length > 0: ListView {
+                        vertical-stretch: 1;
+
+                        for node[i] in dep-tree-nodes: Rectangle {
+                            // depth -1 = section separator; depth 1 = direct dep; depth 2 = transitive
+                            height: node.depth == -1 ? 32px : 42px;
+                            background: node.depth != -1 && dt-node-ta.has-hover
+                                ? Cat.surface0.with-alpha(0.25) : transparent;
+                            animate background { duration: 60ms; }
+
+                            dt-node-ta := TouchArea {}
+
+                            // Section separator row (optional deps divider)
+                            if node.depth == -1: HorizontalLayout {
+                                padding-left: 16px; padding-right: 16px; spacing: 10px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle { height: 1px; horizontal-stretch: 1; background: Cat.peach.with-alpha(0.3); }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text { text: "Optional Dependencies"; font-size: 10px; font-weight: 700; color: Cat.peach.with-alpha(0.7); }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle { height: 1px; horizontal-stretch: 1; background: Cat.peach.with-alpha(0.3); }
+                                }
+                            }
+
+                            // Normal dep row
+                            if node.depth != -1: HorizontalLayout {
+                                padding-left: 16px; padding-right: 16px; spacing: 0px;
+
+                                // Tree prefix — fixed width prevents squeezing the name
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: node.prefix;
+                                        font-size: 13px;
+                                        color: node.is-optional ? Cat.peach.with-alpha(0.5) : Cat.overlay0;
+                                        vertical-alignment: center;
+                                        width: node.depth == 1 ? 28px : 52px;
+                                    }
+                                }
+
+                                // Status dot
+                                VerticalLayout {
+                                    alignment: center; width: 18px;
+                                    Rectangle {
+                                        width: 8px; height: 8px; border-radius: 4px;
+                                        background: node.is-optional ? Cat.peach
+                                            : (node.installed ? Cat.green : Cat.red);
+                                    }
+                                }
+
+                                // Name + hard badge
+                                // Rectangle propagates width correctly; no alignment on inner HLayout
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            preferred-width: 0px;
+                                            horizontal-stretch: 1;
+                                            text: node.name;
+                                            font-size: node.depth == 1 ? 13px : 12px;
+                                            font-weight: node.depth == 1 ? 500 : 400;
+                                            font-italic: node.is-optional;
+                                            color: node.is-optional ? Cat.peach.with-alpha(0.85)
+                                                : (node.installed
+                                                    ? (node.depth == 1 ? Cat.text : Cat.subtext0)
+                                                    : Cat.red);
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        if !node.is-optional && node.depth == 1: VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 34px; height: 16px; border-radius: 4px;
+                                                background: Cat.blue.with-alpha(0.12);
+                                                Text { text: "hard"; font-size: 9px; font-weight: 700; color: Cat.blue.with-alpha(0.8); horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Version pill — 80px fits trimmed versions
+                                VerticalLayout {
+                                    alignment: center; width: 80px;
+                                    Rectangle {
+                                        height: 20px; border-radius: 5px;
+                                        background: Cat.surface0.with-alpha(0.5);
+                                        Text {
+                                            text: node.version == "" ? "not installed" : node.version;
+                                            font-size: 10px;
+                                            color: node.version == "" ? Cat.red.with-alpha(0.7) : Cat.overlay1;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if node.depth != -1: Rectangle {
+                                x: 16px; y: parent.height - 1px;
+                                width: parent.width - 32px; height: 1px;
+                                background: Cat.surface0.with-alpha(0.35);
+                            }
+                        }
+                    }
+                }
+
+                // ── Required By tab ──────────────────────────────────────────
+                if !dep-tree-loading && dep-tree-tab == 1: VerticalLayout {
+                    vertical-stretch: 1;
+
+                    if dep-reqby-nodes.length == 0: Rectangle {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            alignment: center; spacing: 10px;
+                            NavIcon { d: icon-package; icon-color: Cat.green; width: 32px; height: 32px; }
+                            Text { text: "Nothing depends on " + dep-tree-pkg; font-size: 14px; font-weight: 600; color: Cat.text; horizontal-alignment: center; }
+                            Text { text: "This package can be safely removed without breaking other packages."; font-size: 12px; color: Cat.overlay1; horizontal-alignment: center; }
+                        }
+                    }
+
+                    if dep-reqby-nodes.length > 0: VerticalLayout {
+                        vertical-stretch: 1;
+
+                        // Required-by pill header
+                        Rectangle { height: 20px; background: transparent; }
+                        HorizontalLayout {
+                            padding-left: 20px; padding-right: 20px;
+                            Rectangle {
+                                horizontal-stretch: 1; height: 60px;
+                                border-radius: 14px;
+                                background: Cat.green.with-alpha(0.08);
+                                border-width: 1px; border-color: Cat.green.with-alpha(0.2);
+                                HorizontalLayout {
+                                    padding-left: 18px; padding-right: 18px; spacing: 12px;
+                                    VerticalLayout { alignment: center; NavIcon { d: icon-package; icon-color: Cat.green; width: 20px; height: 20px; } }
+                                    VerticalLayout {
+                                        alignment: center; horizontal-stretch: 1;
+                                        Text { text: dep-tree-pkg + " is required by " + dep-reqby-nodes.length + " installed packages"; font-size: 12px; font-weight: 600; color: Cat.text; }
+                                        Text { text: "Removing it may break these packages"; font-size: 10px; color: Cat.overlay1; }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle { height: 14px; background: transparent; }
+                        Rectangle { x: 20px; height: 1px; width: parent.width - 40px; background: Cat.surface0.with-alpha(0.6); }
+                        Rectangle { height: 4px; background: transparent; }
+
+                        ListView {
+                            vertical-stretch: 1;
+                            for node[i] in dep-reqby-nodes: Rectangle {
+                                height: 46px;
+                                background: rb-node-ta.has-hover ? Cat.surface0.with-alpha(0.25) : transparent;
+                                animate background { duration: 60ms; }
+
+                                rb-node-ta := TouchArea {}
+
+                                HorizontalLayout {
+                                    padding-left: 24px; padding-right: 20px; spacing: 12px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle { width: 8px; height: 8px; border-radius: 4px; background: Cat.green; }
+                                    }
+                                    Text {
+                                        preferred-width: 0px; horizontal-stretch: 1;
+                                        text: node.name; font-size: 13px; font-weight: 500; color: Cat.text; overflow: elide; vertical-alignment: center;
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            height: 20px; width: 80px; border-radius: 5px;
+                                            background: Cat.surface0.with-alpha(0.5);
+                                            Text { text: node.version == "" ? "—" : node.version; font-size: 10px; color: Cat.overlay1; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                                        }
+                                    }
+                                }
+
+                                Rectangle { x: 16px; y: parent.height - 1px; width: parent.width - 32px; height: 1px; background: Cat.surface0.with-alpha(0.35); }
+                            }
+                        }
+                    }
+                }
+              } // end inner VerticalLayout
+            } // end view 12 Rectangle
+
             // ─── View 11: Troubleshooting ─────────────────────────────────────
             if view == 11: VerticalLayout {
                 vertical-stretch: 1;
@@ -3424,31 +3633,63 @@ export component MainWindow inherits Window {
 
                 Rectangle { height: 1px; background: Cat.green.with-alpha(0.15); }
 
-                // Centered card grid
+                // Title card + card grid centered together as one vertical group
                 VerticalLayout {
                     vertical-stretch: 1;
                     alignment: center;
-                    padding-left: 48px;
-                    padding-right: 48px;
-                    spacing: 14px;
+                    padding-left: 40px;
+                    padding-right: 40px;
+                    padding-top: 20px;
+                    padding-bottom: 20px;
+                    spacing: 20px;
 
-                    // Row 1
-                    HorizontalLayout {
+                    // ── Title card ────────────────────────────────────────────
+                    Rectangle {
+                        height: 88px;
+                        border-radius: 12px;
+                        background: Cat.surface0.with-alpha(0.45);
+                        border-width: 1px;
+                        border-color: Cat.green.with-alpha(0.18);
+                        VerticalLayout {
+                            alignment: center;
+                            padding-left: 24px;
+                            padding-right: 24px;
+                            spacing: 6px;
+                            Text {
+                                text: "System Repair Tools";
+                                font-size: 17px;
+                                font-weight: 700;
+                                color: Cat.text;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Run these tools to resolve common system issues. Each operation requires root privileges and opens a live terminal output window so you can monitor progress in real time.";
+                                font-size: 11px;
+                                color: Cat.overlay1;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // ── 2×2 card grid (GridLayout guarantees equal column widths) ──
+                    GridLayout {
                         spacing: 14px;
 
                         // ── Card: Update Mirrorlists ──────────────────────
                         Rectangle {
-                            horizontal-stretch: 1;
+                            row: 0; col: 0;
                             height: 112px;
                             border-radius: 10px;
                             background: mir-ta.has-hover ? Cat.surface0.with-alpha(0.7) : Cat.surface0.with-alpha(0.45);
                             animate background { duration: 80ms; }
 
+                            // hover area BEHIND content
+                            mir-ta := TouchArea {}
+
                             HorizontalLayout {
                                 Rectangle {
                                     width: 3px;
-                                    border-radius-top-left: 10px;
-                                    border-radius-bottom-left: 10px;
                                     background: Cat.teal;
                                 }
                                 HorizontalLayout {
@@ -3481,7 +3722,7 @@ export component MainWindow inherits Window {
                                         spacing: 3px;
                                         Text { text: "Update Mirrorlists"; font-size: 13px; font-weight: 700; color: Cat.text; }
                                         Text { text: "Re-rank fastest mirrors via rate-mirrors"; font-size: 11px; color: Cat.overlay1; }
-                                        Text { text: "$ rate-mirrors arch | tee /etc/pacman.d/mirrorlist"; font-size: 10px; color: Cat.teal.with-alpha(0.7); }
+                                        Text { text: "$ rate-mirrors arch | tee /etc/pacman.d/mirrorlist"; font-size: 10px; color: Cat.teal.with-alpha(0.7); overflow: elide; }
                                     }
 
                                     VerticalLayout {
@@ -3499,22 +3740,88 @@ export component MainWindow inherits Window {
                                     }
                                 }
                             }
-                            mir-ta := TouchArea {}
+                        }
+
+                        // ── Card: Rebuild InitRamFS ───────────────────────
+                        Rectangle {
+                            row: 0; col: 1;
+                            height: 112px;
+                            border-radius: 10px;
+                            background: ini-ta.has-hover ? Cat.surface0.with-alpha(0.7) : Cat.surface0.with-alpha(0.45);
+                            animate background { duration: 80ms; }
+
+                            // hover area BEHIND content
+                            ini-ta := TouchArea {}
+
+                            HorizontalLayout {
+                                Rectangle {
+                                    width: 3px;
+                                    background: Cat.mauve;
+                                }
+                                HorizontalLayout {
+                                    padding-left: 18px;
+                                    padding-right: 18px;
+                                    padding-top: 14px;
+                                    padding-bottom: 14px;
+                                    spacing: 14px;
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 46px; height: 46px;
+                                            border-radius: 23px;
+                                            background: Cat.mauve.with-alpha(0.12);
+                                            border-width: 1px;
+                                            border-color: Cat.mauve.with-alpha(0.25);
+                                            NavIcon {
+                                                d: icon-cpu;
+                                                icon-color: Cat.mauve;
+                                                width: 22px; height: 22px;
+                                                x: 12px; y: 12px;
+                                            }
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 3px;
+                                        Text { text: "Rebuild InitRamFS"; font-size: 13px; font-weight: 700; color: Cat.text; }
+                                        Text { text: "Regenerate all initramfs images mkinitcpio"; font-size: 11px; color: Cat.overlay1; }
+                                        Text { text: "$ mkinitcpio -P"; font-size: 10px; color: Cat.mauve.with-alpha(0.7); overflow: elide; }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 64px; height: 28px;
+                                            border-radius: 6px;
+                                            background: ini-btn.has-hover ? Cat.mauve.with-alpha(0.25) : Cat.mauve.with-alpha(0.1);
+                                            border-width: 1px;
+                                            border-color: Cat.mauve.with-alpha(0.35);
+                                            animate background { duration: 70ms; }
+                                            Text { text: "▶  RUN"; font-size: 10px; font-weight: 700; color: Cat.mauve; horizontal-alignment: center; vertical-alignment: center; }
+                                            ini-btn := TouchArea { mouse-cursor: pointer; clicked => { root.rebuild-initramfs(); } }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // ── Card: Fix GnuPG Keyring ───────────────────────
                         Rectangle {
-                            horizontal-stretch: 1;
+                            row: 1; col: 0;
                             height: 112px;
                             border-radius: 10px;
                             background: key-ta.has-hover ? Cat.surface0.with-alpha(0.7) : Cat.surface0.with-alpha(0.45);
                             animate background { duration: 80ms; }
 
+                            // hover area BEHIND content
+                            key-ta := TouchArea {}
+
                             HorizontalLayout {
                                 Rectangle {
                                     width: 3px;
-                                    border-radius-top-left: 10px;
-                                    border-radius-bottom-left: 10px;
                                     background: Cat.yellow;
                                 }
                                 HorizontalLayout {
@@ -3547,7 +3854,7 @@ export component MainWindow inherits Window {
                                         spacing: 3px;
                                         Text { text: "Fix GnuPG Keyring"; font-size: 13px; font-weight: 700; color: Cat.text; }
                                         Text { text: "Reset and repopulate pacman keys"; font-size: 11px; color: Cat.overlay1; }
-                                        Text { text: "$ pacman-key --init && pacman-key --populate"; font-size: 10px; color: Cat.yellow.with-alpha(0.7); }
+                                        Text { text: "$ pacman-key --init && pacman-key --populate"; font-size: 10px; color: Cat.yellow.with-alpha(0.7); overflow: elide; }
                                     }
 
                                     VerticalLayout {
@@ -3565,93 +3872,22 @@ export component MainWindow inherits Window {
                                     }
                                 }
                             }
-                            key-ta := TouchArea {}
-                        }
-                    }
-
-                    // Row 2
-                    HorizontalLayout {
-                        spacing: 14px;
-
-                        // ── Card: Rebuild InitRamFS ───────────────────────
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 112px;
-                            border-radius: 10px;
-                            background: ini-ta.has-hover ? Cat.surface0.with-alpha(0.7) : Cat.surface0.with-alpha(0.45);
-                            animate background { duration: 80ms; }
-
-                            HorizontalLayout {
-                                Rectangle {
-                                    width: 3px;
-                                    border-radius-top-left: 10px;
-                                    border-radius-bottom-left: 10px;
-                                    background: Cat.mauve;
-                                }
-                                HorizontalLayout {
-                                    padding-left: 18px;
-                                    padding-right: 18px;
-                                    padding-top: 14px;
-                                    padding-bottom: 14px;
-                                    spacing: 14px;
-
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Rectangle {
-                                            width: 46px; height: 46px;
-                                            border-radius: 23px;
-                                            background: Cat.mauve.with-alpha(0.12);
-                                            border-width: 1px;
-                                            border-color: Cat.mauve.with-alpha(0.25);
-                                            NavIcon {
-                                                d: icon-cpu;
-                                                icon-color: Cat.mauve;
-                                                width: 22px; height: 22px;
-                                                x: 12px; y: 12px;
-                                            }
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        alignment: center;
-                                        spacing: 3px;
-                                        Text { text: "Rebuild InitRamFS"; font-size: 13px; font-weight: 700; color: Cat.text; }
-                                        Text { text: "Regenerate all initramfs images (mkinitcpio)"; font-size: 11px; color: Cat.overlay1; }
-                                        Text { text: "$ mkinitcpio -P"; font-size: 10px; color: Cat.mauve.with-alpha(0.7); }
-                                    }
-
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Rectangle {
-                                            width: 64px; height: 28px;
-                                            border-radius: 6px;
-                                            background: ini-btn.has-hover ? Cat.mauve.with-alpha(0.25) : Cat.mauve.with-alpha(0.1);
-                                            border-width: 1px;
-                                            border-color: Cat.mauve.with-alpha(0.35);
-                                            animate background { duration: 70ms; }
-                                            Text { text: "▶  RUN"; font-size: 10px; font-weight: 700; color: Cat.mauve; horizontal-alignment: center; vertical-alignment: center; }
-                                            ini-btn := TouchArea { mouse-cursor: pointer; clicked => { root.rebuild-initramfs(); } }
-                                        }
-                                    }
-                                }
-                            }
-                            ini-ta := TouchArea {}
                         }
 
                         // ── Card: Rebuild Grub ────────────────────────────
                         Rectangle {
-                            horizontal-stretch: 1;
+                            row: 1; col: 1;
                             height: 112px;
                             border-radius: 10px;
                             background: grb-ta.has-hover ? Cat.surface0.with-alpha(0.7) : Cat.surface0.with-alpha(0.45);
                             animate background { duration: 80ms; }
 
+                            // hover area BEHIND content
+                            grb-ta := TouchArea {}
+
                             HorizontalLayout {
                                 Rectangle {
                                     width: 3px;
-                                    border-radius-top-left: 10px;
-                                    border-radius-bottom-left: 10px;
                                     background: Cat.peach;
                                 }
                                 HorizontalLayout {
@@ -3684,7 +3920,7 @@ export component MainWindow inherits Window {
                                         spacing: 3px;
                                         Text { text: "Rebuild Grub"; font-size: 13px; font-weight: 700; color: Cat.text; }
                                         Text { text: "Regenerate GRUB bootloader config"; font-size: 11px; color: Cat.overlay1; }
-                                        Text { text: "$ update-grub"; font-size: 10px; color: Cat.peach.with-alpha(0.7); }
+                                        Text { text: "$ update-grub"; font-size: 10px; color: Cat.peach.with-alpha(0.7); overflow: elide; }
                                     }
 
                                     VerticalLayout {
@@ -3702,9 +3938,8 @@ export component MainWindow inherits Window {
                                     }
                                 }
                             }
-                            grb-ta := TouchArea {}
                         }
-                    }
+                    } // end GridLayout
 
                     // Bottom info strip
                     Rectangle {
@@ -4197,48 +4432,44 @@ export component MainWindow inherits Window {
     if loading || busy: Rectangle {
         x: parent.width - self.width - 16px;
         y: 12px;
-        width: 220px;
-        height: 34px;
+        width: 228px;
+        height: 44px;
         border-radius: 8px;
-        background: Cat.surface0.with-alpha(0.92);
+        background: Cat.surface0.with-alpha(0.96);
         border-width: 1px;
-        border-color: Cat.mauve.with-alpha(0.25);
-        drop-shadow-blur: 12px;
-        drop-shadow-color: Cat.crust.with-alpha(0.4);
+        border-color: Cat.mauve.with-alpha(0.3);
+        drop-shadow-blur: 14px;
+        drop-shadow-color: Cat.crust.with-alpha(0.45);
         drop-shadow-offset-y: 2px;
         clip: true;
 
-        // Progress fill
+        // Left accent stripe
         Rectangle {
-            x: 0;
-            y: parent.height - 2px;
-            height: 2px;
-            border-radius: 1px;
-            background: Cat.mauve;
-            width: busy && progress > 0
-                ? parent.width * progress / 100
-                : parent.width * 0.35;
-            animate width { duration: 350ms; easing: ease-out; }
+            x: 0; y: 0;
+            width: 2px; height: parent.height;
+            background: Cat.mauve.with-alpha(0.65);
         }
 
+        // ── Text row ─────────────────────────────────────────────────
         HorizontalLayout {
             padding-left: 12px;
             padding-right: 10px;
-            spacing: 8px;
+            padding-top: 7px;
+            padding-bottom: 20px;   // leaves 12px for the fill bar below
+            spacing: 5px;
 
-            // Pulsing dot
-            Rectangle {
-                width: 6px;
-                height: 6px;
-                border-radius: 3px;
-                background: Cat.mauve;
-                y: (parent.height - 6px) / 2;
-                animate background { duration: 600ms; }
+            Text {
+                text: ">";
+                font-size: 10px;
+                font-weight: 800;
+                color: Cat.mauve;
+                vertical-alignment: center;
             }
 
             Text {
-                text: progress-text != "" ? progress-text : "Loading...";
-                font-size: 11px;
+                text: progress-text != "" ? progress-text :
+                      busy ? "running operation..." : "resolving packages...";
+                font-size: 10px;
                 color: Cat.subtext0;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
@@ -4247,10 +4478,63 @@ export component MainWindow inherits Window {
 
             if busy && progress > 0: Text {
                 text: progress + "%";
-                font-size: 11px;
+                font-size: 10px;
                 font-weight: 700;
                 color: Cat.mauve;
                 vertical-alignment: center;
+            }
+        }
+
+        // ── Fill bar — spans full chip width, pinned to bottom ───────
+        Rectangle {
+            x: 0;
+            y: parent.height - 12px;
+            width: parent.width;
+            height: 12px;
+            clip: true;
+            background: transparent;
+
+            // Dim background blocks (always visible)
+            Text {
+                text: "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░";
+                font-size: 8px;
+                color: Cat.surface1;
+                vertical-alignment: center;
+                overflow: clip;
+            }
+
+            // Indeterminate shimmer — sweeps left→right on a loop
+            if !busy || progress == 0: Rectangle {
+                clip: true;
+                x: root._load-shimmer * parent.width;
+                y: 0;
+                height: parent.height;
+                width: parent.width * 0.38;
+
+                Text {
+                    text: "████████████████████████████████████████████";
+                    font-size: 8px;
+                    color: Cat.mauve.with-alpha(0.85);
+                    vertical-alignment: center;
+                    overflow: clip;
+                }
+            }
+
+            // Determinate fill — grows right as progress increases
+            if busy && progress > 0: Rectangle {
+                clip: true;
+                x: 0; y: 0;
+                height: parent.height;
+                width: parent.width * progress / 100;
+                animate width { duration: 350ms; easing: ease-out; }
+
+                Text {
+                    text: "████████████████████████████████████████████";
+                    font-size: 8px;
+                    color: Cat.mauve;
+                    vertical-alignment: center;
+                    overflow: clip;
+                }
             }
         }
     }
@@ -4858,6 +5142,106 @@ export component MainWindow inherits Window {
                                     mouse-cursor: pointer;
                                     clicked => { root.close-progress-popup(); }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Flatpak remove confirmation dialog ────────────────────────────────────
+    if fp-confirm-open: Rectangle {
+        width: 100%; height: 100%;
+        background: Cat.crust.with-alpha(0.70);
+        TouchArea {}
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 400px; height: 210px;
+            background: Cat.base;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: Cat.red.with-alpha(0.3);
+            drop-shadow-blur: 28px;
+            drop-shadow-color: Cat.crust.with-alpha(0.6);
+            drop-shadow-offset-y: 8px;
+
+            VerticalLayout {
+                padding: 24px; spacing: 16px;
+
+                // Header
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 36px; height: 36px; border-radius: 10px;
+                            background: Cat.red.with-alpha(0.12);
+                            NavIcon { d: "M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"; icon-color: Cat.red; width: 18px; height: 18px; x: 9px; y: 9px; }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center; horizontal-stretch: 1; spacing: 3px;
+                        Text { text: "Remove " + fp-confirm-name + "?"; font-size: 14px; font-weight: 700; color: Cat.text; overflow: elide; }
+                        Text { text: "This will uninstall the application from your system."; font-size: 11px; color: Cat.overlay1; }
+                    }
+                }
+
+                // Data question
+                Rectangle {
+                    height: 40px; border-radius: 8px;
+                    background: Cat.surface0;
+                    HorizontalLayout {
+                        padding-left: 14px; padding-right: 14px;
+                        VerticalLayout {
+                            alignment: center; horizontal-stretch: 1;
+                            Text { text: "Also remove leftover user data?"; font-size: 12px; color: Cat.subtext1; }
+                            Text { text: "Saved settings, files, and app data will be deleted."; font-size: 10px; color: Cat.overlay0; }
+                        }
+                    }
+                }
+
+                // Buttons
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    // Cancel
+                    Rectangle {
+                        horizontal-stretch: 1; height: 32px; border-radius: 7px;
+                        background: fp-cancel-ta.has-hover ? Cat.surface1 : Cat.surface0;
+                        animate background { duration: 60ms; }
+                        VerticalLayout { alignment: center; Text { text: "Cancel"; font-size: 12px; font-weight: 600; color: Cat.subtext0; horizontal-alignment: center; } }
+                        fp-cancel-ta := TouchArea { mouse-cursor: pointer; clicked => { root.fp-confirm-open = false; } }
+                    }
+
+                    // Remove only
+                    Rectangle {
+                        horizontal-stretch: 1; height: 32px; border-radius: 7px;
+                        background: fp-remonly-ta.has-hover ? Cat.red.with-alpha(0.25) : Cat.red.with-alpha(0.14);
+                        animate background { duration: 60ms; }
+                        VerticalLayout { alignment: center; Text { text: "Remove Only"; font-size: 12px; font-weight: 600; color: Cat.red; horizontal-alignment: center; } }
+                        fp-remonly-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.fp-confirm-open = false;
+                                root.remove-flatpak(root.fp-confirm-id, false);
+                            }
+                        }
+                    }
+
+                    // Remove + Data
+                    Rectangle {
+                        horizontal-stretch: 1; height: 32px; border-radius: 7px;
+                        background: fp-remdata-ta.has-hover ? Cat.red.with-alpha(0.5) : Cat.red.with-alpha(0.3);
+                        animate background { duration: 60ms; }
+                        VerticalLayout { alignment: center; Text { text: "Remove + Data"; font-size: 12px; font-weight: 700; color: Cat.red; horizontal-alignment: center; } }
+                        fp-remdata-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.fp-confirm-open = false;
+                                root.remove-flatpak(root.fp-confirm-id, true);
                             }
                         }
                     }
