@@ -848,6 +848,14 @@ export component MainWindow inherits Window {
     in-out property <string> flatpak-detail-summary: "";
     in-out property <string> flatpak-detail-description: "";
     in-out property <string> flatpak-detail-developer: "";
+    in-out property <string> flatpak-detail-version: "";
+    in-out property <string> flatpak-detail-version-date: "";
+    in-out property <string> flatpak-detail-changelog: "";
+    in-out property <string> flatpak-detail-url-homepage: "";
+    in-out property <string> flatpak-detail-url-bug: "";
+    in-out property <string> flatpak-detail-url-translate: "";
+    in-out property <string> flatpak-detail-url-vcs: "";
+    in-out property <[string]> flatpak-detail-tags: [];
     in-out property <bool> flatpak-detail-installed: false;
     in-out property <string> current-flatpak-id: "";
     in-out property <image> flatpak-screenshot;
@@ -859,6 +867,8 @@ export component MainWindow inherits Window {
     in-out property <bool> show-addons-modal: false;
     in-out property <int> flatpak-addons-installed-count: 0;      // = flatpak-addons-installed.length
     in-out property <int> flatpak-update-count: 0;
+    // Derived: native (pacman) update count = total updates minus flatpak updates
+    property <int> native-update-count: update-packages.length - flatpak-update-count;
     in-out property <[bool]> addon-selected: [];   // parallel bool, one per flatpak-addons entry
     in-out property <int> addon-selected-count: 0;
     callback batch-flatpak-install;
@@ -1217,6 +1227,22 @@ export component MainWindow inherits Window {
 
                 if view == 1 && update-packages.length > flatpak-update-count: Btn {
                     label: "Update All";
+                    primary: true;
+                    enabled: !busy;
+                    clicked => { root.update-all(); }
+                }
+
+                // Flatpaks view — update flatpaks button
+                if view == 10 && flatpak-update-count > 0: Btn {
+                    label: "Update Flatpaks (" + flatpak-update-count + ")";
+                    primary: true;
+                    enabled: !busy;
+                    clicked => { root.update-all-flatpaks(); }
+                }
+
+                // Browse Repos view — update native packages button
+                if (view == 7 || view == 8) && native-update-count > 0: Btn {
+                    label: "Update Native (" + native-update-count + ")";
                     primary: true;
                     enabled: !busy;
                     clicked => { root.update-all(); }
@@ -1918,6 +1944,131 @@ export component MainWindow inherits Window {
                                 wrap: word-wrap;
                                 opacity: 0.9;
                             }
+
+                            // ── Changelog card ───────────────────────────────────────
+                            if flatpak-detail-version != "" && flatpak-detail-changelog != "": Rectangle {
+                                border-radius: 10px;
+                                background: Cat.surface0.with-alpha(0.5);
+                                border-width: 1px;
+                                border-color: Cat.surface1;
+                                VerticalLayout {
+                                    padding: 16px;
+                                    spacing: 10px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Text {
+                                            text: "Changes in version " + flatpak-detail-version;
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            color: Cat.text;
+                                            vertical-alignment: center;
+                                        }
+                                        if flatpak-detail-version-date != "": Text {
+                                            text: "·  " + flatpak-detail-version-date;
+                                            font-size: 11px;
+                                            color: Cat.overlay1;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Text {
+                                        text: flatpak-detail-changelog;
+                                        font-size: 12px;
+                                        color: Cat.subtext0;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            // ── Links section ────────────────────────────────────────
+                            if flatpak-detail-url-homepage != "" || flatpak-detail-url-bug != "" || flatpak-detail-url-translate != "" || flatpak-detail-url-vcs != "": Rectangle {
+                                border-radius: 10px;
+                                background: Cat.surface0.with-alpha(0.5);
+                                border-width: 1px;
+                                border-color: Cat.surface1;
+                                VerticalLayout {
+                                    padding: 16px;
+                                    spacing: 10px;
+                                    Text {
+                                        text: "Links";
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: Cat.text;
+                                    }
+                                    if flatpak-detail-url-homepage != "": Rectangle {
+                                        height: 26px;
+                                        link-home-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.open-url(flatpak-detail-url-homepage); }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px; alignment: start;
+                                            NavIcon { d: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"; icon-color: Cat.blue; width: 14px; height: 14px; }
+                                            Text { text: "Project Website"; font-size: 13px; color: link-home-ta.has-hover ? Cat.lavender : Cat.blue; vertical-alignment: center; animate color { duration: 80ms; } }
+                                        }
+                                    }
+                                    if flatpak-detail-url-bug != "": Rectangle {
+                                        height: 26px;
+                                        link-bug-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.open-url(flatpak-detail-url-bug); }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px; alignment: start;
+                                            NavIcon { d: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"; icon-color: Cat.peach; width: 14px; height: 14px; }
+                                            Text { text: "Report an Issue"; font-size: 13px; color: link-bug-ta.has-hover ? Cat.yellow : Cat.peach; vertical-alignment: center; animate color { duration: 80ms; } }
+                                        }
+                                    }
+                                    if flatpak-detail-url-translate != "": Rectangle {
+                                        height: 26px;
+                                        link-tr-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.open-url(flatpak-detail-url-translate); }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px; alignment: start;
+                                            NavIcon { d: "M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129"; icon-color: Cat.teal; width: 14px; height: 14px; }
+                                            Text { text: "Contribute Translations"; font-size: 13px; color: link-tr-ta.has-hover ? Cat.sky : Cat.teal; vertical-alignment: center; animate color { duration: 80ms; } }
+                                        }
+                                    }
+                                    if flatpak-detail-url-vcs != "": Rectangle {
+                                        height: 26px;
+                                        link-vcs-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.open-url(flatpak-detail-url-vcs); }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px; alignment: start;
+                                            NavIcon { d: "M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"; icon-color: Cat.mauve; width: 14px; height: 14px; }
+                                            Text { text: "Browse Source Code"; font-size: 13px; color: link-vcs-ta.has-hover ? Cat.lavender : Cat.mauve; vertical-alignment: center; animate color { duration: 80ms; } }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── Tags row ─────────────────────────────────────────────
+                            if flatpak-detail-tags.length > 0: HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                for tag in flatpak-detail-tags: Rectangle {
+                                    width: tag-lbl.preferred-width + 16px;
+                                    height: 24px;
+                                    border-radius: 12px;
+                                    background: Cat.mauve.with-alpha(0.1);
+                                    border-width: 1px;
+                                    border-color: Cat.mauve.with-alpha(0.25);
+                                    tag-lbl := Text {
+                                        text: tag;
+                                        font-size: 11px;
+                                        color: Cat.mauve;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Bottom padding
+                            Rectangle { height: 12px; }
                         }
                     }
                 }
@@ -2118,6 +2269,14 @@ export component MainWindow inherits Window {
                                         flatpak-detail-summary = pkg.description;
                                         flatpak-detail-description = "";
                                         flatpak-detail-developer = "";
+                                        flatpak-detail-version = "";
+                                        flatpak-detail-version-date = "";
+                                        flatpak-detail-changelog = "";
+                                        flatpak-detail-url-homepage = "";
+                                        flatpak-detail-url-bug = "";
+                                        flatpak-detail-url-translate = "";
+                                        flatpak-detail-url-vcs = "";
+                                        flatpak-detail-tags = [];
                                         flatpak-screenshot = @image-url("");
                                         flatpak-detail-icon = @image-url("");
                                         flatpak-addons = [];

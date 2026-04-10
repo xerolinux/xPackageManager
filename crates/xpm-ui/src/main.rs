@@ -55,6 +55,14 @@ enum UiMessage {
         summary: String,
         description: String,
         developer: String,
+        version: String,
+        version_date: String,
+        changelog: String,
+        url_homepage: String,
+        url_bugtracker: String,
+        url_translate: String,
+        url_vcs: String,
+        categories: Vec<String>,
     },
     FlatpakScreenshotReady(String),
     FlatpakIconReady(String),
@@ -1708,22 +1716,32 @@ fn main() {
                         window.set_conflict_can_force(can_force);
                         window.set_show_conflict_dialog(true);
                     }
-                    UiMessage::FlatpakDetailReady { name, summary, description, developer } => {
+                    UiMessage::FlatpakDetailReady { name, summary, description, developer, version, version_date, changelog, url_homepage, url_bugtracker, url_translate, url_vcs, categories } => {
                         window.set_flatpak_detail_name(SharedString::from(&name));
                         window.set_flatpak_detail_summary(SharedString::from(&summary));
-                        // Ensure paragraph spacing — old cache uses single \n, new parser uses \n\n.
-                        // Normalise: collapse any existing \n\n, then re-expand all \n to \n\n.
-                        // Bullet lines (• …) keep their structure because they're non-empty lines.
-                        let formatted = if description.contains('\n') {
-                            // Collapse existing double-newlines first to avoid quadrupling
-                            let normalised = description.replace("\n\n", "\n");
-                            // Expand every separator to a blank line
-                            normalised.replace('\n', "\n\n")
+                        // Normalise paragraph spacing: collapse \n\n → \n, then expand \n → \n\n
+                        let fmt_desc = if description.contains('\n') {
+                            description.replace("\n\n", "\n").replace('\n', "\n\n")
                         } else {
                             description.clone()
                         };
-                        window.set_flatpak_detail_description(SharedString::from(&formatted));
+                        window.set_flatpak_detail_description(SharedString::from(&fmt_desc));
                         window.set_flatpak_detail_developer(SharedString::from(&developer));
+                        window.set_flatpak_detail_version(SharedString::from(&version));
+                        window.set_flatpak_detail_version_date(SharedString::from(&version_date));
+                        let fmt_changelog = if changelog.contains('\n') {
+                            changelog.replace("\n\n", "\n").replace('\n', "\n\n")
+                        } else {
+                            changelog.clone()
+                        };
+                        window.set_flatpak_detail_changelog(SharedString::from(&fmt_changelog));
+                        window.set_flatpak_detail_url_homepage(SharedString::from(&url_homepage));
+                        window.set_flatpak_detail_url_bug(SharedString::from(&url_bugtracker));
+                        window.set_flatpak_detail_url_translate(SharedString::from(&url_translate));
+                        window.set_flatpak_detail_url_vcs(SharedString::from(&url_vcs));
+                        window.set_flatpak_detail_tags(ModelRc::new(VecModel::from(
+                            categories.iter().map(|c| SharedString::from(c.as_str())).collect::<Vec<_>>()
+                        )));
                         window.set_show_flatpak_detail(true);
                     }
                     UiMessage::ActivityLoaded(items) => {
@@ -2729,6 +2747,14 @@ fn main() {
                 summary: app.summary.clone(),
                 description: app.description.clone(),
                 developer: app.developer.clone(),
+                version: app.version.clone(),
+                version_date: app.version_date.clone(),
+                changelog: app.changelog.clone(),
+                url_homepage: app.url_homepage.clone(),
+                url_bugtracker: app.url_bugtracker.clone(),
+                url_translate: app.url_translate.clone(),
+                url_vcs: app.url_vcs.clone(),
+                categories: app.categories.clone(),
             });
             // Find addons (apps that extend this one)
             let addons: Vec<PackageData> = store.iter()
@@ -3744,9 +3770,23 @@ struct CachedRemoteApp {
     developer: String,
     screenshot_url: String,
     #[serde(default)]
-    icon_name: String,  // filename from appstream <icon type="cached" width="128">
+    icon_name: String,
     #[serde(default)]
-    extends: String,  // non-empty means this is an addon for another app
+    extends: String,
+    #[serde(default)]
+    url_homepage: String,
+    #[serde(default)]
+    url_bugtracker: String,
+    #[serde(default)]
+    url_translate: String,
+    #[serde(default)]
+    url_vcs: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    version_date: String,
+    #[serde(default)]
+    changelog: String,
 }
 
 fn fetch_flatpak_remotes() -> Vec<String> {
@@ -3858,6 +3898,13 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
         screenshot_source_url: String,
         icon_name: String,
         extends: String,
+        url_homepage: String,
+        url_bugtracker: String,
+        url_translate: String,
+        url_vcs: String,
+        version: String,
+        version_date: String,
+        changelog: String,
     }
 
     let mut current: Option<State> = None;
@@ -3866,7 +3913,7 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
     // Boolean context flags
     let mut in_component = false;
     let mut in_id = false;
-    let mut in_name = false;       // direct child of component
+    let mut in_name = false;
     let mut in_summary = false;
     let mut in_description = false;
     let mut desc_depth: i32 = 0;
@@ -3880,6 +3927,13 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
     let mut in_image = false;
     let mut in_extends = false;
     let mut in_icon = false;
+    let mut in_url = false;
+    let mut cur_url_type = String::new();
+    let mut in_releases = false;
+    let mut in_release = false;
+    let mut got_first_release = false;
+    let mut in_release_desc = false;
+    let mut release_desc_depth: i32 = 0;
 
     let mut reader = Reader::from_reader(BufReader::new(xml_bytes.as_slice()));
     reader.config_mut().trim_text(true);
@@ -3903,6 +3957,13 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
                             screenshot_source_url: String::new(),
                             icon_name: String::new(),
                             extends: String::new(),
+                            url_homepage: String::new(),
+                            url_bugtracker: String::new(),
+                            url_translate: String::new(),
+                            url_vcs: String::new(),
+                            version: String::new(),
+                            version_date: String::new(),
+                            changelog: String::new(),
                         });
                     }
                     b"id" if in_component && !in_developer && !in_description && !in_categories && !in_screenshots => {
@@ -3914,10 +3975,46 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
                     b"summary" if in_component && !in_developer && !in_description => {
                         in_summary = true;
                     }
-                    b"description" if in_component && !in_screenshots => {
+                    b"description" if in_component && !in_screenshots && !in_releases => {
                         in_description = true;
                         desc_depth = 1;
                     }
+                    b"url" if in_component && !in_description && !in_screenshots && !in_releases => {
+                        cur_url_type.clear();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"type" {
+                                cur_url_type = String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                        in_url = true;
+                    }
+                    b"releases" if in_component => { in_releases = true; }
+                    b"release" if in_releases && !got_first_release => {
+                        if let Some(ref mut state) = current {
+                            for attr in e.attributes().flatten() {
+                                match attr.key.as_ref() {
+                                    b"version" => { state.version = String::from_utf8_lossy(&attr.value).to_string(); }
+                                    b"date" => { state.version_date = String::from_utf8_lossy(&attr.value).to_string(); }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        in_release = true;
+                    }
+                    b"description" if in_release && !in_release_desc => {
+                        in_release_desc = true;
+                        release_desc_depth = 1;
+                    }
+                    b"li" if in_release_desc => {
+                        if let Some(ref mut state) = current {
+                            if !state.changelog.is_empty() && !state.changelog.ends_with('\n') {
+                                state.changelog.push('\n');
+                            }
+                            state.changelog.push_str("• ");
+                        }
+                        release_desc_depth += 1;
+                    }
+                    _ if in_release_desc => { release_desc_depth += 1; }
                     b"developer" if in_component => {
                         in_developer = true;
                     }
@@ -4009,6 +4106,13 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
                                     screenshot_url: ss_url,
                                     icon_name: state.icon_name,
                                     extends: state.extends,
+                                    url_homepage: state.url_homepage,
+                                    url_bugtracker: state.url_bugtracker,
+                                    url_translate: state.url_translate,
+                                    url_vcs: state.url_vcs,
+                                    version: state.version,
+                                    version_date: state.version_date,
+                                    changelog: strip_inline_tags(&state.changelog),
                                 });
                             }
                         }
@@ -4026,6 +4130,33 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
                     b"screenshot" => { in_screenshot = false; }
                     b"image" => { in_image = false; }
                     b"icon" => { in_icon = false; }
+                    b"url" => { in_url = false; cur_url_type.clear(); }
+                    b"releases" => { in_releases = false; }
+                    b"release" if in_release => {
+                        got_first_release = true;
+                        in_release = false;
+                    }
+                    b"description" if in_release_desc && release_desc_depth == 1 => {
+                        in_release_desc = false;
+                        release_desc_depth = 0;
+                    }
+                    b"p" if in_release_desc => {
+                        if let Some(ref mut state) = current {
+                            if !state.changelog.is_empty() {
+                                if !state.changelog.ends_with('\n') { state.changelog.push('\n'); }
+                                state.changelog.push('\n');
+                            }
+                        }
+                        release_desc_depth -= 1;
+                    }
+                    b"li" if in_release_desc => {
+                        if let Some(ref mut state) = current {
+                            if !state.changelog.ends_with('\n') { state.changelog.push('\n'); }
+                        }
+                        release_desc_depth -= 1;
+                    }
+                    b"ul" | b"ol" if in_release_desc => { release_desc_depth -= 1; }
+                    _ if in_release_desc => { release_desc_depth -= 1; }
                     b"p" if in_description => {
                         // Double newline = blank line between paragraphs
                         if let Some(ref mut state) = current {
@@ -4083,6 +4214,26 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
                                 state.description.push(' ');
                             }
                             state.description.push_str(t);
+                        }
+                    } else if in_url {
+                        let url_text = text.trim().to_string();
+                        match cur_url_type.as_str() {
+                            "homepage" => { if state.url_homepage.is_empty() { state.url_homepage = url_text; } }
+                            "bugtracker" => { if state.url_bugtracker.is_empty() { state.url_bugtracker = url_text; } }
+                            "translate" => { if state.url_translate.is_empty() { state.url_translate = url_text; } }
+                            "vcs-browser" => { if state.url_vcs.is_empty() { state.url_vcs = url_text; } }
+                            _ => {}
+                        }
+                    } else if in_release_desc {
+                        let t = text.trim();
+                        if !t.is_empty() {
+                            if !state.changelog.is_empty()
+                                && !state.changelog.ends_with('\n')
+                                && !state.changelog.ends_with(' ')
+                            {
+                                state.changelog.push(' ');
+                            }
+                            state.changelog.push_str(t);
                         }
                     } else if in_developer_name && state.developer.is_empty() {
                         state.developer = text.trim().to_string();
