@@ -1635,6 +1635,7 @@ fn main() {
     let full_installed_timer = full_installed.clone();
     let repo_full_timer = repo_packages_full.clone();
     let filter_serial_timer = flatpak_filter_serial.clone();
+    let conflict_ctx_timer = conflict_context.clone();
 
     timer.start(TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
         if let Some(window) = window_weak.upgrade() {
@@ -1769,6 +1770,37 @@ fn main() {
                         window.set_progress_popup_show_input(false);
                         window.set_progress_popup_prompt(SharedString::from(""));
                         if success {
+                            // Optimistic instant removal: drop the packages from the displayed
+                            // lists right now so the UI updates before the full ALPM reload.
+                            if let Some((action, names, backend)) = conflict_ctx_timer.lock().unwrap().clone() {
+                                let is_remove = action == "remove" || action == "bulk-remove";
+                                if is_remove && !names.is_empty() {
+                                    let name_set: std::collections::HashSet<&str> =
+                                        names.iter().map(|s| s.as_str()).collect();
+                                    if backend == 1 {
+                                        // Flatpak removal — filter flatpak_packages
+                                        let current: Vec<PackageData> = window.get_flatpak_packages()
+                                            .iter()
+                                            .filter(|p| !name_set.contains(p.name.as_str()))
+                                            .collect();
+                                        window.set_flatpak_packages(ModelRc::new(VecModel::from(current)));
+                                    } else {
+                                        // Native pacman removal — filter full installed list + re-page
+                                        {
+                                            let mut inst = full_installed_timer.borrow_mut();
+                                            inst.retain(|p| !name_set.contains(p.name.as_str()));
+                                        }
+                                        let ps = page_size as usize;
+                                        let inst = full_installed_timer.borrow();
+                                        let total = ((inst.len() + ps - 1) / ps).max(1) as i32;
+                                        let page: Vec<PackageData> = inst.iter().take(ps).cloned().collect();
+                                        drop(inst);
+                                        window.set_installed_packages(ModelRc::new(VecModel::from(page)));
+                                        window.set_current_page(0);
+                                        window.set_total_pages(total);
+                                    }
+                                }
+                            }
                             window.set_selected_count(0);
                             let weak = window.as_weak();
                             let auto_close = Timer::default();
