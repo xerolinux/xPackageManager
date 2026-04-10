@@ -13,18 +13,32 @@ A modern package manager for Arch Linux supporting pacman (via libalpm) and Flat
 
 ## Building
 
-### Arch Linux Dependencies
+### Arch Dependencies
 
 ```bash
-sudo pacman -S rust flatpak
+sudo pacman -S rust cargo flatpak
 ```
 
-### Build with Cargo
+### Run with Cargo
 
 ```bash
 git clone https://github.com/xerolinux/xPackageManager
 cd xPackageManager/
 cargo run --bin xpackagemanager
+```
+
+### Install
+
+Add **XeroLinux** Repo :
+
+```bash
+echo -e '\n[xerolinux]\nSigLevel = Optional TrustAll\nServer = https://repos.xerolinux.xyz/$repo/$arch' | sudo tee -a /etc/pacman.conf
+```
+
+Install :
+
+```bash
+sudo pacman -Syy coming-soon-lol
 ```
 
 ## Architecture

@@ -64,6 +64,7 @@ enum UiMessage {
     PacmanReposLoaded(Vec<String>),
     RepoPackagesLoaded(Vec<PackageData>),
     RepoPkgDetail(String),
+    InstalledFlatpaksLoaded(Vec<PackageData>),
 }
 
 const PACMAN_AUTO_CONFIRM_PATTERNS: &[&str] = &[
@@ -249,10 +250,12 @@ fn strip_ansi(input: &str) -> String {
                 _ => { i += 1; }
             }
         } else if chars[i] == '\r' {
-            current_line.clear();
+            // Preserve content before \r as a line (captures "installing foo" before progress bar overwrites)
+            if !current_line.is_empty() {
+                lines.push(std::mem::take(&mut current_line));
+            }
             i += 1;
             if i < len && chars[i] == '\n' {
-                lines.push(std::mem::take(&mut current_line));
                 i += 1;
             }
         } else if chars[i] == '\n' {
@@ -541,8 +544,8 @@ fn run_managed_operation(
         let mut current_percent: i32 = 0;
         let mut pending_output = String::new();
         let mut last_output_flush = std::time::Instant::now();
-        const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
-        const MAX_OUTPUT_LINES: usize = 80;
+        const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        const MAX_OUTPUT_LINES: usize = 120;
 
         loop {
             match file.read(&mut buf) {
@@ -564,20 +567,25 @@ fn run_managed_operation(
                                           for line in cleaned.lines() {
                                               let trimmed = line.trim();
                                               if trimmed.is_empty() { continue; }
-                                              if is_progress_bar_line(trimmed) { continue; }
                                               pending_output.push_str(trimmed);
                                               pending_output.push('\n');
                                           }
 
                                           let now = std::time::Instant::now();
-                                          if !pending_output.is_empty() && now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
+                                          if !pending_output.is_empty() {
                                               let lines: Vec<&str> = pending_output.lines().collect();
-                                              if lines.len() > MAX_OUTPUT_LINES {
-                                                  pending_output = lines[lines.len() - MAX_OUTPUT_LINES..].join("\n");
-                                                  pending_output.push('\n');
+                                              let trimmed_pending = if lines.len() > MAX_OUTPUT_LINES {
+                                                  let s = lines[lines.len() - MAX_OUTPUT_LINES..].join("\n");
+                                                  format!("{}\n", s)
+                                              } else {
+                                                  pending_output.clone()
+                                              };
+                                              // Always update the display; rate-limit only how often we send
+                                              if now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
+                                                  pending_output = trimmed_pending;
+                                                  let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
+                                                  last_output_flush = now;
                                               }
-                                              let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
-                                              last_output_flush = now;
                                           }
 
                                           let lower = cleaned.to_lowercase();
@@ -1044,6 +1052,122 @@ fn load_sys_info() -> SysInfo {
     }
 }
 
+fn repo_display_order(repo: &str) -> u8 {
+    match repo {
+        "core" => 0,
+        "extra" => 1,
+        "multilib" => 2,
+        r if r.contains("testing") => 3,
+        r if r.is_empty() => 8,
+        r if r.starts_with("aur") || r == "local" => 9,
+        _ => 5,
+    }
+}
+
+fn repo_to_avatar_category(repo: &str) -> &'static str {
+    match repo {
+        "core" => "System",
+        "extra" => "Development",
+        "multilib" => "Network",
+        r if r.contains("testing") => "Science",
+        r if r.starts_with("aur") || r.is_empty() => "Game",
+        _ => "Utility",
+    }
+}
+
+fn group_installed_by_repo(pkgs: Vec<PackageData>) -> Vec<PackageData> {
+    let mut sorted = pkgs;
+    sorted.sort_by(|a, b| {
+        repo_display_order(a.repository.as_str())
+            .cmp(&repo_display_order(b.repository.as_str()))
+            .then_with(|| a.name.as_str().to_lowercase().cmp(&b.name.as_str().to_lowercase()))
+    });
+
+    let mut result: Vec<PackageData> = Vec::new();
+    let mut last_repo = String::new();
+
+    for pkg in sorted {
+        let repo = pkg.repository.to_string();
+        if repo != last_repo {
+            last_repo = repo.clone();
+            let label = if repo.is_empty() { "unknown".to_string() } else { repo.clone() };
+            result.push(PackageData {
+                name: SharedString::from(label.as_str()),
+                display_name: SharedString::from(""),
+                version: SharedString::from(""),
+                description: SharedString::from(""),
+                repository: SharedString::from(repo.as_str()),
+                backend: -1, // sentinel: group header
+                installed: false,
+                has_update: false,
+                installed_size: SharedString::from(""),
+                licenses: SharedString::from(""),
+                url: SharedString::from(""),
+                dependencies: SharedString::from(""),
+                required_by: SharedString::from(""),
+                selected: false,
+            });
+        }
+        // Augment pkg: store letter initial in required_by, category in installed_size
+        let initial = pkg.name.as_str()
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .to_string();
+        let category = repo_to_avatar_category(pkg.repository.as_str());
+        let mut aug = pkg;
+        aug.required_by = SharedString::from(initial.as_str());
+        aug.installed_size = SharedString::from(category);
+        result.push(aug);
+    }
+
+    result
+}
+
+fn load_installed_flatpaks() -> Vec<PackageData> {
+    let output = std::process::Command::new("flatpak")
+        .args(["list", "--app", "--columns=application,name,version,branch"])
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut pkgs = Vec::new();
+
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 2 { continue; }
+        let app_id = cols[0].trim();
+        let display = cols.get(1).copied().unwrap_or(app_id).trim();
+        let version = cols.get(2).copied().unwrap_or("").trim();
+        if app_id.is_empty() { continue; }
+        // Derive letter initial from display name
+        let initial = display.chars().next().unwrap_or('?').to_uppercase().to_string();
+        pkgs.push(PackageData {
+            name: SharedString::from(app_id),
+            display_name: SharedString::from(display),
+            version: SharedString::from(version),
+            description: SharedString::from(""),
+            repository: SharedString::from("flathub"),
+            backend: 1,
+            installed: true,
+            has_update: false,
+            installed_size: SharedString::from(""),
+            licenses: SharedString::from(""),
+            url: SharedString::from(""),
+            dependencies: SharedString::from(""),
+            required_by: SharedString::from(initial.as_str()),
+            selected: false,
+        });
+    }
+
+    pkgs
+}
+
 fn main() {
     let subscriber = FmtSubscriber::builder()
     .with_max_level(Level::INFO)
@@ -1140,6 +1264,10 @@ fn main() {
                         window.set_update_packages(ModelRc::new(VecModel::from(updates)));
                         window.set_flatpak_packages(ModelRc::new(VecModel::from(flatpak)));
                         window.set_stats(stats);
+                        // Pre-compute grouped installed list for view 0 tab 0
+                        let full_for_grp: Vec<PackageData> = full_installed_timer.borrow().clone();
+                        let grouped = group_installed_by_repo(full_for_grp);
+                        window.set_installed_grouped(ModelRc::new(VecModel::from(grouped)));
                         window.set_loading(false);
                     }
                     UiMessage::SearchResults(results) => {
@@ -1363,6 +1491,9 @@ fn main() {
                     UiMessage::RepoPkgDetail(desc) => {
                         window.set_repo_detail_description(SharedString::from(&desc));
                         window.set_repo_detail_loading(false);
+                    }
+                    UiMessage::InstalledFlatpaksLoaded(pkgs) => {
+                        window.set_installed_flatpaks(ModelRc::new(VecModel::from(pkgs)));
                     }
                 }
             }
@@ -1973,6 +2104,34 @@ fn main() {
         });
     });
 
+    let tx_initrd = tx.clone();
+    let initrd_input = terminal_input_sender.clone();
+    let initrd_pid = terminal_child_pid.clone();
+    window.on_rebuild_initramfs(move || {
+        info!("Troubleshoot: Rebuild InitRamFS");
+        let tx = tx_initrd.clone();
+        let input = initrd_input.clone();
+        let pid = initrd_pid.clone();
+        thread::spawn(move || {
+            run_in_terminal(&tx, "Rebuild InitRamFS", "pkexec", &["mkinitcpio", "-P"], &input, &pid);
+        });
+    });
+
+    let tx_grub = tx.clone();
+    let grub_input = terminal_input_sender.clone();
+    let grub_pid = terminal_child_pid.clone();
+    window.on_rebuild_grub(move || {
+        info!("Troubleshoot: Rebuild Grub");
+        let tx = tx_grub.clone();
+        let input = grub_input.clone();
+        let pid = grub_pid.clone();
+        thread::spawn(move || {
+            run_in_terminal(&tx, "Rebuild GRUB Config", "pkexec", &["bash", "-c",
+                "update-grub || grub-mkconfig -o /boot/grub/grub.cfg"
+            ], &input, &pid);
+        });
+    });
+
     window.on_terminal_close(move || {
         info!("Terminal close requested");
         if let Some(pid) = *close_pid.lock().unwrap() {
@@ -2394,6 +2553,46 @@ fn main() {
     });
 
     let window_weak_ss = window.as_weak();
+    let window_weak_grp = window.as_weak();
+    window.on_load_installed_grouped(move || {
+        if let Some(w) = window_weak_grp.upgrade() {
+            let pkgs: Vec<PackageData> = w.get_installed_packages().iter().collect();
+            let grouped = group_installed_by_repo(pkgs);
+            w.set_installed_grouped(ModelRc::new(VecModel::from(grouped)));
+        }
+    });
+
+    let tx_dg = tx.clone();
+    let dg_input = terminal_input_sender.clone();
+    let dg_pid = terminal_child_pid.clone();
+    window.on_downgrade_package(move |pkg_name| {
+        let name = pkg_name.to_string();
+        info!("Downgrade: {}", name);
+        let tx = tx_dg.clone();
+        let input = dg_input.clone();
+        let pid = dg_pid.clone();
+        thread::spawn(move || {
+            let cmd = format!("sudo downgrade {}", name);
+            run_in_terminal(
+                &tx,
+                &format!("Downgrade {}", name),
+                "bash",
+                &["-c", &cmd],
+                &input,
+                &pid,
+            );
+        });
+    });
+
+    let tx_ifk = tx.clone();
+    window.on_load_installed_flatpaks(move || {
+        let tx = tx_ifk.clone();
+        thread::spawn(move || {
+            let pkgs = load_installed_flatpaks();
+            let _ = tx.send(UiMessage::InstalledFlatpaksLoaded(pkgs));
+        });
+    });
+
     window.on_save_settings(move || {
         if let Some(window) = window_weak_ss.upgrade() {
             let config = build_config(&window);
