@@ -380,13 +380,15 @@ component PackageRow inherits Rectangle {
                 width: 68px;
                 height: 28px;
                 border-radius: 6px;
-                background: pkg.installed ? Cat.red.with-alpha(0.15) : Cat.mauve.with-alpha(0.15);
+                background: pkg.has-update
+                    ? Cat.teal.with-alpha(0.15)
+                    : (pkg.installed ? Cat.red.with-alpha(0.15) : Cat.mauve.with-alpha(0.15));
 
                 Text {
-                    text: pkg.installed ? "Remove" : "Install";
+                    text: pkg.has-update ? "Update" : (pkg.installed ? "Remove" : "Install");
                     font-size: 11px;
                     font-weight: 600;
-                    color: pkg.installed ? Cat.red : Cat.mauve;
+                    color: pkg.has-update ? Cat.teal : (pkg.installed ? Cat.red : Cat.mauve);
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -394,7 +396,8 @@ component PackageRow inherits Rectangle {
                 TouchArea {
                     mouse-cursor: pointer;
                     clicked => {
-                        if pkg.installed { root.remove(); }
+                        if pkg.has-update { root.install(); }
+                        else if pkg.installed { root.remove(); }
                         else { root.install(); }
                     }
                 }
@@ -849,13 +852,21 @@ export component MainWindow inherits Window {
     in-out property <string> current-flatpak-id: "";
     in-out property <image> flatpak-screenshot;
     in-out property <image> flatpak-detail-icon;
-    in-out property <[PackageData]> flatpak-addons: [];
+    // Add-Ons modal — split into two clean arrays so sections are trivial
+    in-out property <[PackageData]> flatpak-addons: [];           // NOT installed
+    in-out property <[PackageData]> flatpak-addons-installed: []; // already installed
     in-out property <[AppRow]> flatpak-app-rows: [];
     in-out property <bool> show-addons-modal: false;
-    in-out property <int> flatpak-addons-installed-count: 0;
+    in-out property <int> flatpak-addons-installed-count: 0;      // = flatpak-addons-installed.length
+    in-out property <int> flatpak-update-count: 0;
+    in-out property <[bool]> addon-selected: [];   // parallel bool, one per flatpak-addons entry
+    in-out property <int> addon-selected-count: 0;
     callback batch-flatpak-install;
     callback batch-flatpak-remove;
     callback install-selected-addons;
+    callback remove-addon(string);         // uninstall a single installed add-on by id
+    callback toggle-addon-selected(int);
+    callback addon-select-all(bool);
     callback toggle-flatpak-selected(string, bool);
     in-out property <int> flatpak-tab: 0; // 0=browse, 1=installed
     in-out property <[PackageData]> installed-flatpaks: [];
@@ -893,6 +904,7 @@ export component MainWindow inherits Window {
     callback remove-package(string, int);
     callback update-package(string, int);
     callback update-all;
+    callback update-all-flatpaks;
     callback sync-databases;
     callback open-url(string);
     callback install-local-package(string);
@@ -969,6 +981,15 @@ export component MainWindow inherits Window {
         triggered => {
             _load-shimmer = _load-shimmer >= 1.05 ? -0.4 : _load-shimmer + 0.038;
         }
+    }
+
+    // Forces ScrollView viewport-y bindings to re-evaluate while output is live.
+    // Without this, Slint may not re-evaluate the binding when text grows.
+    property <int> _scroll-tick: 0;
+    Timer {
+        interval: 80ms;
+        running: show-terminal || show-progress-popup;
+        triggered => { _scroll-tick = _scroll-tick + 1; }
     }
 
     function get-list() -> [PackageData] {
@@ -1187,7 +1208,14 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                 }
 
-                if view == 1 && update-packages.length > 0: Btn {
+                if view == 1 && flatpak-update-count > 0: Btn {
+                    label: "Update Flatpaks (" + flatpak-update-count + ")";
+                    primary: false;
+                    enabled: !busy;
+                    clicked => { root.update-all-flatpaks(); }
+                }
+
+                if view == 1 && update-packages.length > flatpak-update-count: Btn {
                     label: "Update All";
                     primary: true;
                     enabled: !busy;
@@ -1821,21 +1849,23 @@ export component MainWindow inherits Window {
                                         }
                                     }
 
-                                    // Add-Ons button — only if addons exist
-                                    if flatpak-addons.length > 0: Rectangle {
+                                    // Add-Ons button — shown if any addons exist (installed or not)
+                                    if flatpak-addons.length > 0 || flatpak-addons-installed.length > 0: Rectangle {
                                         width: 120px;
                                         height: 34px;
                                         border-radius: 10px;
-                                        property <int> installed-addon-count: flatpak-addons-installed-count;
-                                        background: installed-addon-count == flatpak-addons.length
+                                        // all-installed = nothing left to install
+                                        property <bool> all-installed: flatpak-addons.length == 0;
+                                        property <bool> some-installed: flatpak-addons-installed.length > 0 && flatpak-addons.length > 0;
+                                        background: all-installed
                                             ? Cat.green.with-alpha(0.15)
-                                            : installed-addon-count > 0
+                                            : some-installed
                                                 ? Cat.peach.with-alpha(0.15)
                                                 : Cat.surface0.with-alpha(0.6);
                                         border-width: 1px;
-                                        border-color: installed-addon-count == flatpak-addons.length
+                                        border-color: all-installed
                                             ? Cat.green.with-alpha(0.3)
-                                            : installed-addon-count > 0
+                                            : some-installed
                                                 ? Cat.peach.with-alpha(0.3)
                                                 : Cat.surface1;
                                         animate background { duration: 80ms; }
@@ -1844,27 +1874,20 @@ export component MainWindow inherits Window {
                                             alignment: center;
                                             spacing: 6px;
 
-                                            // Status dot
-                                            Rectangle {
-                                                width: 7px;
-                                                height: 7px;
-                                                border-radius: 3.5px;
-                                                background: installed-addon-count == flatpak-addons.length
-                                                    ? Cat.green
-                                                    : installed-addon-count > 0
-                                                        ? Cat.peach
-                                                        : Cat.overlay0;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 7px; height: 7px; border-radius: 3.5px;
+                                                    background: all-installed ? Cat.green
+                                                        : some-installed ? Cat.peach : Cat.overlay0;
+                                                }
                                             }
 
                                             Text {
                                                 text: "Add-Ons";
-                                                font-size: 12px;
-                                                font-weight: 600;
-                                                color: installed-addon-count == flatpak-addons.length
-                                                    ? Cat.green
-                                                    : installed-addon-count > 0
-                                                        ? Cat.peach
-                                                        : Cat.subtext0;
+                                                font-size: 12px; font-weight: 600;
+                                                color: all-installed ? Cat.green
+                                                    : some-installed ? Cat.peach : Cat.subtext0;
                                                 vertical-alignment: center;
                                             }
                                         }
@@ -2098,6 +2121,7 @@ export component MainWindow inherits Window {
                                         flatpak-screenshot = @image-url("");
                                         flatpak-detail-icon = @image-url("");
                                         flatpak-addons = [];
+                                        flatpak-addons-installed = [];
                                         root.load-flatpak-detail(pkg.name);
                                         root.load-flatpak-icon(pkg.name);
                                         show-flatpak-detail = true;
@@ -2477,7 +2501,7 @@ export component MainWindow inherits Window {
 
                                 if repo-search == "" && !rs-ti.has-focus: Text {
                                     height: 36px;
-                                    text: selected-repo != "" ? "Search in " + selected-repo + "..." : "Select a repository to search...";
+                                    text: selected-repo != "" ? "Search in " + selected-repo + "..." : "Search all packages...";
                                     font-size: 13px;
                                     color: Cat.overlay0;
                                     vertical-alignment: center;
@@ -4616,14 +4640,13 @@ export component MainWindow inherits Window {
         height: 100%;
         background: Cat.crust.with-alpha(0.65);
 
-        // Clicking backdrop closes
-        TouchArea { clicked => { root.show-addons-modal = false; } }
+        TouchArea { clicked => { root.show-addons-modal = false; root.addon-select-all(false); } }
 
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: 480px;
-            height: min(520px, parent.height - 60px);
+            width: 500px;
+            height: min(560px, parent.height - 60px);
             background: Cat.base;
             border-radius: 14px;
             border-width: 1px;
@@ -4632,175 +4655,255 @@ export component MainWindow inherits Window {
             drop-shadow-color: Cat.crust.with-alpha(0.7);
             drop-shadow-offset-y: 10px;
 
-            // Intercept clicks so modal doesn't close
-            TouchArea {}
+            TouchArea {} // intercept backdrop click
+
+            property <bool> all-selected: flatpak-addons.length > 0 && addon-selected-count == flatpak-addons.length;
 
             VerticalLayout {
                 padding: 24px;
                 spacing: 0;
 
-                // Header
+                // ── Header ───────────────────────────────────────────────────
                 HorizontalLayout {
                     spacing: 10px;
 
                     NavIcon {
                         d: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5";
-                        icon-color: Cat.mauve;
-                        width: 20px;
-                        height: 20px;
+                        icon-color: Cat.mauve; width: 20px; height: 20px;
                     }
-
                     Text {
                         text: "Add-Ons & Extensions";
-                        font-size: 16px;
-                        font-weight: 700;
-                        color: Cat.text;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
+                        font-size: 16px; font-weight: 700; color: Cat.text;
+                        vertical-alignment: center; horizontal-stretch: 1;
                     }
-
+                    // Select All button — only when there are uninstalled addons
+                    if flatpak-addons.length > 0: Rectangle {
+                        width: sel-all-lbl.preferred-width + 24px; height: 28px; border-radius: 6px;
+                        background: sel-all-t.has-hover
+                            ? (all-selected ? Cat.peach.with-alpha(0.2) : Cat.mauve.with-alpha(0.2))
+                            : (all-selected ? Cat.peach.with-alpha(0.1) : Cat.mauve.with-alpha(0.1));
+                        border-width: 1px;
+                        border-color: all-selected ? Cat.peach.with-alpha(0.4) : Cat.mauve.with-alpha(0.35);
+                        animate background { duration: 60ms; }
+                        sel-all-lbl := Text {
+                            text: all-selected ? "Deselect All" : "Select All";
+                            font-size: 11px; font-weight: 600;
+                            color: all-selected ? Cat.peach : Cat.mauve;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        sel-all-t := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.addon-select-all(!all-selected); }
+                        }
+                    }
+                    Rectangle { width: 6px; }
                     Rectangle {
-                        width: 28px;
-                        height: 28px;
-                        border-radius: 6px;
+                        width: 28px; height: 28px; border-radius: 6px;
                         background: close-modal-t.has-hover ? Cat.surface1 : transparent;
                         NavIcon { d: "M18 6L6 18M6 6l12 12"; icon-color: Cat.overlay1; width: 14px; height: 14px; x: 7px; y: 7px; }
                         close-modal-t := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.show-addons-modal = false; }
+                            clicked => { root.show-addons-modal = false; root.addon-select-all(false); }
                         }
                     }
                 }
 
-                Rectangle { height: 16px; }
+                Rectangle { height: 14px; }
 
-                // Addon list (scrollable)
+                // ── Scrollable list: two sections ────────────────────────────
                 ScrollView {
                     vertical-stretch: 1;
 
                     VerticalLayout {
                         spacing: 0;
 
+                        // ── Section: Available to Install ─────────────────────
+                        if flatpak-addons.length > 0: Rectangle {
+                            height: 28px;
+                            background: Cat.surface0.with-alpha(0.4);
+                            border-radius: 6px;
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 10px;
+                                Text {
+                                    text: "Available to Install";
+                                    font-size: 10px; font-weight: 700;
+                                    color: Cat.subtext0; vertical-alignment: center;
+                                    letter-spacing: 0.5px;
+                                }
+                            }
+                        }
+
                         for addon[ai] in flatpak-addons: Rectangle {
+                            property <bool> is-checked: ai < addon-selected.length && addon-selected[ai];
                             height: 62px;
-                            border-radius: 8px;
-                            background: addon-modal-t.has-hover
-                                ? Cat.surface0.with-alpha(0.6)
-                                : transparent;
+                            border-radius: 6px;
                             animate background { duration: 60ms; }
+                            background: arow-ta.has-hover ? Cat.surface0.with-alpha(0.6) : transparent;
+
+                            arow-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-addon-selected(ai); }
+                            }
 
                             HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                spacing: 12px;
+                                padding-left: 10px; padding-right: 10px; spacing: 12px;
 
-                                // Status indicator dot
                                 VerticalLayout {
                                     alignment: center;
                                     Rectangle {
-                                        width: 8px;
-                                        height: 8px;
-                                        border-radius: 4px;
-                                        background: addon.installed ? Cat.green : Cat.overlay0.with-alpha(0.3);
+                                        width: 18px; height: 18px; border-radius: 5px;
+                                        border-width: 1.5px;
+                                        border-color: is-checked ? Cat.mauve : Cat.surface2;
+                                        background: is-checked ? Cat.mauve : transparent;
+                                        animate background { duration: 80ms; }
+                                        if is-checked: NavIcon {
+                                            d: "M20 6L9 17l-5-5"; icon-color: Cat.crust;
+                                            width: 10px; height: 10px; x: 4px; y: 4px;
+                                        }
                                     }
                                 }
 
-                                // Name + description
                                 VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    spacing: 3px;
-                                    alignment: center;
+                                    horizontal-stretch: 1; spacing: 3px; alignment: center;
                                     Text {
                                         text: addon.display-name;
-                                        font-size: 13px;
-                                        font-weight: 600;
-                                        color: Cat.text;
-                                        overflow: elide;
+                                        font-size: 13px; font-weight: 600; color: Cat.text; overflow: elide;
                                     }
                                     Text {
                                         text: addon.description;
-                                        font-size: 11px;
-                                        color: Cat.subtext0;
-                                        overflow: elide;
+                                        font-size: 11px; color: Cat.overlay1; overflow: elide;
                                     }
                                 }
+                            }
 
-                                // Installed badge OR Install button
+                            if ai < flatpak-addons.length - 1: Rectangle {
+                                x: 10px; y: parent.height - 1px;
+                                width: parent.width - 20px; height: 1px;
+                                background: Cat.surface0; opacity: 0.6;
+                            }
+                        }
+
+                        // ── Section: Already Installed ────────────────────────
+                        if flatpak-addons.length > 0 && flatpak-addons-installed.length > 0: Rectangle {
+                            height: 8px; background: transparent;
+                        }
+                        if flatpak-addons-installed.length > 0: Rectangle {
+                            height: 28px;
+                            background: Cat.green.with-alpha(0.08);
+                            border-radius: 6px;
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 10px;
+                                Text {
+                                    text: "Already Installed";
+                                    font-size: 10px; font-weight: 700;
+                                    color: Cat.green; vertical-alignment: center;
+                                    letter-spacing: 0.5px;
+                                }
+                            }
+                        }
+
+                        for inst[ii] in flatpak-addons-installed: Rectangle {
+                            height: 62px;
+                            border-radius: 6px;
+                            animate background { duration: 60ms; }
+                            background: inst-row-ta.has-hover ? Cat.red.with-alpha(0.06) : transparent;
+
+                            inst-row-ta := TouchArea { mouse-cursor: pointer; }
+
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 10px; spacing: 12px;
+
+                                // Green installed indicator
                                 VerticalLayout {
                                     alignment: center;
-                                    if addon.installed: Rectangle {
-                                        width: 78px;
-                                        height: 28px;
-                                        border-radius: 6px;
-                                        background: Cat.green.with-alpha(0.12);
-                                        HorizontalLayout {
-                                            alignment: center;
-                                            spacing: 4px;
-                                            NavIcon {
-                                                d: "M20 6L9 17l-5-5";
-                                                icon-color: Cat.green;
-                                                width: 12px;
-                                                height: 12px;
-                                            }
-                                            Text { text: "Installed"; font-size: 10.5px; font-weight: 600; color: Cat.green; vertical-alignment: center; }
+                                    Rectangle {
+                                        width: 18px; height: 18px; border-radius: 9px;
+                                        background: Cat.green.with-alpha(0.15);
+                                        NavIcon {
+                                            d: "M20 6L9 17l-5-5"; icon-color: Cat.green;
+                                            width: 10px; height: 10px; x: 4px; y: 4px;
                                         }
                                     }
-                                    if !addon.installed: Rectangle {
-                                        width: 78px;
-                                        height: 28px;
-                                        border-radius: 6px;
-                                        background: addon-inst-t.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.18);
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1; spacing: 3px; alignment: center;
+                                    Text {
+                                        text: inst.display-name;
+                                        font-size: 13px; font-weight: 600; color: Cat.subtext1; overflow: elide;
+                                    }
+                                    Text {
+                                        text: inst.description;
+                                        font-size: 11px; color: Cat.overlay0; overflow: elide;
+                                    }
+                                }
+
+                                // Remove button
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 64px; height: 26px; border-radius: 6px;
+                                        background: rem-ta.has-hover ? Cat.red.with-alpha(0.25) : Cat.red.with-alpha(0.12);
+                                        border-width: 1px; border-color: Cat.red.with-alpha(0.3);
                                         animate background { duration: 60ms; }
                                         Text {
-                                            text: "Install";
-                                            font-size: 11px;
-                                            font-weight: 600;
-                                            color: addon-inst-t.has-hover ? #ffffff : Cat.mauve;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
+                                            text: "Remove";
+                                            font-size: 10.5px; font-weight: 600; color: Cat.red;
+                                            horizontal-alignment: center; vertical-alignment: center;
                                         }
-                                        addon-inst-t := TouchArea {
+                                        rem-ta := TouchArea {
                                             mouse-cursor: pointer;
                                             clicked => {
-                                                root.request-install(addon.name, 1);
+                                                root.remove-addon(inst.name);
+                                                root.show-addons-modal = false;
                                             }
                                         }
                                     }
                                 }
                             }
 
-                            // Separator
-                            if ai < flatpak-addons.length - 1: Rectangle {
-                                x: 8px;
-                                y: parent.height - 1px;
-                                width: parent.width - 16px;
-                                height: 1px;
-                                background: Cat.surface0;
-                                opacity: 0.5;
+                            if ii < flatpak-addons-installed.length - 1: Rectangle {
+                                x: 10px; y: parent.height - 1px;
+                                width: parent.width - 20px; height: 1px;
+                                background: Cat.surface0; opacity: 0.6;
                             }
-
-                            addon-modal-t := TouchArea {}
                         }
                     }
                 }
 
                 Rectangle { height: 16px; }
 
-                // Bottom: close button
+                // ── Footer ───────────────────────────────────────────────────
                 HorizontalLayout {
-                    alignment: end;
-                    spacing: 8px;
+                    alignment: end; spacing: 8px;
 
                     Rectangle {
-                        width: 80px;
-                        height: 34px;
-                        border-radius: 8px;
+                        width: 80px; height: 34px; border-radius: 8px;
                         background: close-btn-t.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.6);
                         animate background { duration: 60ms; }
                         Text { text: "Close"; font-size: 12px; font-weight: 500; color: Cat.subtext0; horizontal-alignment: center; vertical-alignment: center; }
                         close-btn-t := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.show-addons-modal = false; }
+                            clicked => { root.show-addons-modal = false; root.addon-select-all(false); }
+                        }
+                    }
+
+                    if addon-selected-count > 0: Rectangle {
+                        width: inst-sel-lbl.preferred-width + 28px; height: 34px; border-radius: 8px;
+                        background: inst-sel-t.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85);
+                        animate background { duration: 60ms; }
+                        inst-sel-lbl := Text {
+                            text: "Install " + addon-selected-count + " Add-On" + (addon-selected-count == 1 ? "" : "s");
+                            font-size: 12px; font-weight: 600; color: Cat.crust;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        inst-sel-t := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.install-selected-addons();
+                                root.show-addons-modal = false;
+                                root.addon-select-all(false);
+                            }
                         }
                     }
                 }
@@ -5060,7 +5163,8 @@ export component MainWindow inherits Window {
                     background: Cat.crust;
 
                     ScrollView {
-                        viewport-y: min(0px, self.visible-height - self.viewport-height);
+                        // _scroll-tick dependency forces re-eval every 80ms while live
+                        viewport-y: { let _ = root._scroll-tick; min(0px, self.visible-height - self.viewport-height); }
 
                         VerticalLayout {
                             padding: 12px;
@@ -5501,7 +5605,8 @@ export component MainWindow inherits Window {
                     background: Cat.crust;
 
                     ScrollView {
-                        viewport-y: min(0px, self.visible-height - self.viewport-height);
+                        // _scroll-tick dependency forces re-eval every 80ms while live
+                        viewport-y: { let _ = root._scroll-tick; min(0px, self.visible-height - self.viewport-height); }
                         VerticalLayout {
                             padding: 12px;
                             Text {

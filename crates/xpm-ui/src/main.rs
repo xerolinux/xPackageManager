@@ -27,6 +27,7 @@ enum UiMessage {
         updates: Vec<PackageData>,
         flatpak: Vec<PackageData>,
         stats: StatsData,
+        flatpak_update_count: i32,
     },
     SearchResults(Vec<PackageData>),
     SetLoading(bool),
@@ -213,10 +214,10 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Strip ANSI/VT100 escape sequences, preserving all other characters including \r and \n.
+/// The caller is responsible for interpreting \r (carriage return) for overwrite semantics.
 fn strip_ansi(input: &str) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    let mut current_line = String::new();
-
+    let mut result = String::with_capacity(input.len());
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut i = 0;
@@ -248,31 +249,20 @@ fn strip_ansi(input: &str) -> String {
                 }
                 _ => { i += 1; }
             }
-        } else if chars[i] == '\r' {
-            // Preserve content before \r as a line (captures "installing foo" before progress bar overwrites)
-            if !current_line.is_empty() {
-                lines.push(std::mem::take(&mut current_line));
-            }
-            i += 1;
-            if i < len && chars[i] == '\n' {
-                i += 1;
-            }
-        } else if chars[i] == '\n' {
-            lines.push(std::mem::take(&mut current_line));
-            i += 1;
         } else {
-            current_line.push(chars[i]);
+            result.push(chars[i]);
             i += 1;
         }
     }
-    if !current_line.is_empty() {
-        lines.push(current_line);
-    }
-    lines.join("\n")
+    result
 }
 
 
 
+/// Merge new_text into buffer with proper VT100 carriage-return semantics:
+/// - bare \r  → overwrite current line from the start (pacman progress bars)
+/// - \r\n     → regular newline (Windows line ending, no overwrite)
+/// - \n       → commit current line, start new line
 fn apply_terminal_text(buffer: &str, new_text: &str) -> String {
     let (prefix, current_line) = match buffer.rfind('\n') {
         Some(pos) => (&buffer[..pos + 1], &buffer[pos + 1..]),
@@ -283,18 +273,33 @@ fn apply_terminal_text(buffer: &str, new_text: &str) -> String {
     let mut result = String::with_capacity(buffer.len() + new_text.len());
     result.push_str(prefix);
 
-    for ch in new_text.chars() {
-        match ch {
+    let chars: Vec<char> = new_text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        match chars[i] {
+            '\r' if i + 1 < len && chars[i + 1] == '\n' => {
+                // \r\n = Windows newline — commit line, no overwrite
+                result.push_str(&line);
+                result.push('\n');
+                line.clear();
+                i += 2;
+            }
+            '\r' => {
+                // bare \r = carriage return — overwrite current line
+                line.clear();
+                i += 1;
+            }
             '\n' => {
                 result.push_str(&line);
                 result.push('\n');
                 line.clear();
-            }
-            '\r' => {
-                line.clear();
+                i += 1;
             }
             c => {
                 line.push(c);
+                i += 1;
             }
         }
     }
@@ -314,6 +319,43 @@ fn clean_dep_name(s: &str) -> String {
         }
     }
     s.to_string()
+}
+
+/// For a file-path dep (starts with '/'), resolve it to the owning package name
+/// using `pacman -Qo <path>`. Returns None if unresolvable or not installed.
+fn resolve_file_dep(path: &str) -> Option<String> {
+    let out = std::process::Command::new("pacman")
+        .args(["-Qo", path])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    // output: "/usr/bin/env is owned by coreutils 9.5-1"
+    let text = String::from_utf8_lossy(&out.stdout);
+    let pkg = text.split("is owned by ").nth(1)?.split_whitespace().next()?.to_string();
+    if pkg.is_empty() { None } else { Some(pkg) }
+}
+
+/// Resolve a list of raw dep tokens (after clean_dep_name) to real package names:
+///   - file paths → resolved via pacman -Qo (batched one call per path)
+///   - sonames (.so) → dropped (library ABI virtuals, not package names)
+///   - regular names → kept as-is
+fn resolve_dep_list(raw: Vec<String>) -> Vec<String> {
+    let mut result = Vec::with_capacity(raw.len());
+    for dep in raw {
+        if dep.starts_with('/') {
+            // file path dep → resolve to owner package, skip if unresolvable
+            if let Some(pkg) = resolve_file_dep(&dep) {
+                if !result.contains(&pkg) {
+                    result.push(pkg);
+                }
+            }
+        } else if dep.contains(".so") {
+            // soname virtual dep → skip, it's an ABI contract not a package name
+        } else {
+            result.push(dep);
+        }
+    }
+    result
 }
 
 /// Trim VCS/AUR version suffixes for display.
@@ -377,7 +419,7 @@ fn parse_qi_block(text: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
             reqby.extend(val.split_whitespace().filter(|&t| t != "None").map(|t| t.to_string()));
         }
     }
-    (depends, optional, reqby)
+    (resolve_dep_list(depends), resolve_dep_list(optional), reqby)
 }
 
 /// Batch-query deps for many packages in a single `pacman -Qi` call.
@@ -406,7 +448,7 @@ fn batch_deps(names: &[&str]) -> HashMap<String, Vec<String>> {
 
         if let Some(val) = line.strip_prefix("Name").and_then(|r| r.splitn(2, ':').nth(1)) {
             if !cur_name.is_empty() {
-                result.insert(cur_name.clone(), std::mem::take(&mut cur_deps));
+                result.insert(cur_name.clone(), resolve_dep_list(std::mem::take(&mut cur_deps)));
             }
             cur_name = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("Depends On").and_then(|r| r.splitn(2, ':').nth(1)) {
@@ -415,7 +457,7 @@ fn batch_deps(names: &[&str]) -> HashMap<String, Vec<String>> {
         }
     }
     if !cur_name.is_empty() {
-        result.insert(cur_name, cur_deps);
+        result.insert(cur_name, resolve_dep_list(cur_deps));
     }
     result
 }
@@ -455,7 +497,7 @@ fn parse_si_block(text: &str) -> (Vec<String>, Vec<String>) {
             state = 0;
         }
     }
-    (depends, optional)
+    (resolve_dep_list(depends), resolve_dep_list(optional))
 }
 
 /// Build the full dep tree data for `pkg_name`.
@@ -737,6 +779,9 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
                 args
             })
         }
+        ("update-all", 1) => {
+            ("flatpak".to_string(), vec!["update".to_string(), "-y".to_string()])
+        }
         ("update-all", _) => {
             ("pkexec".to_string(), vec!["pacman".to_string(), "-Syu".to_string()])
         }
@@ -831,28 +876,28 @@ fn run_managed_operation(
                                               }
                                           }
 
-                                          for line in cleaned.lines() {
-                                              let trimmed = line.trim();
-                                              if trimmed.is_empty() { continue; }
-                                              pending_output.push_str(trimmed);
-                                              pending_output.push('\n');
+                                          // Apply VT100 carriage-return semantics so pacman's
+                                          // in-place progress updates overwrite instead of appending.
+                                          pending_output = apply_terminal_text(&pending_output, &cleaned);
+
+                                          // Trim to MAX_OUTPUT_LINES to avoid unbounded growth
+                                          let line_count = pending_output.split('\n').count();
+                                          if line_count > MAX_OUTPUT_LINES {
+                                              let skip = line_count - MAX_OUTPUT_LINES;
+                                              let start = pending_output
+                                                  .split('\n')
+                                                  .take(skip)
+                                                  .map(|l| l.len() + 1)
+                                                  .sum::<usize>();
+                                              pending_output.drain(..start.min(pending_output.len()));
                                           }
 
                                           let now = std::time::Instant::now();
-                                          if !pending_output.is_empty() {
-                                              let lines: Vec<&str> = pending_output.lines().collect();
-                                              let trimmed_pending = if lines.len() > MAX_OUTPUT_LINES {
-                                                  let s = lines[lines.len() - MAX_OUTPUT_LINES..].join("\n");
-                                                  format!("{}\n", s)
-                                              } else {
-                                                  pending_output.clone()
-                                              };
-                                              // Always update the display; rate-limit only how often we send
-                                              if now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
-                                                  pending_output = trimmed_pending;
-                                                  let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
-                                                  last_output_flush = now;
-                                              }
+                                          if !pending_output.is_empty()
+                                              && now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL
+                                          {
+                                              let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
+                                              last_output_flush = now;
                                           }
 
                                           let lower = cleaned.to_lowercase();
@@ -882,9 +927,11 @@ fn run_managed_operation(
                                                   }
                                               }
 
-                                              for line in cleaned.lines() {
-                                                  let lower_line = line.to_lowercase();
-                                                  let trimmed = line.trim().to_string();
+                                              for line in cleaned.split('\n') {
+                                                  // strip embedded \r so stage text shown in the UI is clean
+                                                  let clean_line = line.split('\r').last().unwrap_or(line);
+                                                  let lower_line = clean_line.to_lowercase();
+                                                  let trimmed = clean_line.trim().to_string();
                                                   let new_percent = if lower_line.contains("resolving dependencies") {
                                                       10
                                                   } else if lower_line.contains("looking for conflicting") {
@@ -928,11 +975,6 @@ fn run_managed_operation(
             }
         }
         if !pending_output.is_empty() {
-            let lines: Vec<&str> = pending_output.lines().collect();
-            if lines.len() > MAX_OUTPUT_LINES {
-                pending_output = lines[lines.len() - MAX_OUTPUT_LINES..].join("\n");
-                pending_output.push('\n');
-            }
             let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output));
         }
         std::mem::forget(file);
@@ -1518,7 +1560,7 @@ fn main() {
 
             while let Ok(msg) = rx_clone.borrow_mut().try_recv() {
                 match msg {
-                    UiMessage::PackagesLoaded { installed, updates, flatpak, stats } => {
+                    UiMessage::PackagesLoaded { installed, updates, flatpak, stats, flatpak_update_count } => {
                         *full_installed_timer.borrow_mut() = installed;
                         let ps = page_size as usize;
                         let inst = full_installed_timer.borrow();
@@ -1530,6 +1572,7 @@ fn main() {
                         drop(inst);
                         window.set_update_packages(ModelRc::new(VecModel::from(updates)));
                         window.set_flatpak_packages(ModelRc::new(VecModel::from(flatpak)));
+                        window.set_flatpak_update_count(flatpak_update_count);
                         window.set_stats(stats);
                         // Pre-compute grouped installed list for view 0 tab 0
                         let full_for_grp: Vec<PackageData> = full_installed_timer.borrow().clone();
@@ -1668,7 +1711,18 @@ fn main() {
                     UiMessage::FlatpakDetailReady { name, summary, description, developer } => {
                         window.set_flatpak_detail_name(SharedString::from(&name));
                         window.set_flatpak_detail_summary(SharedString::from(&summary));
-                        window.set_flatpak_detail_description(SharedString::from(&description));
+                        // Ensure paragraph spacing — old cache uses single \n, new parser uses \n\n.
+                        // Normalise: collapse any existing \n\n, then re-expand all \n to \n\n.
+                        // Bullet lines (• …) keep their structure because they're non-empty lines.
+                        let formatted = if description.contains('\n') {
+                            // Collapse existing double-newlines first to avoid quadrupling
+                            let normalised = description.replace("\n\n", "\n");
+                            // Expand every separator to a blank line
+                            normalised.replace('\n', "\n\n")
+                        } else {
+                            description.clone()
+                        };
+                        window.set_flatpak_detail_description(SharedString::from(&formatted));
                         window.set_flatpak_detail_developer(SharedString::from(&developer));
                         window.set_show_flatpak_detail(true);
                     }
@@ -1709,9 +1763,16 @@ fn main() {
                         }
                     }
                     UiMessage::FlatpakAddonsReady(addons) => {
-                        let installed_count = addons.iter().filter(|a| a.installed).count() as i32;
+                        // Split into two clean lists so the modal can show them in separate sections.
+                        let (installed_list, uninstalled_list): (Vec<PackageData>, Vec<PackageData>) =
+                            addons.into_iter().partition(|a| a.installed);
+                        let installed_count = installed_list.len() as i32;
+                        let uninstalled_len = uninstalled_list.len();
                         window.set_flatpak_addons_installed_count(installed_count);
-                        window.set_flatpak_addons(ModelRc::new(VecModel::from(addons)));
+                        window.set_flatpak_addons_installed(ModelRc::new(VecModel::from(installed_list)));
+                        window.set_flatpak_addons(ModelRc::new(VecModel::from(uninstalled_list)));
+                        window.set_addon_selected(ModelRc::new(VecModel::from(vec![false; uninstalled_len])));
+                        window.set_addon_selected_count(0);
                     }
                     UiMessage::FlatpakPageAppended(new_items) => {
                         // Append next page to the existing remote-apps model
@@ -1724,11 +1785,8 @@ fn main() {
                         window.set_flatpak_loading_more(false);
                     }
                     UiMessage::PacmanReposLoaded(repos) => {
-                        if let Some(first) = repos.first() {
-                            window.set_selected_repo(SharedString::from(first.as_str()));
-                            window.set_view(8);
-                            window.set_repo_loading(true);
-                        }
+                        // Keep selected_repo as "" (All) — the browse-repo("") call
+                        // that fired alongside load-pacman-repos handles the initial load.
                         window.set_pacman_repos(ModelRc::new(VecModel::from(
                             repos.iter().map(|r| SharedString::from(r.as_str())).collect::<Vec<_>>()
                         )));
@@ -1764,8 +1822,7 @@ fn main() {
             if !pending_terminal.is_empty()
                 && (flush_now || last_term_flush.elapsed() >= std::time::Duration::from_millis(150))
                 {
-                    let text = pending_terminal.replace("\r\n", "\n");
-                    pending_terminal.clear();
+                    let text = std::mem::take(&mut pending_terminal);
                     let current = window.get_terminal_output().to_string();
                     let combined = apply_terminal_text(&current, &text);
                     let trimmed = if combined.len() > 16384 {
@@ -1958,6 +2015,21 @@ fn main() {
         let ctx = update_all_ctx.clone();
         thread::spawn(move || {
             run_managed_operation(&tx, "System Update", "update-all", &[], 0, &input, &pid, &ctx);
+        });
+    });
+
+    let tx_upd_flt = tx.clone();
+    let upd_flt_input = terminal_input_sender.clone();
+    let upd_flt_pid = terminal_child_pid.clone();
+    let upd_flt_ctx = conflict_context.clone();
+    window.on_update_all_flatpaks(move || {
+        info!("Update all flatpaks");
+        let tx = tx_upd_flt.clone();
+        let input = upd_flt_input.clone();
+        let pid = upd_flt_pid.clone();
+        let ctx = upd_flt_ctx.clone();
+        thread::spawn(move || {
+            run_managed_operation(&tx, "Flatpak Update", "update-all", &[], 1, &input, &pid, &ctx);
         });
     });
 
@@ -2883,6 +2955,80 @@ fn main() {
         });
     });
 
+    // ── Addon multi-select callbacks ──────────────────────────────────────────
+
+    let win_toggle = window.as_weak();
+    window.on_toggle_addon_selected(move |idx| {
+        let Some(w) = win_toggle.upgrade() else { return };
+        let model = w.get_addon_selected();
+        let i = idx as usize;
+        if i >= model.row_count() { return; }
+        let current = model.row_data(i).unwrap_or(false);
+        let new_val = !current;
+        model.set_row_data(i, new_val);
+        let delta: i32 = if new_val { 1 } else { -1 };
+        w.set_addon_selected_count((w.get_addon_selected_count() + delta).max(0));
+    });
+
+    let win_selall = window.as_weak();
+    window.on_addon_select_all(move |select| {
+        let Some(w) = win_selall.upgrade() else { return };
+        // flatpak-addons is uninstalled-only, so all entries are selectable
+        let model = w.get_addon_selected();
+        let count = model.row_count() as i32;
+        for i in 0..model.row_count() {
+            model.set_row_data(i, select);
+        }
+        w.set_addon_selected_count(if select { count } else { 0 });
+    });
+
+    let win_inst_addons = window.as_weak();
+    let tx_inst_addons = tx.clone();
+    window.on_install_selected_addons(move || {
+        let Some(w) = win_inst_addons.upgrade() else { return };
+        let addons = w.get_flatpak_addons();
+        let selected = w.get_addon_selected();
+        let ids: Vec<String> = (0..addons.row_count())
+            .filter(|&i| selected.row_data(i).unwrap_or(false))
+            .filter_map(|i| addons.row_data(i))
+            .map(|a| a.name.to_string())
+            .collect();
+        if ids.is_empty() { return; }
+        let title = format!("Installing {} add-on(s)", ids.len());
+        let tx = tx_inst_addons.clone();
+        let input = std::sync::Arc::new(std::sync::Mutex::new(None::<std::sync::mpsc::Sender<String>>));
+        let pid = std::sync::Arc::new(std::sync::Mutex::new(None::<u32>));
+        thread::spawn(move || {
+            let mut args = vec!["install", "--noninteractive", "--assumeyes"];
+            args.extend(ids.iter().map(|s| s.as_str()));
+            run_in_terminal(&tx, &title, "flatpak", &args, &input, &pid);
+        });
+    });
+
+    let tx_rem_addon = tx.clone();
+    let rem_addon_input = terminal_input_sender.clone();
+    let rem_addon_pid = terminal_child_pid.clone();
+    let rem_addon_ctx = conflict_context.clone();
+    window.on_remove_addon(move |id| {
+        let id_str = id.to_string();
+        let tx = tx_rem_addon.clone();
+        let input = rem_addon_input.clone();
+        let pid = rem_addon_pid.clone();
+        let ctx = rem_addon_ctx.clone();
+        thread::spawn(move || {
+            run_managed_operation(
+                &tx,
+                &format!("Removing {}", id_str),
+                "remove",
+                &[id_str],
+                1, // flatpak backend
+                &input,
+                &pid,
+                &ctx,
+            );
+        });
+    });
+
     let tx_deptree = tx.clone();
     window.on_load_dep_tree(move |pkg_name| {
         let name = pkg_name.to_string();
@@ -3059,8 +3205,54 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
     .collect();
 
     let total_updates = updates.len() + flatpak_updates.len() + plasmoid_updates.len();
+    let flatpak_update_count = flatpak_updates.len() as i32;
+
+    // Build a display-name map from installed flatpak packages so flatpak updates
+    // show friendly names (e.g. "GNOME Calculator") instead of app IDs.
+    let flatpak_name_map: std::collections::HashMap<String, String> = flatpak_packages
+        .iter()
+        .map(|p| {
+            let display_name = if !p.description.is_empty() {
+                p.description.clone()
+            } else {
+                p.name.split('.').last().unwrap_or(&p.name)
+                    .replace('_', " ").replace('-', " ")
+            };
+            (p.name.clone(), display_name)
+        })
+        .collect();
+
+    let flatpak_updates_ui: Vec<PackageData> = flatpak_updates.iter()
+        .map(|u| {
+            let display_name = flatpak_name_map
+                .get(&u.name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    u.name.split('.').last().unwrap_or(&u.name)
+                        .replace('_', " ").replace('-', " ")
+                });
+            let ver_str = format!("{} → {}", u.current_version, u.new_version);
+            PackageData {
+                name: SharedString::from(u.name.as_str()),
+                display_name: SharedString::from(display_name.as_str()),
+                version: SharedString::from(ver_str.as_str()),
+                description: SharedString::from(ver_str.as_str()),
+                repository: SharedString::from("flatpak"),
+                backend: 1,
+                installed: true,
+                has_update: true,
+                installed_size: SharedString::from(""),
+                licenses: SharedString::from(""),
+                url: SharedString::from(""),
+                dependencies: SharedString::from(""),
+                required_by: SharedString::from(""),
+                selected: false,
+            }
+        })
+        .collect();
 
     let mut all_updates_ui = updates_ui.clone();
+    all_updates_ui.extend(flatpak_updates_ui);
     all_updates_ui.extend(plasmoid_updates.clone());
 
     let stats = StatsData {
@@ -3079,6 +3271,7 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
         updates: all_updates_ui,
         flatpak: flatpak_ui,
         stats,
+        flatpak_update_count,
     });
 }
 
@@ -3568,13 +3761,16 @@ fn fetch_flatpak_remotes() -> Vec<String> {
 }
 
 fn get_flatpak_installed_ids() -> std::collections::HashSet<String> {
+    // No --app flag: include apps AND extensions/plugins so add-on installed
+    // state is detected correctly (e.g. com.obsproject.Studio.Plugin.GStreamer).
     match std::process::Command::new("flatpak")
-        .args(["list", "--app", "--columns=application"])
+        .args(["list", "--columns=application"])
         .output()
     {
         Ok(o) => String::from_utf8_lossy(&o.stdout)
             .lines()
             .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
             .collect(),
         Err(_) => std::collections::HashSet::new(),
     }
@@ -3582,6 +3778,7 @@ fn get_flatpak_installed_ids() -> std::collections::HashSet<String> {
 
 /// Strip residual HTML tags (e.g. &lt;em&gt; unescaped to <em>) from description text.
 fn strip_inline_tags(text: &str) -> String {
+    // Strip any residual HTML tags (e.g. <em>, <strong>)
     let mut out = String::with_capacity(text.len());
     let mut in_tag = false;
     for c in text.chars() {
@@ -3592,17 +3789,22 @@ fn strip_inline_tags(text: &str) -> String {
             _ => {}
         }
     }
-    // Collapse multiple spaces/newlines
+    // Collapse runs of 3+ newlines down to 2 (one blank line), but preserve
+    // the single blank lines that separate paragraphs.
     let mut result = String::new();
-    let mut prev_newline = false;
-    for line in out.lines() {
+    let mut blank_run = 0usize;
+    for line in out.split('\n') {
         let t = line.trim();
         if t.is_empty() {
-            if !prev_newline { result.push('\n'); prev_newline = true; }
+            blank_run += 1;
+            if blank_run == 1 {
+                result.push('\n'); // allow one blank line
+            }
+            // suppress further blanks (blank_run > 1)
         } else {
+            blank_run = 0;
             result.push_str(t);
             result.push('\n');
-            prev_newline = false;
         }
     }
     result.trim().to_string()
@@ -3768,6 +3970,16 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
                             in_icon = true;
                         }
                     }
+                    b"li" if in_description => {
+                        // Add bullet prefix before each list item
+                        if let Some(ref mut state) = current {
+                            if !state.description.is_empty() && !state.description.ends_with('\n') {
+                                state.description.push('\n');
+                            }
+                            state.description.push_str("• ");
+                        }
+                        desc_depth += 1;
+                    }
                     _ if in_description => {
                         desc_depth += 1;
                     }
@@ -3814,10 +4026,34 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
                     b"screenshot" => { in_screenshot = false; }
                     b"image" => { in_image = false; }
                     b"icon" => { in_icon = false; }
-                    b"p" | b"li" if in_description => {
-                        // Add paragraph breaks after p/li
+                    b"p" if in_description => {
+                        // Double newline = blank line between paragraphs
                         if let Some(ref mut state) = current {
                             if !state.description.is_empty() {
+                                if !state.description.ends_with('\n') {
+                                    state.description.push('\n');
+                                }
+                                state.description.push('\n');
+                            }
+                        }
+                        desc_depth -= 1;
+                    }
+                    b"li" if in_description => {
+                        // Single newline after each bullet item
+                        if let Some(ref mut state) = current {
+                            if !state.description.ends_with('\n') {
+                                state.description.push('\n');
+                            }
+                        }
+                        desc_depth -= 1;
+                    }
+                    b"ul" | b"ol" if in_description => {
+                        // Extra blank line after the whole list
+                        if let Some(ref mut state) = current {
+                            if !state.description.ends_with("\n\n") {
+                                if !state.description.ends_with('\n') {
+                                    state.description.push('\n');
+                                }
                                 state.description.push('\n');
                             }
                         }
