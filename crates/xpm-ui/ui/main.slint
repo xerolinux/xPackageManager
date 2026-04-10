@@ -1219,7 +1219,7 @@ export component MainWindow inherits Window {
                 }
 
                 if view == 1 && flatpak-update-count > 0: Btn {
-                    label: "Update Flatpaks (" + flatpak-update-count + ")";
+                    label: "Update All (" + flatpak-update-count + ")";
                     primary: false;
                     enabled: !busy;
                     clicked => { root.update-all-flatpaks(); }
@@ -1242,7 +1242,7 @@ export component MainWindow inherits Window {
 
                 // Browse Repos view — update native packages button
                 if (view == 7 || view == 8) && native-update-count > 0: Btn {
-                    label: "Update Native (" + native-update-count + ")";
+                    label: "Update All (" + native-update-count + ")";
                     primary: true;
                     enabled: !busy;
                     clicked => { root.update-all(); }
