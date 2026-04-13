@@ -183,6 +183,7 @@ pub struct Package {
     pub backend: PackageBackend,
     pub status: PackageStatus,
     pub repository: String,
+    pub explicit: bool,
 }
 
 impl Package {
@@ -201,6 +202,7 @@ impl Package {
             backend,
             status,
             repository: repository.into(),
+            explicit: false,
         }
     }
 }

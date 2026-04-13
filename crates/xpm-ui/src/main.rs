@@ -14,13 +14,154 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use xpm_alpm::AlpmBackend;
 use xpm_core::source::PackageSource;
 use xpm_flatpak::FlatpakBackend;
+use ksni::TrayMethods;
 
 slint::include_modules!();
+
+// ─── System tray ──────────────────────────────────────────────────────────────
+
+struct XpmTray {
+    window: slint::Weak<MainWindow>,
+}
+
+impl ksni::Tray for XpmTray {
+    fn id(&self) -> String {
+        "xpackagemanager".into()
+    }
+
+    fn title(&self) -> String {
+        "XeroLinux Package Manager".into()
+    }
+
+    fn icon_name(&self) -> String {
+        "system-software-install".into()
+    }
+
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: "XeroLinux Package Manager".into(),
+            description: "Native & Flatpak package management".into(),
+            ..Default::default()
+        }
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        let win = self.window.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(w) = win.upgrade() {
+                let _ = w.show();
+            }
+        }).ok();
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::StandardItem;
+        use ksni::MenuItem;
+
+        let window = &self.window;
+
+        let win_launch = window.clone();
+        let win_check = window.clone();
+        let win_update = window.clone();
+
+        vec![
+            StandardItem {
+                label: "Launch App".into(),
+                icon_name: "window-new".into(),
+                activate: Box::new(move |_: &mut Self| {
+                    let w = win_launch.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(win) = w.upgrade() {
+                            let _ = win.show();
+                        }
+                    }).ok();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Check for Updates".into(),
+                icon_name: "update-none".into(),
+                activate: Box::new(move |_: &mut Self| {
+                    let w = win_check.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(win) = w.upgrade() {
+                            win.invoke_sync_databases();
+                        }
+                    }).ok();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Update System".into(),
+                icon_name: "system-software-update".into(),
+                activate: Box::new(move |_: &mut Self| {
+                    let w = win_update.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(win) = w.upgrade() {
+                            win.invoke_update_all();
+                        }
+                    }).ok();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Exit".into(),
+                icon_name: "application-exit".into(),
+                activate: Box::new(move |_: &mut Self| {
+                    slint::invoke_from_event_loop(|| {
+                        slint::quit_event_loop().ok();
+                    }).ok();
+                }),
+                ..Default::default()
+            }
+            .into(),
+        ]
+    }
+}
+
+type TrayShutdown = Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>;
+
+fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown) {
+    stop_tray(&tray_shutdown);
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    *tray_shutdown.lock().unwrap() = Some(tx);
+
+    thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime for tray");
+        rt.block_on(async move {
+            let tray = XpmTray { window };
+            match tray.spawn().await {
+                Ok(handle) => {
+                    info!("System tray started");
+                    let _ = rx.await;
+                    handle.shutdown().await;
+                    info!("System tray stopped");
+                }
+                Err(e) => {
+                    warn!("System tray failed to start: {}", e);
+                }
+            }
+        });
+    });
+}
+
+fn stop_tray(tray_shutdown: &TrayShutdown) {
+    // Dropping the sender signals the receiver, which exits block_on
+    let _ = tray_shutdown.lock().unwrap().take();
+}
+
+// ─── End system tray ──────────────────────────────────────────────────────────
 
 enum UiMessage {
     PackagesLoaded {
@@ -154,9 +295,14 @@ struct AppConfig {
     check_updates_on_start: bool,
     #[serde(default = "default_notify_interval")]
     notify_interval_minutes: u32,
+    #[serde(default = "default_parallel_downloads")]
+    parallel_downloads: u32,
+    #[serde(default)]
+    tray_enabled: bool,
 }
 
 fn default_notify_interval() -> u32 { 30 }
+fn default_parallel_downloads() -> u32 { 5 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -164,6 +310,8 @@ impl Default for AppConfig {
             flatpak_enabled: true,
             check_updates_on_start: false,
             notify_interval_minutes: 30,
+            parallel_downloads: 5,
+            tray_enabled: false,
         }
     }
 }
@@ -201,7 +349,24 @@ fn build_config(window: &MainWindow) -> AppConfig {
         flatpak_enabled: window.get_setting_flatpak_enabled(),
         check_updates_on_start: window.get_setting_check_updates_on_start(),
         notify_interval_minutes: window.get_setting_notify_interval() as u32,
+        parallel_downloads: window.get_setting_parallel_downloads() as u32,
+        tray_enabled: window.get_setting_tray_enabled(),
     }
+}
+
+fn read_pacman_parallel_downloads() -> Option<u32> {
+    let content = std::fs::read_to_string("/etc/pacman.conf").ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') { continue; }
+        if let Some(rest) = trimmed.strip_prefix("ParallelDownloads") {
+            let val_str = rest.trim_start_matches(|c: char| c == ' ' || c == '=').trim();
+            if let Ok(n) = val_str.parse::<u32>() {
+                return Some(n);
+            }
+        }
+    }
+    None
 }
 
 fn is_arch_package(path: &str) -> bool {
@@ -253,6 +418,7 @@ fn get_local_package_info(path: &str) -> Option<PackageData> {
          dependencies: SharedString::from(""),
          required_by: SharedString::from(""),
          selected: false,
+         explicit: false,
     })
 }
 
@@ -1151,6 +1317,7 @@ fn package_to_ui(pkg: &xpm_core::package::Package, has_update: bool, desktop_map
         dependencies: SharedString::from(""),
         required_by: SharedString::from(""),
         selected: false,
+        explicit: pkg.explicit,
     }
 }
 
@@ -1181,6 +1348,7 @@ fn update_to_ui(update: &xpm_core::package::UpdateInfo) -> PackageData {
         dependencies: SharedString::from(""),
         required_by: SharedString::from(""),
         selected: false,
+        explicit: false,
     }
 }
 
@@ -1542,6 +1710,7 @@ fn group_installed_by_repo(pkgs: Vec<PackageData>) -> Vec<PackageData> {
                 dependencies: SharedString::from(""),
                 required_by: SharedString::from(""),
                 selected: false,
+                explicit: false,
             });
         }
         // Augment pkg: store letter initial in required_by, category in installed_size
@@ -1598,6 +1767,7 @@ fn load_installed_flatpaks() -> Vec<PackageData> {
             dependencies: SharedString::from(""),
             required_by: SharedString::from(initial.as_str()),
             selected: false,
+            explicit: false,
         });
     }
 
@@ -1666,6 +1836,8 @@ fn main() {
 
     let page_size: i32 = 50;
     let full_installed: Rc<RefCell<Vec<PackageData>>> = Rc::new(RefCell::new(Vec::new()));
+    let full_installed_flatpaks: Rc<RefCell<Vec<PackageData>>> = Rc::new(RefCell::new(Vec::new()));
+    let full_installed_grouped: Rc<RefCell<Vec<PackageData>>> = Rc::new(RefCell::new(Vec::new()));
     let repo_packages_full: Rc<RefCell<Vec<PackageData>>> = Rc::new(RefCell::new(Vec::new()));
 
     let tx_load = tx.clone();
@@ -1678,10 +1850,13 @@ fn main() {
     let mut pending_terminal = String::new();
     let mut last_term_flush = std::time::Instant::now();
     let full_installed_timer = full_installed.clone();
+    let full_installed_flatpaks_timer = full_installed_flatpaks.clone();
+    let full_installed_grouped_timer = full_installed_grouped.clone();
     let repo_full_timer = repo_packages_full.clone();
     let filter_serial_timer = flatpak_filter_serial.clone();
     let conflict_ctx_timer = conflict_context.clone();
     let flatpak_ids_timer = flatpak_installed_ids.clone();
+    let flatpak_store_timer = flatpak_app_store.clone();
 
     timer.start(TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
         if let Some(window) = window_weak.upgrade() {
@@ -1706,6 +1881,7 @@ fn main() {
                         // Pre-compute grouped installed list for view 0 tab 0
                         let full_for_grp: Vec<PackageData> = full_installed_timer.borrow().clone();
                         let grouped = group_installed_by_repo(full_for_grp);
+                        *full_installed_grouped_timer.borrow_mut() = grouped.clone();
                         window.set_installed_grouped(ModelRc::new(VecModel::from(grouped)));
                         window.set_loading(false);
                     }
@@ -1795,6 +1971,7 @@ fn main() {
                             let tx = tx_timer.clone();
                             let search_query = window.get_search_text().to_string();
                             let ids_ref = flatpak_ids_timer.clone();
+                            let store_ref = flatpak_store_timer.clone();
                             thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().expect("Runtime");
                                 rt.block_on(async {
@@ -1802,11 +1979,13 @@ fn main() {
                                     let new_ids = tokio::task::spawn_blocking(get_flatpak_installed_ids).await.unwrap_or_default();
                                     *ids_ref.lock().unwrap() = new_ids;
                                     // Run load + search concurrently
+                                    let store_join = store_ref.clone();
+                                    let ids_join = ids_ref.clone();
                                     tokio::join!(
                                         load_packages_async(&tx, false),
                                         async {
                                             if !search_query.is_empty() {
-                                                search_packages_async(&tx, &search_query).await;
+                                                search_packages_async(&tx, &search_query, store_join, ids_join).await;
                                             }
                                         }
                                     );
@@ -1904,6 +2083,7 @@ fn main() {
                             let tx = tx_timer.clone();
                             let search_query = window.get_search_text().to_string();
                             let ids_ref = flatpak_ids_timer.clone();
+                            let store_ref = flatpak_store_timer.clone();
                             thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().expect("Runtime");
                                 rt.block_on(async {
@@ -1911,11 +2091,13 @@ fn main() {
                                     let new_ids = tokio::task::spawn_blocking(get_flatpak_installed_ids).await.unwrap_or_default();
                                     *ids_ref.lock().unwrap() = new_ids;
                                     // Run load + search concurrently
+                                    let store_join = store_ref.clone();
+                                    let ids_join = ids_ref.clone();
                                     tokio::join!(
                                         load_packages_async(&tx, false),
                                         async {
                                             if !search_query.is_empty() {
-                                                search_packages_async(&tx, &search_query).await;
+                                                search_packages_async(&tx, &search_query, store_join, ids_join).await;
                                             }
                                         }
                                     );
@@ -2041,6 +2223,7 @@ fn main() {
                         window.set_repo_detail_loading(false);
                     }
                     UiMessage::InstalledFlatpaksLoaded(pkgs) => {
+                        *full_installed_flatpaks_timer.borrow_mut() = pkgs.clone();
                         window.set_installed_flatpaks(ModelRc::new(VecModel::from(pkgs)));
                     }
                     UiMessage::DepTreeLoaded { deps, reqby, root_version } => {
@@ -2136,15 +2319,19 @@ fn main() {
         });
     });
 
+    let store_search = flatpak_app_store.clone();
+    let ids_search = flatpak_installed_ids.clone();
     window.on_search(move |query| {
         info!("Search: {}", query);
         let tx = tx_search.clone();
         let query = query.to_string();
+        let store = store_search.clone();
+        let ids = ids_search.clone();
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
             rt.block_on(async {
                 let _ = tx.send(UiMessage::SetLoading(true));
-                search_packages_async(&tx, &query).await;
+                search_packages_async(&tx, &query, store, ids).await;
             });
         });
     });
@@ -2190,6 +2377,113 @@ fn main() {
             };
             w.set_installed_packages(ModelRc::new(VecModel::from(filtered)));
         }
+    });
+
+    // Filter installed flatpaks client-side (instant)
+    let full_fk_filter = full_installed_flatpaks.clone();
+    let window_weak_fif = window.as_weak();
+    window.on_filter_installed_flatpaks(move |query| {
+        if let Some(w) = window_weak_fif.upgrade() {
+            let q = query.to_string().to_lowercase();
+            let data = full_fk_filter.borrow();
+            let filtered: Vec<PackageData> = if q.is_empty() {
+                data.clone()
+            } else {
+                data.iter().filter(|p| {
+                    p.name.to_lowercase().contains(&q)
+                        || p.display_name.to_lowercase().contains(&q)
+                }).cloned().collect()
+            };
+            w.set_installed_flatpaks(ModelRc::new(VecModel::from(filtered)));
+        }
+    });
+
+    // Unlock pacman DB (remove stale lock file)
+    let tx_ulk = tx.clone();
+    let ulk_input = terminal_input_sender.clone();
+    let ulk_pid = terminal_child_pid.clone();
+    window.on_unlock_db(move || {
+        info!("Unlock pacman DB");
+        let tx = tx_ulk.clone();
+        let input = ulk_input.clone();
+        let pid = ulk_pid.clone();
+        thread::spawn(move || {
+            let script = "if [ -f /var/lib/pacman/db.lck ]; then \
+                              rm -v /var/lib/pacman/db.lck && echo 'Lock file removed. Pacman DB unlocked.'; \
+                          else \
+                              echo 'No lock file found — DB is already unlocked.'; \
+                          fi";
+            run_in_terminal(&tx, "Unlocking Pacman Database", "pkexec", &["bash", "-c", script], &input, &pid);
+        });
+    });
+
+    // Read IgnorePkg from /etc/pacman.conf
+    let window_weak_igr = window.as_weak();
+    window.on_read_ignorepkg(move || {
+        if let Some(w) = window_weak_igr.upgrade() {
+            let content = std::fs::read_to_string("/etc/pacman.conf").unwrap_or_default();
+            let mut active = false;
+            let mut value = String::new();
+            for line in content.lines() {
+                let trimmed = line.trim();
+                // Match both commented (#IgnorePkg) and active (IgnorePkg)
+                let stripped = trimmed.strip_prefix('#').unwrap_or(trimmed).trim();
+                if let Some(rest) = stripped.strip_prefix("IgnorePkg") {
+                    let v = rest.trim_start_matches(|c: char| c == ' ' || c == '=').trim().to_string();
+                    // Active = line is NOT commented
+                    if !trimmed.starts_with('#') {
+                        active = true;
+                    }
+                    // Always capture value if non-empty
+                    if !v.is_empty() {
+                        value = v;
+                    }
+                    break;
+                }
+            }
+            w.set_ignorepkg_active(active);
+            w.set_ignorepkg_value(SharedString::from(value.as_str()));
+            w.set_ignorepkg_edit_text(SharedString::from(w.get_ignorepkg_value().as_str()));
+        }
+    });
+
+    // Save IgnorePkg to /etc/pacman.conf via pkexec sed
+    window.on_save_ignorepkg(move |active, value| {
+        let value = value.to_string();
+        thread::spawn(move || {
+            let line = if active {
+                format!("IgnorePkg = {}", value.trim())
+            } else {
+                format!("#IgnorePkg = {}", value.trim())
+            };
+            // Replace any existing IgnorePkg line (commented or not); append if missing
+            let script = format!(
+                "grep -q 'IgnorePkg' /etc/pacman.conf \
+                 && sed -i 's|^#*[[:space:]]*IgnorePkg.*|{}|' /etc/pacman.conf \
+                 || echo '{}' >> /etc/pacman.conf",
+                line, line
+            );
+            let _ = std::process::Command::new("pkexec")
+                .args(["bash", "-c", &script])
+                .status();
+        });
+    });
+
+    // Write ParallelDownloads to /etc/pacman.conf via pkexec
+    window.on_set_parallel_downloads(move |n| {
+        let val = n as u32;
+        thread::spawn(move || {
+            // sed: replace existing line (commented or not), or append if missing
+            let script = format!(
+                "grep -q 'ParallelDownloads' /etc/pacman.conf \
+                 && sed -i 's/^#*[[:space:]]*ParallelDownloads.*/ParallelDownloads = {}/' /etc/pacman.conf \
+                 || echo 'ParallelDownloads = {}' >> /etc/pacman.conf",
+                val, val
+            );
+            let _ = std::process::Command::new("pkexec")
+                .args(["bash", "-c", &script])
+                .status();
+        });
     });
 
     let tx_install = tx.clone();
@@ -2465,18 +2759,190 @@ fn main() {
         let input = clean_input.clone();
         let pid = clean_pid.clone();
         thread::spawn(move || {
-            run_in_terminal(&tx, "Cleaning Package Cache", "pkexec", &["pacman", "-Scc"], &input, &pid);
+            // pacman -Scc removes cached packages; also nuke download-* dirs (pacman bug workaround)
+            let script = "pacman -Scc --noconfirm; \
+                          echo ''; \
+                          echo 'Removing leftover download dirs (pacman bug workaround)...'; \
+                          rm -rfv /var/cache/pacman/pkg/download-* 2>/dev/null && echo 'Done.' || echo 'No download dirs found.'";
+            run_in_terminal(&tx, "Cleaning Package Cache", "pkexec", &["bash", "-c", script], &input, &pid);
         });
     });
 
+    // Toggle individual orphan checkbox
+    let window_weak_ot = window.as_weak();
+    window.on_orphan_toggle(move |idx| {
+        if let Some(w) = window_weak_ot.upgrade() {
+            let mut checked: Vec<bool> = w.get_orphan_checked().iter().collect();
+            let i = idx as usize;
+            if i < checked.len() {
+                checked[i] = !checked[i];
+                let count = checked.iter().filter(|&&c| c).count() as i32;
+                w.set_orphan_checked(ModelRc::new(VecModel::from(checked)));
+                w.set_orphan_selected_count(count);
+            }
+        }
+    });
+
+    // Select/deselect all orphan checkboxes
+    let window_weak_osa = window.as_weak();
+    window.on_orphan_select_all(move |select| {
+        if let Some(w) = window_weak_osa.upgrade() {
+            let len = w.get_orphan_list().row_count();
+            let checked = vec![select; len];
+            let count = if select { len as i32 } else { 0 };
+            w.set_orphan_checked(ModelRc::new(VecModel::from(checked)));
+            w.set_orphan_selected_count(count);
+        }
+    });
+
+    // Load dep info for a single orphan package (what requires it)
+    let window_weak_odi = window.as_weak();
+    window.on_load_orphan_dep_info(move |pkg_name| {
+        let name = pkg_name.to_string();
+        let window_weak = window_weak_odi.clone();
+        thread::spawn(move || {
+            // `pacman -Qi <name>` → Required By field
+            let qi = std::process::Command::new("pacman")
+                .args(["-Qi", &name])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default();
+
+            let required_by = qi.lines()
+                .find(|l| l.starts_with("Required By"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+
+            // Also check optional for
+            let optional_for = qi.lines()
+                .find(|l| l.starts_with("Optional For"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+
+            let info = match (required_by.is_empty() || required_by == "None",
+                              optional_for.is_empty() || optional_for == "None") {
+                (true, true)   => "Not required by any installed package.".to_string(),
+                (false, true)  => format!("Required by: {}", required_by),
+                (true, false)  => format!("Optional for: {}", optional_for),
+                (false, false) => format!("Required by: {}  |  Optional for: {}", required_by, optional_for),
+            };
+
+            let info_shared = SharedString::from(info.as_str());
+            slint::invoke_from_event_loop(move || {
+                if let Some(w) = window_weak.upgrade() {
+                    w.set_orphan_dep_info_text(info_shared);
+                }
+            }).ok();
+        });
+    });
+
+    // Load orphan list into dialog
+    let window_weak_orp = window.as_weak();
+    let tx_orp_load = tx.clone();
+    window.on_load_orphan_list(move || {
+        let tx = tx_orp_load.clone();
+        let window_weak = window_weak_orp.clone();
+        thread::spawn(move || {
+            let _ = tx.send(UiMessage::SetBusy(true));
+            let output = std::process::Command::new("pacman")
+                .args(["-Qdtq"])
+                .output();
+            let _ = tx.send(UiMessage::SetBusy(false));
+            let names: Vec<String> = match output {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+
+            // Get details for each orphan via `pacman -Qi`
+            let pkgs: Vec<PackageData> = names.iter().map(|name| {
+                let qi = std::process::Command::new("pacman")
+                    .args(["-Qi", name])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .unwrap_or_default();
+
+                let mut desc = String::new();
+                let mut version = String::new();
+                let mut explicit = false;
+                for line in qi.lines() {
+                    if let Some(v) = line.strip_prefix("Description     : ") { desc = v.trim().to_string(); }
+                    if let Some(v) = line.strip_prefix("Version         : ") { version = v.trim().to_string(); }
+                    if let Some(v) = line.strip_prefix("Install Reason  : ") {
+                        explicit = v.trim().contains("Explicitly");
+                    }
+                }
+
+                PackageData {
+                    name: SharedString::from(name.as_str()),
+                    display_name: SharedString::from(name.as_str()),
+                    description: SharedString::from(desc.as_str()),
+                    version: SharedString::from(version.as_str()),
+                    backend: 0,
+                    installed: true,
+                    explicit,
+                    repository: SharedString::from("local"),
+                    ..Default::default()
+                }
+            }).collect();
+
+            let len = pkgs.len();
+            let checked = vec![false; len]; // none selected by default
+            slint::invoke_from_event_loop(move || {
+                if let Some(w) = window_weak.upgrade() {
+                    w.set_orphan_list(ModelRc::new(VecModel::from(pkgs)));
+                    w.set_orphan_checked(ModelRc::new(VecModel::from(checked)));
+                    w.set_orphan_selected_count(0);
+                }
+            }).ok();
+        });
+    });
+
+    // Remove only checked orphans
+    let window_weak_orp_rm = window.as_weak();
     let tx_orphans = tx.clone();
     let orphan_input = terminal_input_sender.clone();
     let orphan_pid = terminal_child_pid.clone();
-    window.on_remove_orphans(move || {
-        info!("Remove orphans");
+    window.on_remove_selected_orphans(move || {
+        let Some(w) = window_weak_orp_rm.upgrade() else { return; };
+        let pkgs: Vec<PackageData> = w.get_orphan_list().iter().collect();
+        let checked: Vec<bool> = w.get_orphan_checked().iter().collect();
+        let selected: Vec<String> = pkgs.iter().zip(checked.iter())
+            .filter(|(_, &c)| c)
+            .map(|(p, _)| p.name.to_string())
+            .collect();
+        if selected.is_empty() { return; }
         let tx = tx_orphans.clone();
         let input = orphan_input.clone();
         let pid = orphan_pid.clone();
+        thread::spawn(move || {
+            let pkg_list = selected.join(" ");
+            let script = format!("pacman -Rns {}", pkg_list);
+            run_in_terminal(&tx, "Removing Orphan Packages", "pkexec",
+                &["bash", "-c", &script], &input, &pid);
+        });
+    });
+
+    // Legacy callback — kept for any stray references
+    let tx_orphans_legacy = tx.clone();
+    let orphan_input_legacy = terminal_input_sender.clone();
+    let orphan_pid_legacy = terminal_child_pid.clone();
+    window.on_remove_orphans(move || {
+        info!("Remove orphans (legacy)");
+        let tx = tx_orphans_legacy.clone();
+        let input = orphan_input_legacy.clone();
+        let pid = orphan_pid_legacy.clone();
         thread::spawn(move || {
             run_in_terminal(&tx, "Removing Orphan Packages", "pkexec",
                 &["bash", "-c", "pacman -Qdtq | pacman -Rns -"], &input, &pid);
@@ -2631,37 +3097,55 @@ fn main() {
     });
 
     let tx_export = tx.clone();
+    let export_input = terminal_input_sender.clone();
+    let export_pid = terminal_child_pid.clone();
     window.on_export_package_list(move || {
         info!("Data: Export Package List");
         let tx = tx_export.clone();
+        let input = export_input.clone();
+        let pid = export_pid.clone();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         thread::spawn(move || {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let path = format!("{}/xpm-packages.txt", home);
-            let result = std::process::Command::new("pacman")
-                .args(["-Qe", "--noconfirm"])
-                .output();
-            match result {
-                Ok(output) if output.status.success() => {
-                    match std::fs::write(&path, &output.stdout) {
-                        Ok(_) => {
-                            let count = String::from_utf8_lossy(&output.stdout).lines().count();
-                            let _ = tx.send(UiMessage::SetStatus(
-                                format!("Exported {} packages to ~/xpm-packages.txt", count)
-                            ));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(UiMessage::SetStatus(format!("Export failed: {}", e)));
-                        }
-                    }
+            // Prompt user for save location via kdialog (falls back to zenity)
+            let default_path = format!("{}/xpm-packages.txt", home);
+            let chosen = std::process::Command::new("kdialog")
+                .args(["--getsavefilename", &default_path, "*.txt", "--title", "Export Package List"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .or_else(|| {
+                    std::process::Command::new("zenity")
+                        .args([
+                            "--file-selection", "--save", "--confirm-overwrite",
+                            "--filename", &default_path,
+                            "--title", "Export Package List",
+                            "--file-filter", "Text files | *.txt",
+                        ])
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                });
+
+            let path = match chosen {
+                Some(p) if !p.is_empty() => p,
+                _ => {
+                    // User cancelled
+                    return;
                 }
-                Ok(output) => {
-                    let err = String::from_utf8_lossy(&output.stderr);
-                    let _ = tx.send(UiMessage::SetStatus(format!("Export failed: {}", err.trim())));
-                }
-                Err(e) => {
-                    let _ = tx.send(UiMessage::SetStatus(format!("Export failed: {}", e)));
-                }
-            }
+            };
+
+            let title = "Exporting Package List".to_string();
+            let script = format!(
+                "echo 'Collecting explicitly installed packages...'; \
+                 pacman -Qqe > '{path}'; \
+                 count=$(wc -l < '{path}'); \
+                 echo \"Exported $count packages to {path}\"; \
+                 echo ''; \
+                 cat '{path}'"
+            );
+            run_in_terminal(&tx, &title, "bash", &["-c", &script], &input, &pid);
         });
     });
 
@@ -3023,6 +3507,7 @@ fn main() {
                     dependencies: SharedString::from(""),
                     required_by: SharedString::from(""),
                     selected: false,
+                    explicit: false,
                 })
                 .collect();
             let _ = tx_detail.send(UiMessage::FlatpakAddonsReady(addons));
@@ -3191,10 +3676,115 @@ fn main() {
 
     let window_weak_ss = window.as_weak();
     let window_weak_grp = window.as_weak();
+    let full_grp_loader = full_installed_grouped.clone();
     window.on_load_installed_grouped(move || {
         if let Some(w) = window_weak_grp.upgrade() {
             let pkgs: Vec<PackageData> = w.get_installed_packages().iter().collect();
             let grouped = group_installed_by_repo(pkgs);
+            *full_grp_loader.borrow_mut() = grouped.clone();
+            w.set_installed_grouped(ModelRc::new(VecModel::from(grouped)));
+        }
+    });
+
+    let window_weak_fig = window.as_weak();
+    let full_grp_filter = full_installed_grouped.clone();
+    window.on_filter_installed_grouped(move |query| {
+        if let Some(w) = window_weak_fig.upgrade() {
+            let q = query.to_string().to_lowercase();
+            let data = full_grp_filter.borrow();
+            let filtered: Vec<PackageData> = if q.is_empty() {
+                data.clone()
+            } else {
+                // Keep repo headers (backend == -1) only if they have matching packages beneath
+                let mut result = Vec::new();
+                let mut current_header: Option<PackageData> = None;
+                let mut header_has_match = false;
+                for item in data.iter() {
+                    if item.backend == -1 {
+                        // flush previous header if it had matches
+                        if let Some(h) = current_header.take() {
+                            if header_has_match {
+                                result.push(h);
+                            }
+                        }
+                        current_header = Some(item.clone());
+                        header_has_match = false;
+                    } else {
+                        let matches = item.name.to_lowercase().contains(&q)
+                            || item.display_name.to_lowercase().contains(&q);
+                        if matches {
+                            if let Some(ref h) = current_header {
+                                if !header_has_match {
+                                    result.push(h.clone());
+                                    header_has_match = true;
+                                }
+                            }
+                            result.push(item.clone());
+                        }
+                    }
+                }
+                result
+            };
+            w.set_installed_grouped(ModelRc::new(VecModel::from(filtered)));
+        }
+    });
+
+    // Apply explicit/dep filter to installed grouped
+    let window_weak_ef = window.as_weak();
+    let full_grp_ef = full_installed_grouped.clone();
+    window.on_apply_explicit_filter(move |mode| {
+        if let Some(w) = window_weak_ef.upgrade() {
+            let data = full_grp_ef.borrow();
+            // mode: 0=all, 1=explicit only, 2=deps only
+            let filtered: Vec<PackageData> = if mode == 0 {
+                data.clone()
+            } else {
+                let want_explicit = mode == 1;
+                let mut result = Vec::new();
+                let mut current_header: Option<PackageData> = None;
+                let mut header_has_match = false;
+                for item in data.iter() {
+                    if item.backend == -1 {
+                        if let Some(h) = current_header.take() {
+                            if header_has_match {
+                                result.push(h);
+                            }
+                        }
+                        current_header = Some(item.clone());
+                        header_has_match = false;
+                    } else {
+                        let matches = item.explicit == want_explicit;
+                        if matches {
+                            if let Some(ref h) = current_header {
+                                if !header_has_match {
+                                    result.push(h.clone());
+                                    header_has_match = true;
+                                }
+                            }
+                            result.push(item.clone());
+                        }
+                    }
+                }
+                if let Some(h) = current_header {
+                    if header_has_match {
+                        result.push(h);
+                    }
+                }
+                result
+            };
+            w.set_installed_grouped(ModelRc::new(VecModel::from(filtered)));
+        }
+    });
+
+    // Load ALL installed packages (no pagination cap)
+    let window_weak_lall = window.as_weak();
+    let full_installed_lall = full_installed.clone();
+    let full_grp_lall = full_installed_grouped.clone();
+    window.on_load_all_installed_grouped(move || {
+        if let Some(w) = window_weak_lall.upgrade() {
+            let pkgs = full_installed_lall.borrow().clone();
+            let grouped = group_installed_by_repo(pkgs);
+            *full_grp_lall.borrow_mut() = grouped.clone();
             w.set_installed_grouped(ModelRc::new(VecModel::from(grouped)));
         }
     });
@@ -3343,6 +3933,33 @@ fn main() {
     window.set_setting_flatpak_enabled(config.flatpak_enabled);
     window.set_setting_check_updates_on_start(config.check_updates_on_start);
     window.set_setting_notify_interval(config.notify_interval_minutes as i32);
+    // Prefer actual value from /etc/pacman.conf over stored config
+    let pacman_parallel = read_pacman_parallel_downloads().unwrap_or(config.parallel_downloads);
+    window.set_setting_parallel_downloads(pacman_parallel as i32);
+    // If value isn't a preset, activate custom mode so UI shows it correctly
+    let presets = [5u32, 10, 15, 20, 25];
+    if !presets.contains(&pacman_parallel) {
+        window.set_setting_pd_custom_mode(true);
+        window.set_setting_pd_custom_text(SharedString::from(pacman_parallel.to_string().as_str()));
+    }
+
+    // ── System tray ──────────────────────────────────────────────────────────
+    let tray_shutdown: TrayShutdown = Arc::new(Mutex::new(None));
+    let tray_shutdown_toggle = tray_shutdown.clone();
+
+    window.set_setting_tray_enabled(config.tray_enabled);
+    if config.tray_enabled {
+        start_tray(window.as_weak(), tray_shutdown.clone());
+    }
+
+    let window_weak_tray = window.as_weak();
+    window.on_toggle_tray_enabled(move |enabled| {
+        if enabled {
+            start_tray(window_weak_tray.clone(), tray_shutdown_toggle.clone());
+        } else {
+            stop_tray(&tray_shutdown_toggle);
+        }
+    });
 
     info!("Running application");
     window.run().expect("Failed to run application");
@@ -3494,6 +4111,7 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
          dependencies: SharedString::from(""),
          required_by: SharedString::from(""),
          selected: false,
+         explicit: false,
         }
     })
     .collect();
@@ -3541,6 +4159,7 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
                 dependencies: SharedString::from(""),
                 required_by: SharedString::from(""),
                 selected: false,
+                explicit: false,
             }
         })
         .collect();
@@ -3632,6 +4251,7 @@ fn list_plasmoids_with_updates() -> (Vec<PackageData>, Vec<PackageData>) {
                         dependencies: SharedString::from(""),
                         required_by: SharedString::from(""),
                         selected: false,
+                        explicit: false,
                     };
 
                     if has_update {
@@ -3768,85 +4388,97 @@ fn parse_plasmoid_desktop(path: &std::path::Path) -> PlasmoidInfo {
 }
 
 
-async fn search_packages_async(tx: &mpsc::Sender<UiMessage>, query: &str) {
-    let alpm = match AlpmBackend::new() {
-        Ok(b) => b,
-        Err(e) => {
-            error!("Failed to initialize ALPM: {}", e);
-            let _ = tx.send(UiMessage::SearchResults(Vec::new()));
-            return;
-        }
+async fn search_packages_async(
+    tx: &mpsc::Sender<UiMessage>,
+    query: &str,
+    flatpak_store: Arc<Mutex<Vec<CachedRemoteApp>>>,
+    flatpak_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+) {
+    let q = query.to_string();
+    let q_lower = q.to_lowercase();
+
+    // Snapshot flatpak data under lock, then release before doing any I/O
+    let (store_snapshot, ids_snapshot) = {
+        let store = flatpak_store.lock().unwrap();
+        let ids = flatpak_ids.lock().unwrap();
+        (store.clone(), ids.clone())
+    };
+    let store_is_empty = store_snapshot.is_empty();
+
+    // Run ALPM search and flatpak data loading concurrently
+    let alpm_query = q.clone();
+    let alpm_future = async move {
+        let alpm = AlpmBackend::new().ok()?;
+        alpm.search(&alpm_query).await.ok()
     };
 
-    let flatpak = match FlatpakBackend::new() {
-        Ok(b) => b,
-        Err(e) => {
-            error!("Failed to initialize Flatpak: {}", e);
-            let _ = tx.send(UiMessage::SearchResults(Vec::new()));
-            return;
+    let fk_future = tokio::task::spawn_blocking(move || -> (Vec<CachedRemoteApp>, std::collections::HashSet<String>) {
+        if store_is_empty {
+            (fetch_remote_apps_cached("flathub"), get_flatpak_installed_ids())
+        } else {
+            (store_snapshot, ids_snapshot)
         }
-    };
+    });
 
-    let pacman_results = match alpm.search(query).await {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Pacman search failed: {}", e);
-            Vec::new()
-        }
-    };
+    let (alpm_result, fk_result) = tokio::join!(alpm_future, fk_future);
 
-    let flatpak_results = match flatpak.search(query).await {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Flatpak search failed: {}", e);
-            Vec::new()
-        }
-    };
+    let pacman_results = alpm_result.unwrap_or_default();
+    let (flatpak_apps, flatpak_installed) = fk_result.unwrap_or_default();
 
     let desktop_map = build_desktop_name_map();
 
     let mut results: Vec<PackageData> = pacman_results
-    .iter()
-    .map(|r| {
-        let display_name = humanize_package_name(&r.name, &desktop_map);
-        PackageData {
-            name: SharedString::from(r.name.as_str()),
-         display_name: SharedString::from(&display_name),
-         version: SharedString::from(r.version.to_string().as_str()),
-         description: SharedString::from(r.description.as_str()),
-         repository: SharedString::from(r.repository.as_str()),
-         backend: 0,
-         installed: r.installed,
-         has_update: false,
-         installed_size: SharedString::from(""),
-         licenses: SharedString::from(""),
-         url: SharedString::from(""),
-         dependencies: SharedString::from(""),
-         required_by: SharedString::from(""),
-         selected: false,
-        }
-    })
-    .collect();
+        .iter()
+        .map(|r| {
+            let display_name = humanize_package_name(&r.name, &desktop_map);
+            PackageData {
+                name: SharedString::from(r.name.as_str()),
+                display_name: SharedString::from(&display_name),
+                version: SharedString::from(r.version.to_string().as_str()),
+                description: SharedString::from(r.description.as_str()),
+                repository: SharedString::from(r.repository.as_str()),
+                backend: 0,
+                installed: r.installed,
+                has_update: false,
+                installed_size: SharedString::from(""),
+                licenses: SharedString::from(""),
+                url: SharedString::from(""),
+                dependencies: SharedString::from(""),
+                required_by: SharedString::from(""),
+                selected: false,
+                explicit: false,
+            }
+        })
+        .collect();
 
-    results.extend(flatpak_results.iter().map(|r| PackageData {
-        name: SharedString::from(r.name.as_str()),
-                                              display_name: SharedString::from(r.name.as_str()),
-                                              version: SharedString::from(r.version.to_string().as_str()),
-                                              description: SharedString::from(r.description.as_str()),
-                                              repository: SharedString::from(r.repository.as_str()),
-                                              backend: 1,
-                                              installed: r.installed,
-                                              has_update: false,
-                                              installed_size: SharedString::from(""),
-                                              licenses: SharedString::from(""),
-                                              url: SharedString::from(""),
-                                              dependencies: SharedString::from(""),
-                                              required_by: SharedString::from(""),
-                                              selected: false,
-    }));
+    let fk: Vec<PackageData> = flatpak_apps.iter()
+        .filter(|a| {
+            a.name.to_lowercase().contains(&q_lower)
+                || a.app_id.to_lowercase().contains(&q_lower)
+                || a.summary.to_lowercase().contains(&q_lower)
+        })
+        .take(50)
+        .map(|a| PackageData {
+            name: SharedString::from(a.app_id.as_str()),
+            display_name: SharedString::from(if a.name.is_empty() { &a.app_id } else { &a.name }),
+            version: SharedString::from(a.version.as_str()),
+            description: SharedString::from(a.summary.as_str()),
+            repository: SharedString::from("Flatpak"),
+            backend: 1,
+            installed: flatpak_installed.contains(&a.app_id),
+            has_update: false,
+            installed_size: SharedString::from(""),
+            licenses: SharedString::from(""),
+            url: SharedString::from(""),
+            dependencies: SharedString::from(""),
+            required_by: SharedString::from(""),
+            selected: false,
+            explicit: false,
+        })
+        .collect();
 
-    results.truncate(100);
-
+    results.extend(fk);
+    results.truncate(150);
     let _ = tx.send(UiMessage::SearchResults(results));
 }
 
@@ -3975,6 +4607,7 @@ fn cached_to_pkg(c: &CachedPkg) -> PackageData {
         dependencies: SharedString::from(""),
         required_by: SharedString::from(""),
         selected: false,
+        explicit: false,
     }
 }
 
@@ -4620,6 +5253,7 @@ fn apps_to_package_data(
                 dependencies: SharedString::from(app.developer.as_str()),
                 required_by: SharedString::from(initial.as_str()),         // first letter for avatar
                 selected: false,
+                explicit: false,
             }
         })
         .collect()
@@ -4710,6 +5344,7 @@ fn load_repo_packages(repo: &str) -> Vec<PackageData> {
                         dependencies: SharedString::from(""),
                         required_by: SharedString::from(""),
                         selected: false,
+                        explicit: false,
                     })
                 })
                 .collect()

@@ -161,14 +161,16 @@ impl PackageSource for AlpmBackend {
                     PackageStatus::Installed
                 };
 
-                packages.push(Package::new(
+                let mut p = Package::new(
                     pkg.name(),
                     Version::new(pkg.version().as_str()),
                     pkg.desc().unwrap_or_default(),
                     PackageBackend::Pacman,
                     status,
                     "local",
-                ));
+                );
+                p.explicit = pkg.reason() == alpm::PackageReason::Explicit;
+                packages.push(p);
             }
 
             Ok(packages)

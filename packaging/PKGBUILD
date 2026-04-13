@@ -1,7 +1,7 @@
 # Maintainer: Your Name <your.email@example.com>
 pkgname=xpm-gui
 pkgver=0.1.7
-pkgrel=2
+pkgrel=3
 pkgdesc="A modern package manager for Arch Linux supporting pacman and Flatpak"
 arch=('x86_64')
 url="https://github.com/example/xpackagemanager"

@@ -25,6 +25,7 @@ serde_json = "1.0"
 flate2 = "1.0"
 quick-xml = { version = "0.37", features = ["encoding"] }
 libc = "0.2"
+ksni = "0.3.4"
 
 [build-dependencies]
 slint-build = "1.9"

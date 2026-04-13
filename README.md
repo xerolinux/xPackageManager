@@ -92,18 +92,39 @@ sudo pacman -S rust cargo flatpak alpm
 
 ### Run
 
+Keep in mind that this requires you to be on **XeroLinux**. If you are a dev, you know how to get rid of that ;)
+
 ```bash
 git clone https://github.com/xerolinux/xPackageManager
 cd xPackageManager
 cargo run --release --bin xpackagemanager
 ```
 
-### Install (XeroLinux repo)
+### Install (XeroLinux)
 
 ```bash
-echo -e '\n[xerolinux]\nSigLevel = Optional TrustAll\nServer = https://repos.xerolinux.xyz/$repo/$arch' | sudo tee -a /etc/pacman.conf
-sudo pacman -Syy coming-soon-lol
+sudo pacman -Syy xpm-gui
 ```
+
+### Future Plans
+
+- [X] Parallel Downloads
+- [X] Remove universal search
+- [X] Explicitly installed packages
+- [ ] Clean up GUI elements and text
+- [ ] Make Terminal output more verbose
+- [ ] Fix Fullscreen UI design it looks bad
+- [X] Fix export packagelist option in settings
+- [X] Remove update check interval we do not need it
+- [X] Fix Orphaned packages to have a warning and checklist
+- [X] Add a search bar under installed for both flatpaks n Nartive
+- [X] Sync n update button label sholuld be just check for updates
+- [ ] For flatpaks need an indicator for apps that include add-ons
+- [X] Add app-tray icon with : Launch App / Trouble shooting options
+- [X] Add pacman troubleshooting stuff under troubleshooting section
+- [ ] Add confirmation after updates are installed and a reboot button
+- [ ] Add socials and Ko-Fi buttons in settings and some geeky decoration
+- [X] Add option in settings to enable/disable app tray icon with a checkbox
 
 ---
 
