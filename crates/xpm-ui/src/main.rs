@@ -25,8 +25,11 @@ slint::include_modules!();
 
 // ─── System tray ──────────────────────────────────────────────────────────────
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 struct XpmTray {
     window: slint::Weak<MainWindow>,
+    update_count: Arc<AtomicU32>,
 }
 
 impl ksni::Tray for XpmTray {
@@ -35,17 +38,36 @@ impl ksni::Tray for XpmTray {
     }
 
     fn title(&self) -> String {
-        "XeroLinux Package Manager".into()
+        let n = self.update_count.load(Ordering::Relaxed);
+        if n > 0 {
+            format!("XeroLinux Package Manager ({} updates)", n)
+        } else {
+            "XeroLinux Package Manager".into()
+        }
     }
 
     fn icon_name(&self) -> String {
         "system-software-install".into()
     }
 
+    fn status(&self) -> ksni::Status {
+        if self.update_count.load(Ordering::Relaxed) > 0 {
+            ksni::Status::NeedsAttention
+        } else {
+            ksni::Status::Active
+        }
+    }
+
     fn tool_tip(&self) -> ksni::ToolTip {
+        let n = self.update_count.load(Ordering::Relaxed);
+        let desc = if n > 0 {
+            format!("{} update{} available (native + flatpak)", n, if n == 1 { "" } else { "s" })
+        } else {
+            "System is up to date".into()
+        };
         ksni::ToolTip {
             title: "XeroLinux Package Manager".into(),
-            description: "Native & Flatpak package management".into(),
+            description: desc,
             ..Default::default()
         }
     }
@@ -63,11 +85,16 @@ impl ksni::Tray for XpmTray {
         use ksni::menu::StandardItem;
         use ksni::MenuItem;
 
-        let window = &self.window;
+        let n = self.update_count.load(Ordering::Relaxed);
+        let update_label = if n > 0 {
+            format!("Update System ({} available)", n)
+        } else {
+            "Update System".into()
+        };
 
-        let win_launch = window.clone();
-        let win_check = window.clone();
-        let win_update = window.clone();
+        let win_launch = self.window.clone();
+        let win_check  = self.window.clone();
+        let win_update = self.window.clone();
 
         vec![
             StandardItem {
@@ -76,14 +103,11 @@ impl ksni::Tray for XpmTray {
                 activate: Box::new(move |_: &mut Self| {
                     let w = win_launch.clone();
                     slint::invoke_from_event_loop(move || {
-                        if let Some(win) = w.upgrade() {
-                            let _ = win.show();
-                        }
+                        if let Some(win) = w.upgrade() { let _ = win.show(); }
                     }).ok();
                 }),
                 ..Default::default()
-            }
-            .into(),
+            }.into(),
             MenuItem::Separator,
             StandardItem {
                 label: "Check for Updates".into(),
@@ -91,60 +115,115 @@ impl ksni::Tray for XpmTray {
                 activate: Box::new(move |_: &mut Self| {
                     let w = win_check.clone();
                     slint::invoke_from_event_loop(move || {
-                        if let Some(win) = w.upgrade() {
-                            win.invoke_sync_databases();
-                        }
+                        if let Some(win) = w.upgrade() { win.invoke_sync_databases(); }
                     }).ok();
                 }),
                 ..Default::default()
-            }
-            .into(),
+            }.into(),
             StandardItem {
-                label: "Update System".into(),
+                label: update_label,
                 icon_name: "system-software-update".into(),
                 activate: Box::new(move |_: &mut Self| {
                     let w = win_update.clone();
                     slint::invoke_from_event_loop(move || {
-                        if let Some(win) = w.upgrade() {
-                            win.invoke_update_all();
-                        }
+                        if let Some(win) = w.upgrade() { win.invoke_update_system_full(); }
                     }).ok();
                 }),
                 ..Default::default()
-            }
-            .into(),
+            }.into(),
             MenuItem::Separator,
             StandardItem {
                 label: "Exit".into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(move |_: &mut Self| {
-                    slint::invoke_from_event_loop(|| {
-                        slint::quit_event_loop().ok();
-                    }).ok();
+                    slint::invoke_from_event_loop(|| { slint::quit_event_loop().ok(); }).ok();
                 }),
                 ..Default::default()
-            }
-            .into(),
+            }.into(),
         ]
     }
 }
 
 type TrayShutdown = Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>;
 
-fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown) {
+/// Count available updates without syncing databases (uses cached sync DBs).
+fn check_update_count() -> u32 {
+    let native = std::process::Command::new("sh")
+        .args(["-c", "pacman -Qu 2>/dev/null | wc -l"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let flatpak = std::process::Command::new("sh")
+        .args(["-c", "flatpak remote-ls --updates --app --columns=application 2>/dev/null | grep -c ."])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
+    native + flatpak
+}
+
+/// Create or remove the autostart .desktop entry.
+fn set_autostart(enabled: bool) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let autostart_dir = Path::new(&home).join(".config/autostart");
+    let desktop = autostart_dir.join("xpackagemanager.desktop");
+
+    if enabled {
+        let exe = std::env::current_exe()
+            .unwrap_or_else(|_| Path::new("/usr/bin/xpackagemanager").to_path_buf());
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName=XeroLinux Package Manager\n\
+             Comment=Native & Flatpak package management GUI\nExec={}\n\
+             Icon=system-software-install\nStartupNotify=false\nTerminal=false\n",
+            exe.display()
+        );
+        if std::fs::create_dir_all(&autostart_dir).is_ok() {
+            if let Err(e) = std::fs::write(&desktop, &content) {
+                warn!("Autostart write failed: {}", e);
+            }
+        }
+    } else {
+        let _ = std::fs::remove_file(&desktop);
+    }
+}
+
+fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, interval_secs: u64) {
     stop_tray(&tray_shutdown);
 
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    *tray_shutdown.lock().unwrap() = Some(tx);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    *tray_shutdown.lock().unwrap() = Some(shutdown_tx);
 
     thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime for tray");
         rt.block_on(async move {
-            let tray = XpmTray { window };
+            let update_count = Arc::new(AtomicU32::new(0));
+            let tray = XpmTray { window, update_count: update_count.clone() };
+
             match tray.spawn().await {
                 Ok(handle) => {
                     info!("System tray started");
-                    let _ = rx.await;
+
+                    // Periodic update checker
+                    let handle_checker = handle.clone();
+                    let count_ref = update_count.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
+                            let n = tokio::task::spawn_blocking(check_update_count)
+                                .await
+                                .unwrap_or(0);
+                            count_ref.store(n, Ordering::Relaxed);
+                            // Trigger tray re-read of title/tooltip/status
+                            handle_checker.update(|_| {}).await;
+                        }
+                    });
+
+                    let _ = shutdown_rx.await;
                     handle.shutdown().await;
                     info!("System tray stopped");
                 }
@@ -157,7 +236,6 @@ fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown) {
 }
 
 fn stop_tray(tray_shutdown: &TrayShutdown) {
-    // Dropping the sender signals the receiver, which exits block_on
     let _ = tray_shutdown.lock().unwrap().take();
 }
 
@@ -182,6 +260,7 @@ enum UiMessage {
     TerminalDone(bool),
     TerminalPasswordMode(bool),
     TerminalFocusInput,
+    SetTerminalIsUpgrade(bool),
     HideTerminal,
     ShowProgressPopup(String),
     OperationProgress(i32, String),
@@ -231,7 +310,7 @@ for ((i=${#lines[@]}-1; i>=0; i--)); do
     printf "%s\n" "${lines[$i]}" >/dev/tty
 done
 printf "\nEnter number to select (0 to cancel): " >/dev/tty
-# Disable PTY echo — the UI handles local echo itself to avoid duplicates
+# Disable PTY echo - the UI handles local echo itself to avoid duplicates
 stty -echo </dev/tty 2>/dev/null
 read -r num </dev/tty
 stty echo </dev/tty 2>/dev/null
@@ -299,10 +378,13 @@ struct AppConfig {
     parallel_downloads: u32,
     #[serde(default)]
     tray_enabled: bool,
+    #[serde(default = "default_tray_interval")]
+    tray_check_interval_minutes: u32,
 }
 
 fn default_notify_interval() -> u32 { 30 }
 fn default_parallel_downloads() -> u32 { 5 }
+fn default_tray_interval() -> u32 { 30 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -312,6 +394,7 @@ impl Default for AppConfig {
             notify_interval_minutes: 30,
             parallel_downloads: 5,
             tray_enabled: false,
+            tray_check_interval_minutes: 30,
         }
     }
 }
@@ -351,6 +434,7 @@ fn build_config(window: &MainWindow) -> AppConfig {
         notify_interval_minutes: window.get_setting_notify_interval() as u32,
         parallel_downloads: window.get_setting_parallel_downloads() as u32,
         tray_enabled: window.get_setting_tray_enabled(),
+        tray_check_interval_minutes: window.get_setting_tray_check_interval() as u32,
     }
 }
 
@@ -500,14 +584,14 @@ fn apply_terminal_text(buffer: &str, new_text: &str) -> String {
     while i < len {
         match chars[i] {
             '\r' if i + 1 < len && chars[i + 1] == '\n' => {
-                // \r\n = Windows newline — commit line, no overwrite
+                // \r\n = Windows newline - commit line, no overwrite
                 result.push_str(&line);
                 result.push('\n');
                 line.clear();
                 i += 2;
             }
             '\r' => {
-                // bare \r = carriage return — overwrite current line
+                // bare \r = carriage return - overwrite current line
                 line.clear();
                 i += 1;
             }
@@ -683,7 +767,7 @@ fn batch_deps(names: &[&str]) -> HashMap<String, Vec<String>> {
 }
 
 /// Parse `pacman -Si <pkg>` output for a non-installed package.
-/// Returns (depends, optional_deps) — no required-by for uninstalled packages.
+/// Returns (depends, optional_deps) - no required-by for uninstalled packages.
 fn parse_si_block(text: &str) -> (Vec<String>, Vec<String>) {
     let mut depends: Vec<String> = Vec::new();
     let mut optional: Vec<String> = Vec::new();
@@ -722,12 +806,12 @@ fn parse_si_block(text: &str) -> (Vec<String>, Vec<String>) {
 
 /// Build the full dep tree data for `pkg_name`.
 /// Returns (dep_nodes, reqby_nodes, root_version).
-/// Root is NOT included in dep_nodes — rendered separately as a pill card.
+/// Root is NOT included in dep_nodes - rendered separately as a pill card.
 fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
     let installed = all_installed_map();
     let pkg_installed = installed.contains_key(pkg_name);
 
-    // Query root package info — try -Qi for installed, -Si for non-installed
+    // Query root package info - try -Qi for installed, -Si for non-installed
     let (direct_deps, opt_deps, reqby_names, root_version) = if pkg_installed {
         let root_version = installed.get(pkg_name).map(|v| trim_version(v)).unwrap_or_default();
         let Ok(root_out) = std::process::Command::new("pacman")
@@ -918,13 +1002,13 @@ fn run_in_terminal(
         let mut file = unsafe { std::fs::File::from_raw_fd(master_fd_reader) };
         let mut buf = [0u8; 4096];
         loop {
-            // Poll with 100ms timeout — avoids blocking when process awaits input
+            // Poll with 100ms timeout - avoids blocking when process awaits input
             let ready = unsafe {
                 let mut pfd = libc::pollfd { fd: master_fd_reader, events: libc::POLLIN, revents: 0 };
                 libc::poll(&mut pfd as *mut libc::pollfd, 1, 20)
             };
             if ready < 0 { break; } // error / signal
-            if ready == 0 { continue; } // timeout — keep polling
+            if ready == 0 { continue; } // timeout - keep polling
             match file.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -935,11 +1019,11 @@ fn run_in_terminal(
                         if PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p)) {
                             let _ = in_tx_auto.send("y".to_string());
                         }
-                        // Detect password / auth prompts — surface to UI
+                        // Detect password / auth prompts - surface to UI
                         if PASSWORD_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) {
                             let _ = tx_reader.send(UiMessage::TerminalPasswordMode(true));
                         }
-                        // Detect interactive selection prompts — refocus input (no masking)
+                        // Detect interactive selection prompts - refocus input (no masking)
                         if TERMINAL_INPUT_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) {
                             let _ = tx_reader.send(UiMessage::TerminalFocusInput);
                         }
@@ -1103,7 +1187,7 @@ fn run_managed_operation(
         const MAX_OUTPUT_LINES: usize = 500;
 
         loop {
-            // Poll with 100ms timeout — prevents blocking when process waits for user input.
+            // Poll with 100ms timeout - prevents blocking when process waits for user input.
             // Without this, a prompt like ":: Replace X with Y? [Y/n]" never reaches the UI
             // because read() blocks waiting for the next byte that never comes.
             let ready = unsafe {
@@ -1115,7 +1199,7 @@ fn run_managed_operation(
             let now = std::time::Instant::now();
 
             if ready == 0 {
-                // Timeout — process may be waiting for input. Flush pending output so
+                // Timeout - process may be waiting for input. Flush pending output so
                 // the prompt text becomes visible in the UI.
                 if !pending_output.is_empty() {
                     let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
@@ -1154,7 +1238,7 @@ fn run_managed_operation(
                         *escalated_r.lock().unwrap() = true;
                     }
 
-                    // Prompt / auto-confirm detection — must happen BEFORE flush so
+                    // Prompt / auto-confirm detection - must happen BEFORE flush so
                     // force_flush can push the prompt text to the UI immediately.
                     let is_auto_confirm = PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
                     let mut force_flush = false;
@@ -1212,7 +1296,7 @@ fn run_managed_operation(
                         }
                     }
 
-                    // Flush output to UI — immediately on prompts, throttled otherwise
+                    // Flush output to UI - immediately on prompts, throttled otherwise
                     if force_flush || now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
                         let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
                         last_output_flush = now;
@@ -1413,7 +1497,7 @@ fn detect_prompt_default(line: &str) -> Option<String> {
                     return Some(part.to_lowercase());
                 }
             }
-            // All lowercase — first option is default
+            // All lowercase - first option is default
             if let Some(first) = inner.split('/').next() {
                 let first = first.trim();
                 if !first.is_empty() {
@@ -1580,7 +1664,7 @@ fn load_sys_info() -> SysInfo {
         (format!("{}M", used_mb), format!("{}M", total_mb))
     };
 
-    // GPU — probe /sys/class/drm (fast, no subprocess)
+    // GPU - probe /sys/class/drm (fast, no subprocess)
     let gpu = (|| -> Option<String> {
         for entry in std::fs::read_dir("/sys/class/drm").ok()?.flatten() {
             let name = entry.file_name();
@@ -1828,7 +1912,7 @@ fn main() {
         window.set_flatpak_packages(ModelRc::new(VecModel::from(flatpak)));
         window.set_stats(stats);
     }
-    // Always clear loading immediately — stat cards should never be stuck in skeleton state.
+    // Always clear loading immediately - stat cards should never be stuck in skeleton state.
     // The background thread will overwrite stats/packages when it finishes.
     window.set_loading(false);
 
@@ -1975,7 +2059,7 @@ fn main() {
                             thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().expect("Runtime");
                                 rt.block_on(async {
-                                    // Refresh flatpak installed ids first — used by search + browse
+                                    // Refresh flatpak installed ids first - used by search + browse
                                     let new_ids = tokio::task::spawn_blocking(get_flatpak_installed_ids).await.unwrap_or_default();
                                     *ids_ref.lock().unwrap() = new_ids;
                                     // Run load + search concurrently
@@ -1995,9 +2079,13 @@ fn main() {
                             });
                         }
                     }
+                    UiMessage::SetTerminalIsUpgrade(val) => {
+                        window.set_terminal_is_upgrade(val);
+                    }
                     UiMessage::HideTerminal => {
                         window.set_show_terminal(false);
                         window.set_show_progress_popup(false);
+                        window.set_terminal_is_upgrade(false);
                     }
                     UiMessage::ShowProgressPopup(title) => {
                         window.set_progress_popup_title(SharedString::from(&title));
@@ -2043,14 +2131,14 @@ fn main() {
                                     let name_set: std::collections::HashSet<&str> =
                                         names.iter().map(|s| s.as_str()).collect();
                                     if backend == 1 {
-                                        // Flatpak removal — filter installed_flatpaks
+                                        // Flatpak removal - filter installed_flatpaks
                                         let current: Vec<PackageData> = window.get_installed_flatpaks()
                                             .iter()
                                             .filter(|p| !name_set.contains(p.name.as_str()))
                                             .collect();
                                         window.set_installed_flatpaks(ModelRc::new(VecModel::from(current)));
                                     } else {
-                                        // Native pacman removal — filter full installed list + re-page
+                                        // Native pacman removal - filter full installed list + re-page
                                         {
                                             let mut inst = full_installed_timer.borrow_mut();
                                             inst.retain(|p| !name_set.contains(p.name.as_str()));
@@ -2067,15 +2155,6 @@ fn main() {
                                 }
                             }
                             window.set_selected_count(0);
-                            let weak = window.as_weak();
-                            let auto_close = Timer::default();
-                            auto_close.start(TimerMode::SingleShot, std::time::Duration::from_millis(1500), move || {
-                                if let Some(w) = weak.upgrade() {
-                                    w.set_show_progress_popup(false);
-                                    w.set_show_progress_logs(false);
-                                }
-                            });
-                            std::mem::forget(auto_close);
                         } else {
                             window.set_show_progress_logs(true);
                         }
@@ -2087,7 +2166,7 @@ fn main() {
                             thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().expect("Runtime");
                                 rt.block_on(async {
-                                    // Refresh flatpak installed ids first — used by search + browse
+                                    // Refresh flatpak installed ids first - used by search + browse
                                     let new_ids = tokio::task::spawn_blocking(get_flatpak_installed_ids).await.unwrap_or_default();
                                     *ids_ref.lock().unwrap() = new_ids;
                                     // Run load + search concurrently
@@ -2156,7 +2235,7 @@ fn main() {
                         }
                     }
                     UiMessage::RemoteAppsFiltered { serial, apps, total_matches } => {
-                        // u64::MAX is a sentinel used by preload/browse paths — always accept
+                        // u64::MAX is a sentinel used by preload/browse paths - always accept
                         // For normal filter serials, drop stale results from previous keystrokes
                         let current = filter_serial_timer.load(std::sync::atomic::Ordering::Relaxed);
                         if serial == u64::MAX || serial == current {
@@ -2200,7 +2279,7 @@ fn main() {
                         window.set_flatpak_loading_more(false);
                     }
                     UiMessage::PacmanReposLoaded(repos) => {
-                        // Keep selected_repo as "" (All) — the browse-repo("") call
+                        // Keep selected_repo as "" (All) - the browse-repo("") call
                         // that fired alongside load-pacman-repos handles the initial load.
                         window.set_pacman_repos(ModelRc::new(VecModel::from(
                             repos.iter().map(|r| SharedString::from(r.as_str())).collect::<Vec<_>>()
@@ -2263,7 +2342,7 @@ fn main() {
     let config = load_config();
     let check_updates_on_start = config.check_updates_on_start;
 
-    // Fire homepage data immediately — these are pure /proc reads, sub-millisecond
+    // Fire homepage data immediately - these are pure /proc reads, sub-millisecond
     let _ = tx.send(UiMessage::SysInfoLoaded(load_sys_info()));
     let _ = tx.send(UiMessage::ActivityLoaded(load_recent_activity()));
 
@@ -2293,7 +2372,7 @@ fn main() {
             let total = all_pkg.len();
             let page: Vec<PackageData> = all_pkg.into_iter().take(FLATPAK_PAGE_SIZE).collect();
             *store_preload.lock().unwrap() = all_apps;
-            // Use u64::MAX sentinel — initial population is always accepted by the message loop
+            // Use u64::MAX sentinel - initial population is always accepted by the message loop
             let _ = tx_preload.send(UiMessage::RemoteAppsFiltered { serial: u64::MAX, apps: page, total_matches: total });
         });
     }
@@ -2411,7 +2490,7 @@ fn main() {
             let script = "if [ -f /var/lib/pacman/db.lck ]; then \
                               rm -v /var/lib/pacman/db.lck && echo 'Lock file removed. Pacman DB unlocked.'; \
                           else \
-                              echo 'No lock file found — DB is already unlocked.'; \
+                              echo 'No lock file found - DB is already unlocked.'; \
                           fi";
             run_in_terminal(&tx, "Unlocking Pacman Database", "pkexec", &["bash", "-c", script], &input, &pid);
         });
@@ -2548,6 +2627,7 @@ fn main() {
         let pid = update_all_pid.clone();
         let ctx = update_all_ctx.clone();
         thread::spawn(move || {
+            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(true));
             run_managed_operation(&tx, "System Update", "update-all", &[], 0, &input, &pid, &ctx);
         });
     });
@@ -2564,6 +2644,31 @@ fn main() {
         let ctx = upd_flt_ctx.clone();
         thread::spawn(move || {
             run_managed_operation(&tx, "Flatpak Update", "update-all", &[], 1, &input, &pid, &ctx);
+        });
+    });
+
+    // Combined native + flatpak system update (used by tray "Update System")
+    let tx_sys_full = tx.clone();
+    let sys_full_input = terminal_input_sender.clone();
+    let sys_full_pid = terminal_child_pid.clone();
+    window.on_update_system_full(move || {
+        info!("Full system update (native + flatpak)");
+        let tx = tx_sys_full.clone();
+        let input = sys_full_input.clone();
+        let pid = sys_full_pid.clone();
+        thread::spawn(move || {
+            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(true));
+            run_in_terminal(
+                &tx,
+                "Full System Update",
+                "pkexec",
+                &[
+                    "bash", "-c",
+                    "pacman -Syu && echo '' && echo '━━━ Flatpak Updates ━━━' && flatpak update -y && echo '' && echo '✓ System fully updated'",
+                ],
+                &input,
+                &pid,
+            );
         });
     });
 
@@ -2934,7 +3039,7 @@ fn main() {
         });
     });
 
-    // Legacy callback — kept for any stray references
+    // Legacy callback - kept for any stray references
     let tx_orphans_legacy = tx.clone();
     let orphan_input_legacy = terminal_input_sender.clone();
     let orphan_pid_legacy = terminal_child_pid.clone();
@@ -3070,7 +3175,7 @@ fn main() {
     window.on_terminal_send_input(move |text| {
         let text = text.to_string();
         // Local echo: show what the user typed in the terminal output immediately.
-        // PTY echo is unreliable after sudo's tcsetattr — don't rely on it.
+        // PTY echo is unreliable after sudo's tcsetattr - don't rely on it.
         // Skip echo when in password mode (don't reveal the typed secret).
         let is_password = window_weak_te.upgrade()
             .map(|w| w.get_terminal_show_password())
@@ -3246,7 +3351,17 @@ fn main() {
         let _ = tx_close.send(UiMessage::HideTerminal);
     });
 
-    // Flatpak remote browser — serves capped first page from in-memory store if preloaded
+    window.on_terminal_reboot(|| {
+        info!("Reboot requested after upgrade");
+        thread::spawn(|| {
+            std::process::Command::new("systemctl")
+                .arg("reboot")
+                .spawn()
+                .ok();
+        });
+    });
+
+    // Flatpak remote browser - serves capped first page from in-memory store if preloaded
     let tx_remotes = tx.clone();
     let window_weak_remote = window.as_weak();
     let store_remote = flatpak_app_store.clone();
@@ -3272,13 +3387,13 @@ fn main() {
                 let page: Vec<PackageData> = all.into_iter().take(FLATPAK_PAGE_SIZE).collect();
                 drop(ids);
                 drop(store);
-                // u64::MAX sentinel — browse result always accepted
+                // u64::MAX sentinel - browse result always accepted
                 let _ = tx.send(UiMessage::RemoteAppsFiltered { serial: u64::MAX, apps: page, total_matches: total });
                 return;
             }
         }
 
-        // Store not ready yet — show loading and fetch in background
+        // Store not ready yet - show loading and fetch in background
         if let Some(w) = window_weak_remote.upgrade() {
             w.set_remote_apps_loading(true);
         }
@@ -3301,12 +3416,12 @@ fn main() {
             *store.lock().unwrap() = all_apps;
             let total = all.len();
             let page: Vec<PackageData> = all.into_iter().take(FLATPAK_PAGE_SIZE).collect();
-            // u64::MAX sentinel — background browse fetch always accepted
+            // u64::MAX sentinel - background browse fetch always accepted
             let _ = tx.send(UiMessage::RemoteAppsFiltered { serial: u64::MAX, apps: page, total_matches: total });
         });
     });
 
-    // Filter flatpak apps — background thread, stale results dropped via serial counter
+    // Filter flatpak apps - background thread, stale results dropped via serial counter
     let tx_filter = tx.clone();
     let store_filter = flatpak_app_store.clone();
     let ids_filter = flatpak_installed_ids.clone();
@@ -3320,7 +3435,7 @@ fn main() {
         } else {
             "flathub".to_string()
         };
-        // Bump serial immediately — any in-flight result with the old serial will be dropped
+        // Bump serial immediately - any in-flight result with the old serial will be dropped
         let my_serial = serial_filter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let store = store_filter.clone();
         let ids = ids_filter.clone();
@@ -3341,7 +3456,7 @@ fn main() {
                 return;
             }
             let total = all.len();
-            // Cap to FLATPAK_PAGE_SIZE — enough for display, avoids VecModel of 2000 items
+            // Cap to FLATPAK_PAGE_SIZE - enough for display, avoids VecModel of 2000 items
             let page: Vec<PackageData> = all.into_iter().take(FLATPAK_PAGE_SIZE).collect();
             let _ = tx.send(UiMessage::RemoteAppsFiltered { serial: my_serial, apps: page, total_matches: total });
         });
@@ -3548,7 +3663,7 @@ fn main() {
         }
     });
 
-    // Pacman repos browser — auto-loads first repo
+    // Pacman repos browser - auto-loads first repo
     let tx_repos = tx.clone();
     window.on_load_pacman_repos(move || {
         let tx = tx_repos.clone();
@@ -3948,16 +4063,23 @@ fn main() {
     let tray_shutdown_toggle = tray_shutdown.clone();
 
     window.set_setting_tray_enabled(config.tray_enabled);
+    window.set_setting_tray_check_interval(config.tray_check_interval_minutes as i32);
     if config.tray_enabled {
-        start_tray(window.as_weak(), tray_shutdown.clone());
+        let interval_secs = (config.tray_check_interval_minutes as u64) * 60;
+        start_tray(window.as_weak(), tray_shutdown.clone(), interval_secs);
     }
 
     let window_weak_tray = window.as_weak();
     window.on_toggle_tray_enabled(move |enabled| {
-        if enabled {
-            start_tray(window_weak_tray.clone(), tray_shutdown_toggle.clone());
-        } else {
-            stop_tray(&tray_shutdown_toggle);
+        if let Some(win) = window_weak_tray.upgrade() {
+            let interval_secs = (win.get_setting_tray_check_interval() as u64) * 60;
+            if enabled {
+                set_autostart(true);
+                start_tray(window_weak_tray.clone(), tray_shutdown_toggle.clone(), interval_secs);
+            } else {
+                set_autostart(false);
+                stop_tray(&tray_shutdown_toggle);
+            }
         }
     });
 
@@ -3992,7 +4114,7 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
     let orphans_fut = alpm.list_orphans();
     let flatpak_installed_fut = flatpak.list_installed();
     // desktop_map: reads .desktop files only (fast). pacman -Ql removed.
-    // flatpak_map (appstream XML) removed — appdata_name already in list_installed().
+    // flatpak_map (appstream XML) removed - appdata_name already in list_installed().
     let desktop_map_fut = tokio::task::spawn_blocking(build_desktop_name_map);
 
     let flatpak_updates_fut = if check_updates { Some(flatpak.list_updates()) } else { None };
@@ -4961,7 +5083,7 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
                             // icon text content parsed in Text event
                             if let Some(ref mut s) = current {
                                 // Mark that we want the next text as icon_name
-                                // Use a flag — reuse in_extends pattern
+                                // Use a flag - reuse in_extends pattern
                                 let _ = s; // will read in Text event via separate flag
                             }
                             // Use a dedicated flag (add below)
@@ -5199,9 +5321,17 @@ fn apps_to_package_data(
     category_filter: &str,
     search: &str,
 ) -> Vec<PackageData> {
+    // Pre-compute which app IDs have add-ons (any app whose `extends` points to them)
+    let has_addons: std::collections::HashSet<&str> = apps.iter()
+        .filter(|a| !a.extends.is_empty())
+        .map(|a| a.extends.as_str())
+        .collect();
+
     let search_lower = search.to_lowercase();
     apps.iter()
         .filter(|app| {
+            // Skip add-on entries themselves (they extend another app)
+            if !app.extends.is_empty() { return false; }
             // Category filter
             if !category_filter.is_empty() && category_filter != "All" {
                 if !app.categories.iter().any(|c| c == category_filter) {
@@ -5253,7 +5383,7 @@ fn apps_to_package_data(
                 dependencies: SharedString::from(app.developer.as_str()),
                 required_by: SharedString::from(initial.as_str()),         // first letter for avatar
                 selected: false,
-                explicit: false,
+                explicit: has_addons.contains(app.app_id.as_str()),        // true = app has add-ons
             }
         })
         .collect()
