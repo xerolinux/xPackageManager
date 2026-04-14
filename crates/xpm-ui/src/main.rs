@@ -881,21 +881,40 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
         .map(|n| n.as_str()).collect();
     let l2_map = batch_deps(&l1_installed);
 
-    // Collect all missing deps to check if they're installable
-    let missing_pkgs: Vec<&str> = all_l1.iter()
+    // Collect ALL non-installed deps (l1 + l2) for a single installability pass
+    let mut all_missing: Vec<String> = all_l1.iter()
         .filter(|n| !installed.contains_key(n.as_str()))
-        .map(|n| n.as_str())
-        .collect();
-    let installable_map = batch_installable_check(&missing_pkgs);
+        .cloned().collect();
+    for sub_list in l2_map.values() {
+        for s in sub_list {
+            if !installed.contains_key(s.as_str()) {
+                all_missing.push(s.clone());
+            }
+        }
+    }
+    all_missing.sort_unstable();
+    all_missing.dedup();
+    let missing_refs: Vec<&str> = all_missing.iter().map(|s| s.as_str()).collect();
+    let installable_map = batch_installable_check(&missing_refs);
+
+    // A dep should be shown if it's installed OR available in any repo
+    let show_dep = |name: &str| -> bool {
+        installed.contains_key(name) || *installable_map.get(name).unwrap_or(&false)
+    };
+
+    // Filter deps before computing tree connectors so └─/├─ stay correct
+    let vis_direct: Vec<&String> = direct_deps.iter().filter(|n| show_dep(n)).collect();
+    let vis_opt: Vec<&String>    = opt_deps.iter().filter(|n| show_dep(n)).collect();
 
     let mut dep_nodes: Vec<DepNode> = Vec::new();
 
     // ── Hard (required) dependencies ────────────────────────────────────────
-    let hard_total = direct_deps.len();
-    let grand_total = direct_deps.len() + opt_deps.len();
-    for (idx, dep_name) in direct_deps.iter().enumerate() {
-        let is_last_l1 = idx == grand_total - 1; // last of ALL level-1 nodes
-        let connector = if is_last_l1 && opt_deps.is_empty() { "└─ " } else { "├─ " };
+    let n_direct = vis_direct.len();
+    let n_opt    = vis_opt.len();
+
+    for (idx, dep_name) in vis_direct.iter().enumerate() {
+        let is_last_direct = idx == n_direct - 1;
+        let connector = if is_last_direct && n_opt == 0 { "└─ " } else { "├─ " };
         let ver = installed.get(dep_name.as_str()).map(|v| trim_version(v)).unwrap_or_default();
         let is_installed = !ver.is_empty();
         let installable = if !is_installed { *installable_map.get(dep_name.as_str()).unwrap_or(&false) } else { false };
@@ -912,10 +931,14 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
         });
 
         if let Some(sub_deps) = l2_map.get(dep_name.as_str()) {
-            let parent_last = opt_deps.is_empty() && idx == hard_total - 1;
-            let parent_cont = if parent_last { "   " } else { "│  " };
-            let nsub = sub_deps.len();
-            for (j, sub) in sub_deps.iter().enumerate() {
+            // Filter sub-deps the same way
+            let vis_subs: Vec<&String> = sub_deps.iter().filter(|s| show_dep(s)).collect();
+            if vis_subs.is_empty() { continue; }
+
+            // Parent's vertical line continues only if more l1 nodes follow
+            let parent_cont = if is_last_direct && n_opt == 0 { "   " } else { "│  " };
+            let nsub = vis_subs.len();
+            for (j, sub) in vis_subs.iter().enumerate() {
                 let sc = if j == nsub - 1 { "└─ " } else { "├─ " };
                 let sv = installed.get(sub.as_str()).map(|v| trim_version(v)).unwrap_or_default();
                 let sv_installed = !sv.is_empty();
@@ -934,8 +957,8 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
         }
     }
 
-    // ── Optional dependencies separator + entries ────────────────────────────
-    if !opt_deps.is_empty() {
+    // ── Optional dependencies separator + entries (only if any survive filter) ─
+    if !vis_opt.is_empty() {
         dep_nodes.push(DepNode {
             name: SharedString::from("Optional Dependencies"),
             version: SharedString::from(""),
@@ -947,9 +970,8 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
             installable: false,
         });
 
-        let nopt = opt_deps.len();
-        for (idx, dep_name) in opt_deps.iter().enumerate() {
-            let connector = if idx == nopt - 1 { "└╌ " } else { "├╌ " };
+        for (idx, dep_name) in vis_opt.iter().enumerate() {
+            let connector = if idx == n_opt - 1 { "└╌ " } else { "├╌ " };
             let ver = installed.get(dep_name.as_str()).map(|v| trim_version(v)).unwrap_or_default();
             let is_installed = !ver.is_empty();
             let installable = if !is_installed { *installable_map.get(dep_name.as_str()).unwrap_or(&false) } else { false };
