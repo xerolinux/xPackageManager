@@ -297,6 +297,8 @@ enum UiMessage {
     RepoPkgDetail(String),
     InstalledFlatpaksLoaded(Vec<PackageData>),
     DepTreeLoaded { deps: Vec<DepNode>, reqby: Vec<DepNode>, root_version: String },
+    ArchNewsLoaded(Vec<ArchNewsItem>),
+    ArchNewsLoading,
 }
 
 // Plain-text fzf replacement for programs (like downgrade) that pipe through fzf.
@@ -1887,7 +1889,166 @@ fn load_installed_flatpaks() -> Vec<PackageData> {
     pkgs
 }
 
+/// Parse /etc/pacman.conf Include lines and build rate-mirrors commands for
+/// each unique mirrorlist file found. Determines the rate-mirrors backend from
+/// the filename (e.g. "chaotic" → chaotic-aur target, otherwise → arch).
+fn build_mirrorlist_update_script() -> String {
+    let content = std::fs::read_to_string("/etc/pacman.conf").unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let mut cmds: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with('#') { continue; }
+        if let Some(rest) = t.strip_prefix("Include") {
+            let path = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace()).to_string();
+            if path.is_empty() || !seen.insert(path.clone()) { continue; }
+
+            let target = if path.to_lowercase().contains("chaotic") {
+                "chaotic-aur"
+            } else {
+                "arch"
+            };
+            cmds.push(format!(
+                "rate-mirrors --allow-root --protocol https {} | tee {}",
+                target, path
+            ));
+        }
+    }
+
+    if cmds.is_empty() {
+        // Fallback: update the standard Arch mirrorlist only
+        "rate-mirrors --allow-root --protocol https arch | tee /etc/pacman.d/mirrorlist".to_string()
+    } else {
+        cmds.join(" && ")
+    }
+}
+
+fn is_xerolinux() -> bool {
+    std::fs::read_to_string("/etc/os-release")
+        .unwrap_or_default()
+        .lines()
+        .any(|l| {
+            let l = l.trim();
+            (l.starts_with("ID=") || l.starts_with("NAME="))
+                && l.to_lowercase().contains("xero")
+        })
+}
+
+fn fetch_arch_news() -> Vec<ArchNewsItem> {
+    let out = match std::process::Command::new("curl")
+        .args(["-s", "--max-time", "10", "https://archlinux.org/feeds/news/"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    let xml = String::from_utf8_lossy(&out.stdout);
+    parse_arch_rss(&xml)
+}
+
+fn parse_arch_rss(xml: &str) -> Vec<ArchNewsItem> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    let mut items: Vec<ArchNewsItem> = Vec::new();
+    let mut in_item = false;
+    let mut cur_tag = String::new();
+    let mut title = String::new();
+    let mut date = String::new();
+    let mut link = String::new();
+    let mut description = String::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let tag = std::str::from_utf8(e.name().as_ref()).unwrap_or("").to_string();
+                if tag == "item" {
+                    in_item = true;
+                    title.clear(); date.clear(); link.clear(); description.clear();
+                }
+                cur_tag = tag;
+            }
+            Ok(Event::Text(e)) => {
+                if !in_item { continue; }
+                let text = e.unescape().unwrap_or_default().to_string();
+                match cur_tag.as_str() {
+                    "title" => title = text,
+                    "pubDate" => {
+                        // Format: "Mon, 07 Apr 2025 00:00:00 +0000" → "07 Apr 2025"
+                        let parts: Vec<&str> = text.splitn(6, ' ').collect();
+                        date = if parts.len() >= 4 {
+                            format!("{} {} {}", parts[1], parts[2], parts[3])
+                        } else {
+                            text
+                        };
+                    }
+                    "link" => link = text,
+                    "description" => description = strip_html(&text),
+                    _ => {}
+                }
+            }
+            Ok(Event::CData(e)) => {
+                if !in_item { continue; }
+                let text = String::from_utf8_lossy(e.as_ref()).to_string();
+                match cur_tag.as_str() {
+                    "description" => description = strip_html(&text),
+                    _ => {}
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name_bytes = e.name();
+                let tag = std::str::from_utf8(name_bytes.as_ref()).unwrap_or("");
+                if tag == "item" && in_item {
+                    in_item = false;
+                    // Trim description to reasonable length
+                    let summary = if description.chars().count() > 400 {
+                        let cut: String = description.chars().take(400).collect();
+                        format!("{}…", cut.trim_end())
+                    } else {
+                        description.trim().to_string()
+                    };
+                    items.push(ArchNewsItem {
+                        title: SharedString::from(title.trim()),
+                        date: SharedString::from(date.trim()),
+                        link: SharedString::from(link.trim()),
+                        summary: SharedString::from(summary),
+                    });
+                }
+                cur_tag.clear();
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+
+    items
+}
+
+fn strip_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    // Collapse whitespace
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn main() {
+    // Must be set before Qt initializes (Slint backend-qt reads this to load KDE platform theme,
+    // which gives Palette.* the correct Breeze Dark / system color values)
+    if std::env::var("QT_QPA_PLATFORMTHEME").is_err() {
+        std::env::set_var("QT_QPA_PLATFORMTHEME", "kde");
+    }
+
     let subscriber = FmtSubscriber::builder()
     .with_max_level(Level::INFO)
     .finish();
@@ -2341,6 +2502,13 @@ fn main() {
                         window.set_dep_tree_nodes(ModelRc::new(VecModel::from(deps)));
                         window.set_dep_reqby_nodes(ModelRc::new(VecModel::from(reqby)));
                     }
+                    UiMessage::ArchNewsLoading => {
+                        window.set_arch_news_loading(true);
+                    }
+                    UiMessage::ArchNewsLoaded(items) => {
+                        window.set_arch_news_loading(false);
+                        window.set_arch_news_items(ModelRc::new(VecModel::from(items)));
+                    }
                 }
             }
 
@@ -2739,6 +2907,16 @@ fn main() {
                 &input,
                 &pid,
             );
+        });
+    });
+
+    let tx_arch_news = tx.clone();
+    window.on_refresh_arch_news(move || {
+        let tx = tx_arch_news.clone();
+        thread::spawn(move || {
+            let _ = tx.send(UiMessage::ArchNewsLoading);
+            let items = fetch_arch_news();
+            let _ = tx.send(UiMessage::ArchNewsLoaded(items));
         });
     });
 
@@ -3359,9 +3537,9 @@ fn main() {
         let pid = mirror_pid.clone();
         thread::spawn(move || {
             let title = "Updating Mirrorlists".to_string();
-            run_in_terminal(&tx, &title, "pkexec", &["bash", "-c",
-                            "rate-mirrors --allow-root --protocol https arch | tee /etc/pacman.d/mirrorlist && rate-mirrors --allow-root --protocol https chaotic-aur | tee /etc/pacman.d/chaotic-mirrorlist"
-            ], &input, &pid);
+            let script = build_mirrorlist_update_script();
+            let args = ["bash", "-c", script.as_str()];
+            run_in_terminal(&tx, &title, "pkexec", &args, &input, &pid);
         });
     });
 
@@ -4152,6 +4330,10 @@ fn main() {
             }
         }
     });
+
+    if !is_xerolinux() {
+        window.set_show_distro_warning(true);
+    }
 
     info!("Running application");
     window.run().expect("Failed to run application");

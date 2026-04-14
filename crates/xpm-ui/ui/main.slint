@@ -62,15 +62,23 @@ export struct DepNode {
     is-root: bool,
 }
 
+export struct ArchNewsItem {
+    title: string,
+    date: string,
+    link: string,
+    summary: string,
+}
+
 export global Cat {
-    // Core backgrounds — derived from system Palette
+    // Core backgrounds — all derived from Palette.background (reliable on all systems)
+    // Palette.control-background is NOT used — it returns light colors on some Qt configs
     out property <color> base: Palette.background;
-    out property <color> mantle: Palette.alternate-background;
-    out property <color> crust: Palette.background.darker(0.12);
-    // Surfaces
-    out property <color> surface0: Palette.control-background;
-    out property <color> surface1: Palette.control-background.brighter(0.08);
-    out property <color> surface2: Palette.control-background.brighter(0.18);
+    out property <color> mantle: Palette.background.darker(0.06);
+    out property <color> crust: Palette.background.darker(0.14);
+    // Surfaces — stepped brightness from base
+    out property <color> surface0: Palette.background.brighter(0.08);
+    out property <color> surface1: Palette.background.brighter(0.16);
+    out property <color> surface2: Palette.background.brighter(0.26);
     // Text / overlays
     out property <color> overlay0: Palette.foreground.with-alpha(0.38);
     out property <color> overlay1: Palette.foreground.with-alpha(0.55);
@@ -976,6 +984,8 @@ export component MainWindow inherits Window {
     // DB lock
     in-out property <bool> show-unlock-db-confirm: false;
     callback unlock-db;
+    // Distro warning
+    in-out property <bool> show-distro-warning: false;
     // IgnorePkg
     in-out property <bool> ignorepkg-active: false;
     in-out property <string> ignorepkg-value: "";
@@ -987,6 +997,10 @@ export component MainWindow inherits Window {
     callback save-settings();
     callback toggle-tray-enabled(bool);
     callback update-system-full();
+
+    in-out property <[ArchNewsItem]> arch-news-items: [];
+    in-out property <bool> arch-news-loading: false;
+    callback refresh-arch-news;
 
     property <string> icon-home: "M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10";
     property <string> icon-grid: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z";
@@ -1013,6 +1027,7 @@ export component MainWindow inherits Window {
     property <string> icon-refresh: "M1 4v6h6M23 20v-6h-6M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 0 1 3.51 15";
 
     property <string> icon-flatpak: "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5";
+    property <string> icon-rss: "M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16M5 19h.01";
 
     // Drives the indeterminate shimmer on the loading chip (sweeps -40% → 105%)
     property <float> _load-shimmer: -0.4;
@@ -1086,6 +1101,16 @@ export component MainWindow inherits Window {
                 label: "Home";
                 active: view == 9;
                 clicked => { view = 9; }
+            }
+
+            NavButton {
+                icon-path: icon-rss;
+                label: "Arch News";
+                active: view == 13;
+                clicked => {
+                    view = 13;
+                    if arch-news-items.length == 0 { root.refresh-arch-news(); }
+                }
             }
 
             if setting-flatpak-enabled: NavButton {
@@ -1215,7 +1240,8 @@ export component MainWindow inherits Window {
                           view == 5 ? "Settings" :
                           view == 7 ? "Browse Repos" :
                           view == 8 ? selected-repo :
-                          view == 10 ? (show-flatpak-detail ? flatpak-detail-name : "Flatpaks") : "";
+                          view == 10 ? (show-flatpak-detail ? flatpak-detail-name : "Flatpaks") :
+                          view == 13 ? "Arch News" : "";
                     font-size: 22px;
                     font-weight: 700;
                     color: Cat.text;
@@ -1230,21 +1256,7 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                 }
 
-                if view == 1 && update-packages.length > 0: Btn {
-                    label: "Native (" + update-packages.length + ")";
-                    primary: false;
-                    enabled: !busy;
-                    clicked => { root.update-native-only(); }
-                }
-
-                if view == 1 && flatpak-update-count > 0: Btn {
-                    label: "Flatpaks (" + flatpak-update-count + ")";
-                    primary: false;
-                    enabled: !busy;
-                    clicked => { root.update-all-flatpaks(); }
-                }
-
-                if view == 1 && (update-packages.length > 0 || flatpak-update-count > 0): Btn {
+                if view == 1 && (update-packages.length > 0 || flatpak-update-packages.length > 0): Btn {
                     label: "Update All";
                     primary: true;
                     enabled: !busy;
@@ -1270,6 +1282,12 @@ export component MainWindow inherits Window {
                 if view == 0: Btn {
                     label: "Refresh";
                     clicked => { root.refresh(); }
+                }
+
+                if view == 13: Btn {
+                    label: arch-news-loading ? "Loading..." : "Refresh";
+                    enabled: !arch-news-loading;
+                    clicked => { root.refresh-arch-news(); }
                 }
             }
 
@@ -1553,9 +1571,9 @@ export component MainWindow inherits Window {
                             pkg: p;
                             show-separator: i < update-packages.length - 1;
                             show-checkbox: false;
-                            show-action-button: true;
-                            install => { root.request-update(p.name, p.backend); }
-                            remove => { root.request-remove(p.name, p.backend); }
+                            show-action-button: false;
+                            install => { }
+                            remove => { }
                         }
                     }
 
@@ -1581,8 +1599,8 @@ export component MainWindow inherits Window {
                             pkg: p;
                             show-separator: i < flatpak-update-packages.length - 1;
                             show-checkbox: false;
-                            show-action-button: false;
-                            install => { }
+                            show-action-button: true;
+                            install => { root.request-update(p.name, p.backend); }
                             remove => { }
                         }
                     }
@@ -4479,6 +4497,102 @@ export component MainWindow inherits Window {
               } // end inner VerticalLayout
             } // end view 12 Rectangle
 
+            // ─── View 13: Arch News RSS ───────────────────────────────────────
+            if view == 13: VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 0px;
+
+                if arch-news-loading && arch-news-items.length == 0: VerticalLayout {
+                    vertical-stretch: 1;
+                    alignment: center;
+                    spacing: 14px;
+                    Spinner { indeterminate: true; width: 28px; height: 28px; }
+                    Text { text: "Fetching Arch news..."; font-size: 14px; color: Cat.overlay0; horizontal-alignment: center; }
+                }
+
+                if !arch-news-loading && arch-news-items.length == 0: VerticalLayout {
+                    vertical-stretch: 1;
+                    alignment: center;
+                    Text { text: "No news loaded. Press Refresh."; font-size: 14px; color: Cat.overlay0; horizontal-alignment: center; }
+                }
+
+                if arch-news-items.length > 0: ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 12px;
+                        alignment: start;
+
+                        for item[i] in arch-news-items: Rectangle {
+                            border-radius: 10px;
+                            background: Cat.surface0.with-alpha(0.45);
+                            border-width: 1px;
+                            border-color: Cat.surface1.with-alpha(0.6);
+
+                            VerticalLayout {
+                                padding-left: 18px; padding-right: 18px;
+                                padding-top: 14px; padding-bottom: 14px;
+                                spacing: 6px;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: item.title;
+                                        font-size: 15px; font-weight: 700;
+                                        color: Cat.text;
+                                        wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+
+                                Text {
+                                    text: item.date;
+                                    font-size: 12px;
+                                    color: Cat.overlay0;
+                                }
+
+                                if item.summary != "": Rectangle {
+                                    height: 1px;
+                                    background: Cat.surface1.with-alpha(0.5);
+                                }
+
+                                if item.summary != "": Text {
+                                    text: item.summary;
+                                    font-size: 13px;
+                                    color: Cat.subtext0;
+                                    wrap: word-wrap;
+                                }
+
+                                if item.link != "": HorizontalLayout {
+                                    alignment: end;
+                                    Rectangle {
+                                        width: news-link-lbl.preferred-width + 20px;
+                                        height: 26px;
+                                        border-radius: 6px;
+                                        background: news-link-ta.has-hover ? Cat.blue.with-alpha(0.18) : Cat.blue.with-alpha(0.08);
+                                        border-width: 1px;
+                                        border-color: Cat.blue.with-alpha(0.3);
+                                        animate background { duration: 60ms; }
+                                        news-link-lbl := Text {
+                                            text: "Read more";
+                                            font-size: 12px; font-weight: 600;
+                                            color: Cat.blue;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        news-link-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.open-url(item.link); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // ─── View 11: Troubleshooting ─────────────────────────────────────
             if view == 11: VerticalLayout {
                 vertical-stretch: 1;
@@ -4833,6 +4947,39 @@ export component MainWindow inherits Window {
                     spacing: 20px;
                     alignment: start;
 
+                    // AUR info pill — centered, width = content
+                    HorizontalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: aur-pill-text.preferred-width + 15px + 8px + 24px;
+                            border-radius: 8px;
+                            background: Cat.yellow.with-alpha(0.08);
+                            border-width: 1px;
+                            border-color: Cat.yellow.with-alpha(0.35);
+
+                            HorizontalLayout {
+                                padding-left: 12px; padding-right: 12px;
+                                padding-top: 9px; padding-bottom: 9px;
+                                spacing: 8px;
+
+                                VerticalLayout { alignment: center;
+                                    NavIcon {
+                                        d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
+                                        icon-color: Cat.yellow;
+                                        width: 15px; height: 15px;
+                                    }
+                                }
+
+                                aur-pill-text := Text {
+                                    text: "A.U.R support disabled for stability purposes. Use the included Chaotic-AUR for pre-built packages. Install missing ones via `paru packagename` in Terminal.";
+                                    font-size: 13px;
+                                    color: Cat.yellow;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
                     // Stat cards
                     VerticalLayout {
                         spacing: 8px;
@@ -5102,7 +5249,7 @@ export component MainWindow inherits Window {
                                         }
 
                                         Text {
-                                            text: "xpm  —  sysinfo";
+                                            text: "System Info";
                                             font-size: 12px; font-family: "monospace";
                                             color: Cat.overlay0;
                                             horizontal-alignment: center;
@@ -6304,9 +6451,8 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // ⚠ Scary warning banner
+                // ⚠ Scary warning banner — no fixed height, auto-sizes to wrapped text
                 Rectangle {
-                    height: 56px;
                     background: Cat.red.with-alpha(0.07);
                     border-width: 0;
 
@@ -7079,7 +7225,7 @@ export component MainWindow inherits Window {
                     border-color: terminal-success ? Cat.green.with-alpha(0.15) : Cat.red.with-alpha(0.15);
 
                     HorizontalLayout {
-                        padding-left: 14px; padding-right: 8px; spacing: 8px; alignment: center;
+                        padding-left: 14px; padding-right: 14px; spacing: 10px;
 
                         VerticalLayout { alignment: center;
                             NavIcon {
@@ -7101,26 +7247,149 @@ export component MainWindow inherits Window {
                         }
 
                         // Reboot — only on successful upgrade
-                        if terminal-is-upgrade && terminal-success: Rectangle {
-                            width: 80px; height: 32px; border-radius: 7px;
-                            background: reboot-ta.has-hover ? Cat.peach.with-alpha(0.28) : Cat.peach.with-alpha(0.14);
-                            border-width: 1px; border-color: Cat.peach.with-alpha(0.4);
-                            animate background { duration: 60ms; }
-                            VerticalLayout { alignment: center;
-                                Text { text: "Reboot"; font-size: 15px; font-weight: 700; color: Cat.peach; horizontal-alignment: center; }
+                        if terminal-is-upgrade && terminal-success: VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 80px; height: 32px; border-radius: 7px;
+                                background: reboot-ta.has-hover ? Cat.peach.with-alpha(0.28) : Cat.peach.with-alpha(0.14);
+                                border-width: 1px; border-color: Cat.peach.with-alpha(0.4);
+                                animate background { duration: 60ms; }
+                                VerticalLayout { alignment: center;
+                                    Text { text: "Reboot"; font-size: 15px; font-weight: 700; color: Cat.peach; horizontal-alignment: center; }
+                                }
+                                reboot-ta := TouchArea { mouse-cursor: pointer; clicked => { root.terminal-reboot(); } }
                             }
-                            reboot-ta := TouchArea { mouse-cursor: pointer; clicked => { root.terminal-reboot(); } }
                         }
 
                         // OK / Close button
-                        Rectangle {
-                            width: 60px; height: 32px; border-radius: 7px;
-                            background: ok-done-ta.has-hover ? Cat.surface1 : Cat.surface0;
-                            animate background { duration: 60ms; }
-                            VerticalLayout { alignment: center;
-                                Text { text: "OK"; font-size: 15px; font-weight: 700; color: Cat.subtext0; horizontal-alignment: center; }
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 60px; height: 32px; border-radius: 7px;
+                                background: ok-done-ta.has-hover ? Cat.surface1 : Cat.surface0;
+                                animate background { duration: 60ms; }
+                                VerticalLayout { alignment: center;
+                                    Text { text: "OK"; font-size: 15px; font-weight: 700; color: Cat.subtext0; horizontal-alignment: center; }
+                                }
+                                ok-done-ta := TouchArea { mouse-cursor: pointer; clicked => { root.terminal-close(); } }
                             }
-                            ok-done-ta := TouchArea { mouse-cursor: pointer; clicked => { root.terminal-close(); } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Distro warning dialog ──────────────────────────────────────────────────
+    if show-distro-warning: Rectangle {
+        width: 100%; height: 100%;
+        background: #000000.with-alpha(0.72);
+        TouchArea {}
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(500px, parent.width - 48px);
+            border-radius: 14px;
+            background: #1a0a0a;
+            border-width: 2px;
+            border-color: Cat.red.with-alpha(0.7);
+            drop-shadow-blur: 40px;
+            drop-shadow-color: Cat.red.with-alpha(0.35);
+            drop-shadow-offset-y: 8px;
+
+            VerticalLayout {
+                padding: 28px;
+                spacing: 16px;
+
+                // Red top stripe
+                Rectangle {
+                    height: 4px;
+                    border-radius: 2px;
+                    background: @linear-gradient(90deg, Cat.red, Cat.red.with-alpha(0.3));
+                }
+
+                // Header
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout { alignment: center;
+                        NavIcon {
+                            d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
+                            icon-color: Cat.red;
+                            width: 24px; height: 24px;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "⚠  UNSUPPORTED DISTRIBUTION";
+                            font-size: 16px; font-weight: 800;
+                            color: Cat.red;
+                            letter-spacing: 0.5px;
+                        }
+                    }
+                }
+
+                // Divider
+                Rectangle { height: 1px; background: Cat.red.with-alpha(0.25); }
+
+                // Body
+                Text {
+                    text: "This application was built specifically for XeroLinux.\n\nUsing it on any other Arch-based distribution is entirely at your own risk. No support, warranty, or guarantees of any kind are provided. Functionality may be incomplete or incorrect on unsupported systems.";
+                    font-size: 14px;
+                    color: #e8c8c8;
+                    wrap: word-wrap;
+                }
+
+                // Divider
+                Rectangle { height: 1px; background: Cat.red.with-alpha(0.25); }
+
+                // Buttons
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: end;
+
+                    // Source code link
+                    Rectangle {
+                        width: src-lbl.preferred-width + 24px;
+                        height: 34px;
+                        border-radius: 8px;
+                        background: src-ta.has-hover ? Cat.blue.with-alpha(0.22) : Cat.blue.with-alpha(0.1);
+                        border-width: 1px;
+                        border-color: Cat.blue.with-alpha(0.4);
+                        animate background { duration: 60ms; }
+                        src-lbl := Text {
+                            text: "View Source";
+                            font-size: 13px; font-weight: 600;
+                            color: Cat.blue;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        src-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.open-url("https://github.com/xerolinux/xPackageManager"); }
+                        }
+                    }
+
+                    // Dismiss
+                    Rectangle {
+                        width: ack-lbl.preferred-width + 24px;
+                        height: 34px;
+                        border-radius: 8px;
+                        background: ack-ta.has-hover ? Cat.red.with-alpha(0.35) : Cat.red.with-alpha(0.18);
+                        border-width: 1px;
+                        border-color: Cat.red.with-alpha(0.55);
+                        animate background { duration: 60ms; }
+                        ack-lbl := Text {
+                            text: "I Understand, Proceed";
+                            font-size: 13px; font-weight: 700;
+                            color: Cat.red;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        ack-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.show-distro-warning = false; }
                         }
                     }
                 }

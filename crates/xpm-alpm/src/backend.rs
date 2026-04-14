@@ -13,9 +13,6 @@ use xpm_core::{
     source::{PackageSource, ProgressCallback},
 };
 
-const DEFAULT_ROOT: &str = "/";
-const DEFAULT_DBPATH: &str = "/var/lib/pacman";
-
 #[derive(Debug, Clone)]
 pub struct AlpmConfig {
     pub root: String,
@@ -29,16 +26,68 @@ pub struct AlpmConfig {
 impl Default for AlpmConfig {
     fn default() -> Self {
         Self {
-            root: DEFAULT_ROOT.to_string(),
-            dbpath: DEFAULT_DBPATH.to_string(),
-            cache_dirs: vec!["/var/cache/pacman/pkg".to_string()],
+            root: "/".to_string(),
+            dbpath: "/var/lib/pacman".to_string(),
+            cache_dirs: vec!["/var/cache/pacman/pkg/".to_string()],
             hook_dirs: vec![
-                "/etc/pacman.d/hooks".to_string(),
-                "/usr/share/libalpm/hooks".to_string(),
+                "/etc/pacman.d/hooks/".to_string(),
+                "/usr/share/libalpm/hooks/".to_string(),
             ],
-            gpgdir: "/etc/pacman.d/gnupg".to_string(),
+            gpgdir: "/etc/pacman.d/gnupg/".to_string(),
             logfile: "/var/log/pacman.log".to_string(),
         }
+    }
+}
+
+impl AlpmConfig {
+    /// Build config by reading /etc/pacman.conf [options] section.
+    /// Falls back to compiled-in defaults for any key not present.
+    pub fn from_pacman_conf() -> Self {
+        let mut cfg = Self::default();
+        let content = match std::fs::read_to_string("/etc/pacman.conf") {
+            Ok(c) => c,
+            Err(_) => return cfg,
+        };
+
+        let mut in_options = false;
+        let mut cache_dirs: Vec<String> = Vec::new();
+        let mut hook_dirs: Vec<String> = Vec::new();
+
+        for line in content.lines() {
+            let t = line.trim();
+            if t.starts_with('#') || t.is_empty() { continue; }
+
+            if t.starts_with('[') && t.ends_with(']') {
+                in_options = &t[1..t.len() - 1] == "options";
+                continue;
+            }
+
+            if !in_options { continue; }
+
+            if let Some((key, val)) = t.split_once('=') {
+                let key = key.trim();
+                let val = val.trim().to_string();
+                match key {
+                    "RootDir"  => cfg.root   = val,
+                    "DBPath"   => cfg.dbpath  = val,
+                    "CacheDir" => cache_dirs.push(val),
+                    "HookDir"  => hook_dirs.push(val),
+                    "GPGDir"   => cfg.gpgdir  = val,
+                    "LogFile"  => cfg.logfile  = val,
+                    _ => {}
+                }
+            }
+        }
+
+        if !cache_dirs.is_empty() { cfg.cache_dirs = cache_dirs; }
+        if !hook_dirs.is_empty()  {
+            // Always keep the system hooks dir; add conf-specified ones
+            cfg.hook_dirs = hook_dirs;
+            cfg.hook_dirs.push("/usr/share/libalpm/hooks/".to_string());
+            cfg.hook_dirs.dedup();
+        }
+
+        cfg
     }
 }
 
@@ -51,9 +100,26 @@ pub struct AlpmBackend {
 unsafe impl Send for AlpmBackend {}
 unsafe impl Sync for AlpmBackend {}
 
+/// Read sync repo names from /etc/pacman.conf — skips [options] section.
+fn read_pacman_repos() -> Vec<String> {
+    let content = std::fs::read_to_string("/etc/pacman.conf").unwrap_or_default();
+    content
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            if t.starts_with('[') && t.ends_with(']') {
+                let name = &t[1..t.len() - 1];
+                if name != "options" { Some(name.to_string()) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 impl AlpmBackend {
     pub fn new() -> Result<Self> {
-        Self::with_config(AlpmConfig::default())
+        Self::with_config(AlpmConfig::from_pacman_conf())
     }
 
     pub fn with_config(config: AlpmConfig) -> Result<Self> {
@@ -95,8 +161,8 @@ impl PackageSource for AlpmBackend {
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
-            for repo in ["core", "extra", "multilib", "xerolinux", "chaotic-aur"] {
-                handle.register_syncdb(repo, siglevel).ok();
+            for repo in read_pacman_repos() {
+                handle.register_syncdb(repo.as_str(), siglevel).ok();
             }
 
             let mut results = Vec::new();
@@ -199,22 +265,8 @@ impl PackageSource for AlpmBackend {
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
-            let arch = "x86_64";
-            for repo in ["core", "extra", "multilib", "xerolinux", "chaotic-aur"] {
-                if let Ok(db) = handle.register_syncdb_mut(repo, siglevel) {
-                    match repo {
-                        "core" | "extra" | "multilib" => {
-                            db.add_server(format!("https://geo.mirror.pkgbuild.com/{}/os/{}", repo, arch)).ok();
-                        }
-                        "chaotic-aur" => {
-                            db.add_server(format!("https://geo-mirror.chaotic.cx/{}/{}", repo, arch)).ok();
-                        }
-                        "xerolinux" => {
-                            db.add_server(format!("https://repos.xerolinux.xyz/{}/{}", repo, arch)).ok();
-                        }
-                        _ => {}
-                    }
-                }
+            for repo in read_pacman_repos() {
+                handle.register_syncdb_mut(repo.as_str(), siglevel).ok();
             }
 
             if let Err(e) = handle.syncdbs_mut().update(false) {
@@ -263,8 +315,8 @@ impl PackageSource for AlpmBackend {
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
-            for repo in ["core", "extra", "multilib", "xerolinux", "chaotic-aur"] {
-                handle.register_syncdb(repo, siglevel).ok();
+            for repo in read_pacman_repos() {
+                handle.register_syncdb(repo.as_str(), siglevel).ok();
             }
 
             // try local db first, fall back to sync dbs
