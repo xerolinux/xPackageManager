@@ -92,15 +92,17 @@ sudo pacman -S rust cargo flatpak alpm
 
 ### Run
 
-Keep in mind that this requires you to be on **XeroLinux**. If you are a dev, you know how to get rid of that ;)
+Keep in mind that this requires you to be on **XeroLinux** for better funcionality. If you are on another Distro you are on your own ;)
+
+### Install
+
+- **Add XeroLinux Repo** (Other Distro)
 
 ```bash
-git clone https://github.com/xerolinux/xPackageManager
-cd xPackageManager
-cargo run --release --bin xpackagemanager
+echo -e '\n[xerolinux]\nSigLevel = Optional TrustAll\nServer = https://repos.xerolinux.xyz/$repo/$arch' | sudo tee -a /etc/pacman.conf
 ```
 
-### Install (XeroLinux)
+- **Install App**
 
 ```bash
 sudo pacman -Syy xpm-gui
