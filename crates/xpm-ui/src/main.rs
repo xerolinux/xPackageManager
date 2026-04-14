@@ -20,16 +20,19 @@ use xpm_alpm::AlpmBackend;
 use xpm_core::source::PackageSource;
 use xpm_flatpak::FlatpakBackend;
 use ksni::TrayMethods;
+use notify_rust::{Notification, Timeout};
 
 slint::include_modules!();
 
 // ─── System tray ──────────────────────────────────────────────────────────────
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 struct XpmTray {
     window: slint::Weak<MainWindow>,
     update_count: Arc<AtomicU32>,
+    /// Fire () into this to trigger a manual check-and-notify.
+    check_tx: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 impl ksni::Tray for XpmTray {
@@ -47,7 +50,19 @@ impl ksni::Tray for XpmTray {
     }
 
     fn icon_name(&self) -> String {
+        // Fallback for DEs that don't support icon_pixmap.
         "system-software-install".into()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        let count = self.update_count.load(Ordering::Relaxed);
+        // make_tray_icon returns 32×32 RGBA; ksni needs ARGB32 (rotate each
+        // pixel's bytes right by 1: [R,G,B,A] → [A,R,G,B]).
+        let mut data = make_tray_icon(count);
+        for p in data.chunks_exact_mut(4) {
+            p.rotate_right(1);
+        }
+        vec![ksni::Icon { width: 32, height: 32, data }]
     }
 
     fn status(&self) -> ksni::Status {
@@ -93,8 +108,9 @@ impl ksni::Tray for XpmTray {
         };
 
         let win_launch = self.window.clone();
-        let win_check  = self.window.clone();
         let win_update = self.window.clone();
+        // Fires into the background check task — no pkexec/password needed.
+        let check_tx = self.check_tx.clone();
 
         vec![
             StandardItem {
@@ -113,10 +129,9 @@ impl ksni::Tray for XpmTray {
                 label: "Check for Updates".into(),
                 icon_name: "update-none".into(),
                 activate: Box::new(move |_: &mut Self| {
-                    let w = win_check.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(win) = w.upgrade() { win.invoke_sync_databases(); }
-                    }).ok();
+                    // Signal the background handler — runs check_update_count()
+                    // then sends a desktop notification. No password prompt.
+                    check_tx.send(()).ok();
                 }),
                 ..Default::default()
             }.into(),
@@ -167,6 +182,168 @@ fn check_update_count() -> u32 {
     native + flatpak
 }
 
+// ─── Tray icon badge renderer ─────────────────────────────────────────────────
+
+/// 3×5 pixel bitmaps for '0'–'9' (index 0–9) and '+' (index 10).
+/// Each row: 3 bits — bit 2 = left col, bit 0 = right col.
+const DIGITS_3X5: [[u8; 5]; 11] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111], // 0
+    [0b010, 0b110, 0b010, 0b010, 0b111], // 1
+    [0b111, 0b001, 0b011, 0b100, 0b111], // 2
+    [0b111, 0b001, 0b011, 0b001, 0b111], // 3
+    [0b101, 0b101, 0b111, 0b001, 0b001], // 4
+    [0b111, 0b100, 0b111, 0b001, 0b111], // 5
+    [0b111, 0b100, 0b111, 0b101, 0b111], // 6
+    [0b111, 0b001, 0b010, 0b010, 0b010], // 7
+    [0b111, 0b101, 0b111, 0b101, 0b111], // 8
+    [0b111, 0b101, 0b111, 0b001, 0b111], // 9
+    [0b000, 0b010, 0b111, 0b010, 0b000], // +
+];
+
+/// Decoded 32×32 RGBA base icon, initialised once from the embedded PNG.
+static BASE_ICON_32: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+fn get_base_icon_32() -> &'static [u8] {
+    BASE_ICON_32.get_or_init(|| {
+        const PNG: &[u8] = include_bytes!("../../../packaging/xPM.png");
+        let img = image::load_from_memory(PNG)
+            .unwrap_or_else(|_| image::DynamicImage::new_rgba8(32, 32));
+        img.resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
+            .to_rgba8()
+            .into_raw()
+    })
+}
+
+/// Return a 32×32 RGBA image of the app icon with a red count badge in the
+/// top-right corner when `count > 0`.
+fn make_tray_icon(count: u32) -> Vec<u8> {
+    let mut buf = get_base_icon_32().to_vec();
+    if count == 0 {
+        return buf;
+    }
+
+    // For 1-digit or 2-digit counts use 2× scale; "99+" uses 1× scale.
+    let (chars, scale): (Vec<usize>, usize) = if count <= 9 {
+        (vec![count as usize], 2)
+    } else if count <= 99 {
+        (vec![(count / 10) as usize, (count % 10) as usize], 2)
+    } else {
+        (vec![9, 9, 10], 1) // "99+"
+    };
+
+    let char_w = 3 * scale;
+    let gap    = scale.max(1);
+    let n      = chars.len();
+    let text_w = n * char_w + n.saturating_sub(1) * gap;
+    let text_h = 5 * scale;
+    let pad    = 2usize;
+    let bw     = text_w + pad * 2;
+    let bh     = text_h + pad * 2;
+    let bx     = 32usize.saturating_sub(bw); // align to top-right
+    let by     = 0usize;
+    const IW: usize = 32;
+    const IH: usize = 32;
+
+    // Draw red badge background (rounded corners = skip 1-px corners)
+    for dy in 0..bh {
+        for dx in 0..bw {
+            if (dy == 0 || dy == bh - 1) && (dx == 0 || dx == bw - 1) {
+                continue;
+            }
+            let px = bx + dx;
+            let py = by + dy;
+            if px < IW && py < IH {
+                let i = (py * IW + px) * 4;
+                buf[i]     = 220; // R
+                buf[i + 1] = 45;  // G
+                buf[i + 2] = 45;  // B
+                buf[i + 3] = 255; // A
+            }
+        }
+    }
+
+    // Draw white digit pixels
+    let mut cx = bx + pad;
+    let ty = by + pad;
+    for &ch in &chars {
+        let bitmap = DIGITS_3X5[ch];
+        for (row, &bits) in bitmap.iter().enumerate() {
+            for col in 0..3usize {
+                if (bits >> (2 - col)) & 1 == 1 {
+                    for sy in 0..scale {
+                        for sx in 0..scale {
+                            let px = cx + col * scale + sx;
+                            let py = ty + row * scale + sy;
+                            if px < IW && py < IH {
+                                let i = (py * IW + px) * 4;
+                                buf[i]     = 255;
+                                buf[i + 1] = 255;
+                                buf[i + 2] = 255;
+                                buf[i + 3] = 255;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cx += char_w + gap;
+    }
+
+    buf
+}
+
+// ─── End tray icon renderer ───────────────────────────────────────────────────
+
+/// Show a desktop notification with the update count.
+/// When n == 0, shows "up to date". When n > 0, shows an "Update Now" action
+/// that opens the app and navigates to the Updates page (view 1).
+/// Blocking — meant to be called from tokio::task::spawn_blocking.
+fn send_update_notification(n: u32, window: slint::Weak<MainWindow>) {
+    if n == 0 {
+        Notification::new()
+            .summary("System is up to date")
+            .body("No updates available.")
+            .icon("system-software-install")
+            .timeout(Timeout::Milliseconds(5000))
+            .show()
+            .ok();
+        return;
+    }
+
+    let body = format!(
+        "{} update{} available (native + flatpak)",
+        n,
+        if n == 1 { "" } else { "s" }
+    );
+    let result = Notification::new()
+        .summary("Updates Available")
+        .body(&body)
+        .icon("system-software-update")
+        // Keep notification visible until user acts on it.
+        .timeout(Timeout::Never)
+        .action("update", "Update Now")
+        .show();
+
+    match result {
+        Ok(handle) => {
+            handle.wait_for_action(|action_id| {
+                if action_id == "update" {
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(win) = window.upgrade() {
+                            let _ = win.show();
+                            win.set_view(1); // Updates page
+                        }
+                    })
+                    .ok();
+                }
+            });
+        }
+        Err(e) => {
+            warn!("Failed to send update notification: {}", e);
+        }
+    }
+}
+
 /// Create or remove the autostart .desktop entry.
 fn set_autostart(enabled: bool) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
@@ -176,10 +353,12 @@ fn set_autostart(enabled: bool) {
     if enabled {
         let exe = std::env::current_exe()
             .unwrap_or_else(|_| Path::new("/usr/bin/xpackagemanager").to_path_buf());
+        // --tray: start as tray-only (no window on login)
         let content = format!(
-            "[Desktop Entry]\nType=Application\nName=XeroLinux Package Manager\n\
-             Comment=Native & Flatpak package management GUI\nExec={}\n\
-             Icon=system-software-install\nStartupNotify=false\nTerminal=false\n",
+            "[Desktop Entry]\nType=Application\nName=xPackageManager Tray\n\
+             Comment=xPackageManager update notifier\nExec={} --tray\n\
+             Icon=xpackagemanager\nStartupNotify=false\nTerminal=false\n\
+             X-KDE-autostart-after=panel\n",
             exe.display()
         );
         if std::fs::create_dir_all(&autostart_dir).is_ok() {
@@ -202,24 +381,59 @@ fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, inte
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime for tray");
         rt.block_on(async move {
             let update_count = Arc::new(AtomicU32::new(0));
-            let tray = XpmTray { window, update_count: update_count.clone() };
+            let (check_tx, mut check_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let tray = XpmTray {
+                window: window.clone(),
+                update_count: update_count.clone(),
+                check_tx,
+            };
 
             match tray.spawn().await {
                 Ok(handle) => {
                     info!("System tray started");
 
-                    // Periodic update checker
-                    let handle_checker = handle.clone();
-                    let count_ref = update_count.clone();
+                    // ── Manual "Check for Updates" handler ───────────────────
+                    // Receives () when the tray menu item is clicked, runs a
+                    // silent check (no root), updates the icon, sends a
+                    // desktop notification.
+                    let handle_manual = handle.clone();
+                    let count_manual  = update_count.clone();
+                    let window_manual = window.clone();
+                    tokio::spawn(async move {
+                        while check_rx.recv().await.is_some() {
+                            let n = tokio::task::spawn_blocking(check_update_count)
+                                .await
+                                .unwrap_or(0);
+                            count_manual.store(n, Ordering::Relaxed);
+                            handle_manual.update(|_| {}).await;
+                            let w = window_manual.clone();
+                            tokio::task::spawn_blocking(move || send_update_notification(n, w))
+                                .await
+                                .ok();
+                        }
+                    });
+
+                    // ── Periodic update checker ───────────────────────────────
+                    // Notifies the user only when updates are newly detected
+                    // (transition from 0 → n>0) to avoid spamming every cycle.
+                    let handle_checker  = handle.clone();
+                    let count_ref       = update_count.clone();
+                    let window_periodic = window.clone();
                     tokio::spawn(async move {
                         loop {
                             tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
                             let n = tokio::task::spawn_blocking(check_update_count)
                                 .await
                                 .unwrap_or(0);
-                            count_ref.store(n, Ordering::Relaxed);
-                            // Trigger tray re-read of title/tooltip/status
+                            let old = count_ref.swap(n, Ordering::Relaxed);
                             handle_checker.update(|_| {}).await;
+                            // Notify only when updates are newly available.
+                            if n > 0 && old == 0 {
+                                let w = window_periodic.clone();
+                                tokio::task::spawn_blocking(move || send_update_notification(n, w))
+                                    .await
+                                    .ok();
+                            }
                         }
                     });
 
@@ -2143,8 +2357,15 @@ fn main() {
     info!("Starting xPackageManager");
 
     let args: Vec<String> = std::env::args().collect();
-    let local_package_path = args.get(1).filter(|arg| is_arch_package(arg)).cloned();
+    // --tray: launched by autostart, run as tray-only daemon (no window shown).
+    let tray_only = args.iter().any(|a| a == "--tray");
+    let local_package_path = args.iter().skip(1)
+        .find(|arg| is_arch_package(arg.as_str()))
+        .cloned();
 
+    if tray_only {
+        info!("Starting in tray-only mode");
+    }
     if let Some(ref path) = local_package_path {
         info!("Opening local package: {}", path);
     }
@@ -4412,15 +4633,26 @@ fn main() {
     let tray_shutdown: TrayShutdown = Arc::new(Mutex::new(None));
     let tray_shutdown_toggle = tray_shutdown.clone();
 
+    // In --tray mode the tray is always considered enabled so the close handler
+    // hides instead of quitting.
+    let effective_tray = config.tray_enabled || tray_only;
+
+    // Shared flag so the close handler knows whether to quit or just hide.
+    let tray_enabled_flag = Arc::new(AtomicBool::new(effective_tray));
+    let tray_flag_toggle = tray_enabled_flag.clone();
+    let tray_flag_close  = tray_enabled_flag.clone();
+
     window.set_setting_tray_enabled(config.tray_enabled);
     window.set_setting_tray_check_interval(config.tray_check_interval_minutes as i32);
-    if config.tray_enabled {
+    // Start tray if enabled in settings OR if launched with --tray.
+    if effective_tray {
         let interval_secs = (config.tray_check_interval_minutes as u64) * 60;
         start_tray(window.as_weak(), tray_shutdown.clone(), interval_secs);
     }
 
     let window_weak_tray = window.as_weak();
     window.on_toggle_tray_enabled(move |enabled| {
+        tray_flag_toggle.store(enabled, Ordering::Relaxed);
         if let Some(win) = window_weak_tray.upgrade() {
             let interval_secs = (win.get_setting_tray_check_interval() as u64) * 60;
             if enabled {
@@ -4433,12 +4665,31 @@ fn main() {
         }
     });
 
+    // When the user closes the window while the tray is active, hide it instead
+    // of quitting so the app keeps running in the system tray.
+    // When the tray is disabled, close the window normally (quit event loop).
+    window.window().on_close_requested(move || {
+        if tray_flag_close.load(Ordering::Relaxed) {
+            // Tray is alive — just hide; run_event_loop_until_quit keeps running.
+            slint::CloseRequestResponse::HideWindow
+        } else {
+            // No tray — user wants to quit the app.
+            slint::quit_event_loop().ok();
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
+
     if !is_xerolinux() {
         window.set_show_distro_warning(true);
     }
 
-    info!("Running application");
-    window.run().expect("Failed to run application");
+    info!("Running application (tray_only={})", tray_only);
+    // In --tray mode skip showing the window — tray icon is the only entry point.
+    // run_event_loop_until_quit keeps the process alive even with no visible windows.
+    if !tray_only {
+        window.show().expect("Failed to show window");
+    }
+    slint::run_event_loop_until_quit().expect("Failed to run application");
     // Background threads may still be alive when Slint's Qt backend tears down
     // its thread-local storage, producing QThreadStorage warnings. Exit immediately
     // so the process terminates cleanly instead of unwinding through Qt's cleanup.

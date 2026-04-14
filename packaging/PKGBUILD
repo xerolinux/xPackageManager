@@ -1,6 +1,6 @@
 # Maintainer: Your Name <your.email@example.com>
 pkgname=xpm-gui
-pkgver=0.2.3
+pkgver=0.2.5
 pkgrel=1
 pkgdesc="A modern package manager for Arch Linux supporting pacman and Flatpak"
 arch=('x86_64')
@@ -53,6 +53,9 @@ package() {
     # Install desktop file
     install -Dm644 "packaging/xpackagemanager.desktop" "$pkgdir/usr/share/applications/xpackagemanager.desktop"
 
+    # Install app icon (hicolor theme, 512×512)
+    install -Dm644 "packaging/xPM.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/xpackagemanager.png"
+
     # Install MIME type for .pkg.tar.zst files
     install -Dm644 "packaging/x-alpm-package.xml" "$pkgdir/usr/share/mime/packages/x-alpm-package.xml"
 
@@ -68,6 +71,8 @@ post_install() {
     update-mime-database /usr/share/mime &>/dev/null || true
     # Update desktop database
     update-desktop-database -q || true
+    # Rebuild icon cache so KDE/GTK pick up the new icon
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor &>/dev/null || true
 }
 
 post_upgrade() {
