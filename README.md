@@ -1,6 +1,6 @@
 # xPackageManager
 
-A modern, dual-backend package manager for Arch Linux — manages both **pacman** (via libalpm) and **Flatpak** applications from a single interface, built with Rust and the [Slint](https://slint.dev) UI framework.
+A modern, dual-backend package manager for Arch Linux — manages both **pacman** (via libalpm) and **Flatpak** applications from a single interface, built with Rust and the [Slint](https://slint.dev) UI framework. Does **NOT** support the **A.U.R**, simply because on **XeroLinux** we have the **Chaotic-AUR** repo enabled which already includes pre-compiled AUR packages.
 
 <img width="1128" height="774" alt="image" src="Screenshot.png" />
 
