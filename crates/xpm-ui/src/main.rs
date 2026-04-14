@@ -2094,19 +2094,23 @@ fn strip_html(html: &str) -> String {
 }
 
 fn main() {
-    // Force Qt to use KDE platform theme for proper system color integration.
-    // This must be set BEFORE Qt initializes (Slint backend-qt reads this on startup).
-    // When launched from desktop file/dock, the KDE session env may not propagate.
-    std::env::set_var("QT_QPA_PLATFORMTHEME", "kde");
+    // Ensure Qt can find its plugins and libraries
+    // This helps when the app is installed to /usr/bin vs run from build dir
     
-    // Also ensure Qt knows this is a KDE session for proper theme detection
-    if std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().is_empty() {
-        std::env::set_var("XDG_CURRENT_DESKTOP", "KDE");
+    // Plugin path for Qt style/platform theme plugins
+    if std::env::var("QT_PLUGIN_PATH").map(|p| p.is_empty()).unwrap_or(true) {
+        std::env::set_var("QT_PLUGIN_PATH", "/usr/lib/qt6/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins");
     }
     
-    // Some Qt apps check KDE_FULL_SESSION to enable KDE-specific features
-    if std::env::var("KDE_FULL_SESSION").is_err() {
-        std::env::set_var("KDE_FULL_SESSION", "true");
+    // Library path for Qt plugins that are loaded via QLibrary
+    let current_path = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    if !current_path.contains("/usr/lib/qt6") {
+        let new_path = if current_path.is_empty() {
+            "/usr/lib/qt6:/usr/lib/x86_64-linux-gnu/qt6".to_string()
+        } else {
+            format!("{}:/usr/lib/qt6:/usr/lib/x86_64-linux-gnu/qt6", current_path)
+        };
+        std::env::set_var("LD_LIBRARY_PATH", new_path);
     }
 
     let subscriber = FmtSubscriber::builder()
@@ -2114,7 +2118,7 @@ fn main() {
     .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
-    info!("Starting xPackageManager (QT_QPA_PLATFORMTHEME={:?})", std::env::var("QT_QPA_PLATFORMTHEME"));
+    info!("Starting xPackageManager");
 
     let args: Vec<String> = std::env::args().collect();
     let local_package_path = args.get(1).filter(|arg| is_arch_package(arg)).cloned();
