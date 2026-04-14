@@ -108,25 +108,9 @@ echo -e '\n[xerolinux]\nSigLevel = Optional TrustAll\nServer = https://repos.xer
 sudo pacman -Syy xpm-gui
 ```
 
-### Future Plans
+### To Do
 
-- [X] Parallel Downloads
-- [X] Remove universal search
-- [X] Explicitly installed packages
-- [X] Clean up GUI elements and text
 - [ ] Make Terminal output more verbose
-- [X] Fix Fullscreen UI design it looks bad
-- [X] Fix export packagelist option in settings
-- [X] Remove update check interval we do not need it
-- [X] Fix Orphaned packages to have a warning and checklist
-- [X] Add a search bar under installed for both flatpaks n Nartive
-- [X] Sync n update button label sholuld be just check for updates
-- [X] For flatpaks need an indicator for apps that include add-ons
-- [X] Add app-tray icon with : Launch App / Trouble shooting options
-- [X] Add pacman troubleshooting stuff under troubleshooting section
-- [X] Add confirmation after updates are installed and a reboot button
-- [X] Add socials and Ko-Fi buttons in settings and some geeky decoration
-- [X] Add option in settings to enable/disable app tray icon with a checkbox
 
 ---
 

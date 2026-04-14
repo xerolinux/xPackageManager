@@ -60,6 +60,7 @@ export struct DepNode {
     is-optional: bool,
     prefix: string,
     is-root: bool,
+    installable: bool,
 }
 
 export struct ArchNewsItem {
@@ -965,6 +966,7 @@ export component MainWindow inherits Window {
     callback conflict-force-overwrite;
     callback conflict-cancel;
 
+    callback install-dep-package(string);
     callback clean-package-cache;
     callback load-orphan-list;
     in-out property <bool> show-orphan-dialog: false;
@@ -4393,8 +4395,31 @@ export component MainWindow inherits Window {
                                     }
                                 }
 
-                                // Version pill — 80px fits trimmed versions
+                                // Version pill / install button
                                 VerticalLayout {
+                                    alignment: center; width: 80px;
+                                    
+                                    if node.installable && !node.installed: dt-install-btn := Rectangle {
+                                        width: 76px; height: 24px;
+                                        border-radius: 6px;
+                                        background: dt-install-ta.has-hover ? Cat.green.with-alpha(0.25) : Cat.green.with-alpha(0.12);
+                                        border-width: 1px;
+                                        border-color: dt-install-ta.has-hover ? Cat.green.with-alpha(0.6) : Cat.green.with-alpha(0.3);
+                                        animate background, border-color { duration: 80ms; }
+                                        Text {
+                                            text: "Install";
+                                            font-size: 12px; font-weight: 700;
+                                            color: Cat.green;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                        dt-install-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.install-dep-package(node.name); }
+                                        }
+                                    }
+                                }
+                                
+                                if !(node.installable && !node.installed): VerticalLayout {
                                     alignment: center; width: 80px;
                                     Rectangle {
                                         height: 20px; border-radius: 5px;

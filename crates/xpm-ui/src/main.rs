@@ -665,6 +665,39 @@ fn resolve_dep_list(raw: Vec<String>) -> Vec<String> {
     result
 }
 
+/// Check if a package is available in repos (installable but not installed).
+fn is_installable(pkg_name: &str) -> bool {
+    let out = std::process::Command::new("pacman")
+        .args(["-Ss", pkg_name])
+        .output()
+        .ok();
+    match out {
+        Some(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.lines().any(|line| {
+                line.contains("/") && line.split_whitespace().next().map_or(false, |name| {
+                    name.ends_with(&format!("/{}/", pkg_name)) || name.ends_with(&format!("/{}", pkg_name))
+                })
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Batch check which packages are installable from repos.
+/// Returns a set of package names that are available but not installed.
+fn batch_installable_check(names: &[&str]) -> HashMap<String, bool> {
+    if names.is_empty() { return HashMap::new(); }
+    
+    let mut result: HashMap<String, bool> = HashMap::new();
+    
+    for name in names {
+        result.insert(name.to_string(), is_installable(name));
+    }
+    
+    result
+}
+
 /// Trim VCS/AUR version suffixes for display.
 /// "5.2.1+r604+g0b99615a8aef-1" → "5.2.1"
 /// "2.43+r5+g856c426a7534-1"   → "2.43"
@@ -848,6 +881,13 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
         .map(|n| n.as_str()).collect();
     let l2_map = batch_deps(&l1_installed);
 
+    // Collect all missing deps to check if they're installable
+    let missing_pkgs: Vec<&str> = all_l1.iter()
+        .filter(|n| !installed.contains_key(n.as_str()))
+        .map(|n| n.as_str())
+        .collect();
+    let installable_map = batch_installable_check(&missing_pkgs);
+
     let mut dep_nodes: Vec<DepNode> = Vec::new();
 
     // ── Hard (required) dependencies ────────────────────────────────────────
@@ -857,15 +897,18 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
         let is_last_l1 = idx == grand_total - 1; // last of ALL level-1 nodes
         let connector = if is_last_l1 && opt_deps.is_empty() { "└─ " } else { "├─ " };
         let ver = installed.get(dep_name.as_str()).map(|v| trim_version(v)).unwrap_or_default();
+        let is_installed = !ver.is_empty();
+        let installable = if !is_installed { *installable_map.get(dep_name.as_str()).unwrap_or(&false) } else { false };
 
         dep_nodes.push(DepNode {
             name: SharedString::from(dep_name.as_str()),
             version: SharedString::from(&ver),
             depth: 1,
-            installed: !ver.is_empty(),
+            installed: is_installed,
             is_optional: false,
             prefix: SharedString::from(connector),
             is_root: false,
+            installable,
         });
 
         if let Some(sub_deps) = l2_map.get(dep_name.as_str()) {
@@ -875,14 +918,17 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
             for (j, sub) in sub_deps.iter().enumerate() {
                 let sc = if j == nsub - 1 { "└─ " } else { "├─ " };
                 let sv = installed.get(sub.as_str()).map(|v| trim_version(v)).unwrap_or_default();
+                let sv_installed = !sv.is_empty();
+                let sv_installable = if !sv_installed { *installable_map.get(sub.as_str()).unwrap_or(&false) } else { false };
                 dep_nodes.push(DepNode {
                     name: SharedString::from(sub.as_str()),
                     version: SharedString::from(&sv),
                     depth: 2,
-                    installed: !sv.is_empty(),
+                    installed: sv_installed,
                     is_optional: false,
                     prefix: SharedString::from(format!("{}{}", parent_cont, sc)),
                     is_root: false,
+                    installable: sv_installable,
                 });
             }
         }
@@ -898,20 +944,24 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
             is_optional: true,
             prefix: SharedString::from(""),
             is_root: false,
+            installable: false,
         });
 
         let nopt = opt_deps.len();
         for (idx, dep_name) in opt_deps.iter().enumerate() {
             let connector = if idx == nopt - 1 { "└╌ " } else { "├╌ " };
             let ver = installed.get(dep_name.as_str()).map(|v| trim_version(v)).unwrap_or_default();
+            let is_installed = !ver.is_empty();
+            let installable = if !is_installed { *installable_map.get(dep_name.as_str()).unwrap_or(&false) } else { false };
             dep_nodes.push(DepNode {
                 name: SharedString::from(dep_name.as_str()),
                 version: SharedString::from(&ver),
                 depth: 1,
-                installed: !ver.is_empty(),
+                installed: is_installed,
                 is_optional: true,
                 prefix: SharedString::from(connector),
                 is_root: false,
+                installable,
             });
         }
     }
@@ -927,6 +977,7 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
             is_optional: false,
             prefix: SharedString::from(""),
             is_root: false,
+            installable: false,
         }
     }).collect();
 
@@ -2043,10 +2094,19 @@ fn strip_html(html: &str) -> String {
 }
 
 fn main() {
-    // Must be set before Qt initializes (Slint backend-qt reads this to load KDE platform theme,
-    // which gives Palette.* the correct Breeze Dark / system color values)
-    if std::env::var("QT_QPA_PLATFORMTHEME").is_err() {
-        std::env::set_var("QT_QPA_PLATFORMTHEME", "kde");
+    // Force Qt to use KDE platform theme for proper system color integration.
+    // This must be set BEFORE Qt initializes (Slint backend-qt reads this on startup).
+    // When launched from desktop file/dock, the KDE session env may not propagate.
+    std::env::set_var("QT_QPA_PLATFORMTHEME", "kde");
+    
+    // Also ensure Qt knows this is a KDE session for proper theme detection
+    if std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().is_empty() {
+        std::env::set_var("XDG_CURRENT_DESKTOP", "KDE");
+    }
+    
+    // Some Qt apps check KDE_FULL_SESSION to enable KDE-specific features
+    if std::env::var("KDE_FULL_SESSION").is_err() {
+        std::env::set_var("KDE_FULL_SESSION", "true");
     }
 
     let subscriber = FmtSubscriber::builder()
@@ -2054,7 +2114,7 @@ fn main() {
     .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
-    info!("Starting xPackageManager");
+    info!("Starting xPackageManager (QT_QPA_PLATFORMTHEME={:?})", std::env::var("QT_QPA_PLATFORMTHEME"));
 
     let args: Vec<String> = std::env::args().collect();
     let local_package_path = args.get(1).filter(|arg| is_arch_package(arg)).cloned();
@@ -2949,6 +3009,22 @@ fn main() {
         thread::spawn(move || {
             let title = format!("Removing {}", n);
             run_managed_operation(&tx, &title, "remove", &[n], backend, &input, &pid, &ctx);
+        });
+    });
+
+    let tx_dep_install = tx.clone();
+    let dep_install_input = terminal_input_sender.clone();
+    let dep_install_pid = terminal_child_pid.clone();
+    let dep_install_ctx = conflict_context.clone();
+    window.on_install_dep_package(move |name| {
+        let tx = tx_dep_install.clone();
+        let n = name.to_string();
+        let input = dep_install_input.clone();
+        let pid = dep_install_pid.clone();
+        let ctx = dep_install_ctx.clone();
+        thread::spawn(move || {
+            let title = format!("Installing dependency: {}", n);
+            run_managed_operation(&tx, &title, "install", &[n], 0, &input, &pid, &ctx);
         });
     });
 
