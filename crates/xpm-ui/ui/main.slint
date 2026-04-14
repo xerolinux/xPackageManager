@@ -3989,7 +3989,7 @@ export component MainWindow inherits Window {
                                 }
 
                                 Text {
-                                    text: "Not required — the Apdatifier plasmoid already handles update notifications and system tray integration natively, with more features and deeper Plasma integration.";
+                                    text: "Not required on XeroLinux. The Apdatifier plasmoid already handles that stuff and more. Only enable if needed (Other Distros).";
                                     font-size: 11px;
                                     color: Cat.blue.with-alpha(0.85);
                                     vertical-alignment: center;
@@ -4971,7 +4971,7 @@ export component MainWindow inherits Window {
                                 }
 
                                 aur-pill-text := Text {
-                                    text: "A.U.R support disabled for stability purposes. Use the included Chaotic-AUR for pre-built packages. Install missing ones via `paru packagename` in Terminal.";
+                                    text: "A.U.R support disabled for stability purposes. Use the Chaotic-AUR (on XeroLinux) for pre-built packages. Use | paru packagename | in Terminal instead.";
                                     font-size: 13px;
                                     color: Cat.yellow;
                                     vertical-alignment: center;
@@ -7290,6 +7290,7 @@ export component MainWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: min(500px, parent.width - 48px);
+            height: layout.min-height;
             border-radius: 14px;
             background: #1a0a0a;
             border-width: 2px;
@@ -7298,9 +7299,9 @@ export component MainWindow inherits Window {
             drop-shadow-color: Cat.red.with-alpha(0.35);
             drop-shadow-offset-y: 8px;
 
-            VerticalLayout {
+            layout := VerticalLayout {
                 padding: 28px;
-                spacing: 16px;
+                spacing: 20px;
 
                 // Red top stripe
                 Rectangle {
@@ -7311,48 +7312,55 @@ export component MainWindow inherits Window {
 
                 // Header
                 HorizontalLayout {
-                    spacing: 12px;
-                    VerticalLayout { alignment: center;
+                    spacing: 14px;
+                    VerticalLayout {
+                        alignment: center;
                         NavIcon {
                             d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
                             icon-color: Cat.red;
-                            width: 24px; height: 24px;
+                            width: 28px; height: 28px;
                         }
                     }
                     VerticalLayout {
                         alignment: center;
+                        spacing: 4px;
                         Text {
                             text: "⚠  UNSUPPORTED DISTRIBUTION";
                             font-size: 16px; font-weight: 800;
                             color: Cat.red;
                             letter-spacing: 0.5px;
                         }
+                        Text {
+                            text: "xPackageManager is built exclusively for XeroLinux";
+                            font-size: 11px; font-weight: 400;
+                            color: #aa7777;
+                        }
                     }
                 }
 
                 // Divider
-                Rectangle { height: 1px; background: Cat.red.with-alpha(0.25); }
+                Rectangle { height: 1px; background: Cat.red.with-alpha(0.2); }
 
                 // Body
                 Text {
-                    text: "This application was built specifically for XeroLinux.\n\nUsing it on any other Arch-based distribution is entirely at your own risk. No support, warranty, or guarantees of any kind are provided. Functionality may be incomplete or incorrect on unsupported systems.";
+                    text: "This application was built specifically for XeroLinux.\n\nUsing it on any other Arch-based distribution is entirely at your own risk. No support, warranty, or guarantees of any kind are provided. \n\nFunctionality may be incomplete or incorrect on unsupported systems.";
                     font-size: 14px;
                     color: #e8c8c8;
                     wrap: word-wrap;
                 }
 
                 // Divider
-                Rectangle { height: 1px; background: Cat.red.with-alpha(0.25); }
+                Rectangle { height: 1px; background: Cat.red.with-alpha(0.2); }
 
                 // Buttons
                 HorizontalLayout {
-                    spacing: 10px;
+                    spacing: 12px;
                     alignment: end;
 
                     // Source code link
                     Rectangle {
-                        width: src-lbl.preferred-width + 24px;
-                        height: 34px;
+                        width: src-lbl.preferred-width + 28px;
+                        height: 36px;
                         border-radius: 8px;
                         background: src-ta.has-hover ? Cat.blue.with-alpha(0.22) : Cat.blue.with-alpha(0.1);
                         border-width: 1px;
@@ -7373,8 +7381,8 @@ export component MainWindow inherits Window {
 
                     // Dismiss
                     Rectangle {
-                        width: ack-lbl.preferred-width + 24px;
-                        height: 34px;
+                        width: ack-lbl.preferred-width + 28px;
+                        height: 36px;
                         border-radius: 8px;
                         background: ack-ta.has-hover ? Cat.red.with-alpha(0.35) : Cat.red.with-alpha(0.18);
                         border-width: 1px;
