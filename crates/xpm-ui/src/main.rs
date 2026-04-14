@@ -245,6 +245,7 @@ enum UiMessage {
     PackagesLoaded {
         installed: Vec<PackageData>,
         updates: Vec<PackageData>,
+        flatpak_updates: Vec<PackageData>,
         flatpak: Vec<PackageData>,
         stats: StatsData,
         flatpak_update_count: i32,
@@ -1473,12 +1474,40 @@ fn find_package_installed(window: &MainWindow, name: &str, backend: i32) -> bool
     false
 }
 
+/// Returns true if any package in the native update list requires a reboot
+/// (kernel, firmware, microcode, systemd, bootloader, glibc)
+fn native_updates_need_reboot(window: &MainWindow) -> bool {
+    const REBOOT_PATTERNS: &[&str] = &[
+        "linux", "linux-zen", "linux-lts", "linux-hardened", "linux-cachyos",
+        "linux-firmware", "linux-firmware-whence",
+        "intel-ucode", "amd-ucode",
+        "systemd", "systemd-libs",
+        "glibc",
+        "grub", "refind-efi", "efibootmgr", "syslinux",
+        "mkinitcpio",
+    ];
+    let model = window.get_update_packages();
+    for i in 0..model.row_count() {
+        let pkg = model.row_data(i).unwrap_or_default();
+        let name = pkg.name.to_string();
+        // Match exact name or "linux-*" kernel packages
+        if REBOOT_PATTERNS.iter().any(|p| &name == p)
+            || (name.starts_with("linux-") && !name.starts_with("linux-docs")
+                && !name.starts_with("linux-headers"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn update_selection_in_models(window: &MainWindow, name: &str, backend: i32, selected: bool) {
     update_selection_in_model(&window.get_installed_packages(), name, backend, selected);
     update_selection_in_model(&window.get_update_packages(), name, backend, selected);
     update_selection_in_model(&window.get_search_installed(), name, backend, selected);
     update_selection_in_model(&window.get_search_available(), name, backend, selected);
     update_selection_in_model(&window.get_flatpak_packages(), name, backend, selected);
+    update_selection_in_model(&window.get_repo_packages(), name, backend, selected);
 }
 
 /// Given the last line of terminal output containing a prompt like `[Y/n]` or `(yes/no)`,
@@ -1948,7 +1977,7 @@ fn main() {
 
             while let Ok(msg) = rx_clone.borrow_mut().try_recv() {
                 match msg {
-                    UiMessage::PackagesLoaded { installed, updates, flatpak, stats, flatpak_update_count } => {
+                    UiMessage::PackagesLoaded { installed, updates, flatpak_updates, flatpak, stats, flatpak_update_count } => {
                         *full_installed_timer.borrow_mut() = installed;
                         let ps = page_size as usize;
                         let inst = full_installed_timer.borrow();
@@ -1959,6 +1988,7 @@ fn main() {
                         window.set_total_pages(total);
                         drop(inst);
                         window.set_update_packages(ModelRc::new(VecModel::from(updates)));
+                        window.set_flatpak_update_packages(ModelRc::new(VecModel::from(flatpak_updates)));
                         window.set_flatpak_packages(ModelRc::new(VecModel::from(flatpak)));
                         window.set_flatpak_update_count(flatpak_update_count);
                         window.set_stats(stats);
@@ -2620,15 +2650,49 @@ fn main() {
     let update_all_input = terminal_input_sender.clone();
     let update_all_pid = terminal_child_pid.clone();
     let update_all_ctx = conflict_context.clone();
+    let window_weak_ua = window.as_weak();
     window.on_update_all(move || {
-        info!("Update all packages");
+        info!("Update all packages (native + flatpak)");
+        let needs_reboot = window_weak_ua.upgrade()
+            .map(|w| native_updates_need_reboot(&w))
+            .unwrap_or(false);
         let tx = tx_update.clone();
         let input = update_all_input.clone();
         let pid = update_all_pid.clone();
-        let ctx = update_all_ctx.clone();
+        let _ctx = update_all_ctx.clone();
         thread::spawn(move || {
-            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(true));
-            run_managed_operation(&tx, "System Update", "update-all", &[], 0, &input, &pid, &ctx);
+            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(needs_reboot));
+            run_in_terminal(
+                &tx,
+                "Full System Update",
+                "pkexec",
+                &[
+                    "bash", "-c",
+                    "pacman -Syu && echo '' && echo '━━━ Flatpak Updates ━━━' && flatpak update -y && echo '' && echo '✓ System fully updated'",
+                ],
+                &input,
+                &pid,
+            );
+        });
+    });
+
+    let tx_native = tx.clone();
+    let native_input = terminal_input_sender.clone();
+    let native_pid = terminal_child_pid.clone();
+    let native_ctx = conflict_context.clone();
+    let window_weak_no = window.as_weak();
+    window.on_update_native_only(move || {
+        info!("Update native packages only");
+        let needs_reboot = window_weak_no.upgrade()
+            .map(|w| native_updates_need_reboot(&w))
+            .unwrap_or(false);
+        let tx = tx_native.clone();
+        let input = native_input.clone();
+        let pid = native_pid.clone();
+        let ctx = native_ctx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(needs_reboot));
+            run_managed_operation(&tx, "Native Update", "update-all", &[], 0, &input, &pid, &ctx);
         });
     });
 
@@ -2643,6 +2707,8 @@ fn main() {
         let pid = upd_flt_pid.clone();
         let ctx = upd_flt_ctx.clone();
         thread::spawn(move || {
+            // Flatpaks never require a kernel reboot
+            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(false));
             run_managed_operation(&tx, "Flatpak Update", "update-all", &[], 1, &input, &pid, &ctx);
         });
     });
@@ -2651,13 +2717,17 @@ fn main() {
     let tx_sys_full = tx.clone();
     let sys_full_input = terminal_input_sender.clone();
     let sys_full_pid = terminal_child_pid.clone();
+    let window_weak_sf = window.as_weak();
     window.on_update_system_full(move || {
         info!("Full system update (native + flatpak)");
+        let needs_reboot = window_weak_sf.upgrade()
+            .map(|w| native_updates_need_reboot(&w))
+            .unwrap_or(false);
         let tx = tx_sys_full.clone();
         let input = sys_full_input.clone();
         let pid = sys_full_pid.clone();
         thread::spawn(move || {
-            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(true));
+            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(needs_reboot));
             run_in_terminal(
                 &tx,
                 "Full System Update",
@@ -4286,24 +4356,34 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
         })
         .collect();
 
-    let mut all_updates_ui = updates_ui.clone();
-    all_updates_ui.extend(flatpak_updates_ui);
-    all_updates_ui.extend(plasmoid_updates.clone());
+    // Native updates = pacman + plasmoid updates (no flatpak mixed in)
+    let mut native_updates_ui = updates_ui.clone();
+    native_updates_ui.extend(plasmoid_updates.clone());
+
+    // Use flatpak CLI for accurate installed count (includes runtimes/extensions the API may miss)
+    let flatpak_real_count = std::process::Command::new("flatpak")
+        .args(["list", "--system"])
+        .output()
+        .map(|o| o.stdout.iter().filter(|&&b| b == b'\n').count() as i32)
+        .unwrap_or(flatpak_packages.len() as i32);
 
     let stats = StatsData {
         pacman_count: installed_pacman.len() as i32,
-        flatpak_count: flatpak_packages.len() as i32,
+        flatpak_count: flatpak_real_count,
         orphan_count: orphan_count as i32,
         update_count: total_updates as i32,
         cache_size: SharedString::from(format_size(cache_size)),
     };
 
-    // Save cache
-    save_package_cache(&installed_ui, &all_updates_ui, &flatpak_ui, &stats);
+    // Save cache (combined for compatibility)
+    let mut all_for_cache = native_updates_ui.clone();
+    all_for_cache.extend(flatpak_updates_ui.clone());
+    save_package_cache(&installed_ui, &all_for_cache, &flatpak_ui, &stats);
 
     let _ = tx.send(UiMessage::PackagesLoaded {
         installed: installed_ui,
-        updates: all_updates_ui,
+        updates: native_updates_ui,
+        flatpak_updates: flatpak_updates_ui,
         flatpak: flatpak_ui,
         stats,
         flatpak_update_count,

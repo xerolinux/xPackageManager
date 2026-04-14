@@ -9,6 +9,26 @@ use xpm_core::{
     source::{PackageSource, ProgressCallback},
 };
 
+/// Returns true for invisible platform runtimes/themes that users don't install directly.
+/// Excludes: freedesktop/gnome/kde platform runtimes, gtk themes, kde styles, wine internals.
+fn is_platform_runtime(name: &str) -> bool {
+    const PLATFORM_PREFIXES: &[&str] = &[
+        "org.freedesktop.Platform",
+        "org.gnome.Platform",
+        "org.kde.Platform",
+        "org.gtk.Gtk3theme.",
+        "org.gtk.Gtk4theme.",
+        "org.kde.KStyle.",
+        "org.winehq.Wine.gecko",
+        "org.winehq.Wine.mono",
+        "com.valvesoftware.Steam.CompatibilityTool.",
+        "org.freedesktop.Sdk",
+        "org.gnome.Sdk",
+        "org.kde.Sdk",
+    ];
+    PLATFORM_PREFIXES.iter().any(|p| name.starts_with(p) || name == *p)
+}
+
 pub struct FlatpakBackend {
     _remote_manager: RemoteManager,
 }
@@ -51,10 +71,8 @@ impl FlatpakBackend {
             for installation in &installations {
                 if let Ok(refs) = installation.list_installed_refs(gio::Cancellable::NONE) {
                     for iref in refs {
-                        if iref.kind() == RefKind::App {
-                            if let Some(name) = iref.name() {
-                                installed_names.insert(name.to_string());
-                            }
+                        if let Some(name) = iref.name() {
+                            installed_names.insert(name.to_string());
                         }
                     }
                 }
@@ -243,11 +261,11 @@ impl PackageSource for FlatpakBackend {
                 };
 
                 for iref in refs {
-                    if iref.kind() != RefKind::App {
+                    let name = iref.name().map(|s| s.to_string()).unwrap_or_default();
+                    if name.is_empty() {
                         continue;
                     }
 
-                    let name = iref.name().map(|s| s.to_string()).unwrap_or_default();
                     let version = iref
                         .appdata_version()
                         .or_else(|| iref.branch())
@@ -297,11 +315,10 @@ impl PackageSource for FlatpakBackend {
                 };
 
                 for iref in refs {
-                    if iref.kind() != RefKind::App {
+                    let name = iref.name().map(|s| s.to_string()).unwrap_or_default();
+                    if name.is_empty() || is_platform_runtime(&name) {
                         continue;
                     }
-
-                    let name = iref.name().map(|s| s.to_string()).unwrap_or_default();
                     let current = iref
                         .appdata_version()
                         .or_else(|| iref.branch())
