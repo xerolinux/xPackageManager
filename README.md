@@ -1,56 +1,67 @@
 # xPackageManager
 
-A modern, dual-backend package manager for Arch Linux — manages both **pacman** (via libalpm) and **Flatpak** applications from a single interface, built with Rust and the [Slint](https://slint.dev) UI framework. Does **NOT** support the **A.U.R**, simply because on **XeroLinux** we have the **Chaotic-AUR** repo enabled which already includes pre-compiled AUR packages.
+A package manager GUI for Arch Linux managing **pacman** and **Flatpak** from one interface. Built with Rust and [Slint](https://slint.dev). 
 
-<img width="1128" height="774" alt="image" src="Screenshot.png" />
+Does **NOT** support the **A.U.R**, simply because on **XeroLinux** we have the **Chaotic-AUR** repo enabled which already includes pre-compiled AUR packages.
+
+> No AUR support by design. XeroLinux ships Chaotic-AUR repo with pre-compiled AUR packages.
+
+<img width="1128" height="774" alt="xPackageManager screenshot" src="Screenshot.png" />
 
 ---
 
 ## Features
 
-### Package Management
+**Packages**
 
-- **Installed Packages** — browse, search, and remove all installed pacman packages with live dependency info
-- **Available Updates** — unified updates view showing both native and Flatpak updates with per-format update buttons
-- **Package Search** — search the full pacman sync databases in real time
-- **Local Install** — install local `.pkg.tar.zst` files via file picker
-- **Dependency Tree** — visualise full dependency and reverse-dependency graphs for any package
+- Browse, search, and remove installed pacman packages
+- Real-time search across sync databases
+- Local `.pkg.tar.zst` install via file picker
+- Dependency and reverse-dependency tree view
+- Browse repos by repository
 
-### Flatpak Browser
+**Flatpak**
 
-- **App Store view** — browse the full Flathub catalogue with category filters and search
-- **App Detail page** — icon, screenshot banner, formatted description, changelog card, links section (homepage / bug tracker / translations / source), and category tags
-- **Add-Ons modal** — per-app add-ons split into "Available to Install" and "Already Installed" sections with individual Remove buttons
-- **Installed Flatpaks** — separate tab listing installed Flatpak apps with remove support
+- Full Flathub catalogue browser with category filters
+- App detail page: icon, screenshots, description, changelog, links
+- Add-ons modal per app (install / remove)
+- Installed Flatpaks tab with remove support
 
-### Updates
+**Updates**
 
-- **Mixed updates list** — native pacman and Flatpak updates shown together in the Updates view
-- **Separate update actions**:
-  - Updates view: "Update Flatpaks (N)" and "Update All" (native) buttons
-  - Flatpaks view: "Update Flatpaks (N)" button
-  - Browse Repos view: "Update Native (N)" button
-- **Plasmoid/widget updates** also detected and listed
+- Unified updates list (pacman + Flatpak)
+- Separate update actions per backend
+- Plasmoid/widget update detection
 
-### System & Maintenance
+**System Tray**
 
-- **Home Dashboard** — system stats (CPU, RAM, disk, GPU, kernel, uptime), quick-action tiles, Arch Linux RSS news feed
-- **Settings** — toggle flatpak support, auto-update checks, parallel downloads, cache retention
-- **Browse Repos** — navigate pacman repositories and browse packages per repo
-- **System operations** — mirror list update, keyring fix, initramfs rebuild, GRUB rebuild
+- Persistent tray icon after window close
+- Scheduled update checks with configurable interval
+- Desktop notification with update count and "Update Now" action
+- Badge overlay on tray icon showing pending update count
+- Autostart support (tray-only daemon mode via `--tray` flag)
 
-### Terminal & Operations
+**Home Dashboard**
 
-- **Live terminal output** — VT100-aware progress popup with auto-scroll; in-place progress bars render correctly (no duplicate lines)
-- **Conflict resolution dialog** — handles pacman file conflicts and dependency breaks with force-install option
-- **User prompt detection** — surfaces interactive pacman prompts (provider selection, key import) to the user in-app
-- **Operation cancellation** — SIGTERM support for all running operations
+- System stats: CPU, RAM, disk, GPU, kernel, uptime
+- Quick-action tiles
+- Arch Linux RSS news feed
+
+**Terminal**
+
+- VT100-aware live output with auto-scroll and correct progress bar rendering
+- Conflict resolution dialog for pacman file conflicts and dep breaks
+- Interactive prompt detection (provider selection, key import)
+- SIGTERM cancellation support
+
+**Settings**
+
+- Toggle Flatpak support, auto-update checks, parallel downloads, cache retention
+- Mirror list update, keyring fix, initramfs rebuild, GRUB rebuild
 
 ---
 
 ## Architecture
-
-### Crate Layout
 
 ```
 xPackageManager/
@@ -61,52 +72,27 @@ xPackageManager/
 │   ├── xpm-service/    # Orchestration, progress tracking, state management
 │   └── xpm-ui/
 │       ├── src/main.rs # Rust logic, backend threads, UI message loop
-│       └── ui/main.slint # Slint declarative UI
+│       └── ui/main.slint
 ```
-
-### UI Architecture
-
-- **Slint** declarative UI — single `main.slint` file, Catppuccin-inspired palette derived from the system theme
-- **Message passing** — background threads communicate with the main thread via `mpsc::channel<UiMessage>`, polled on a 50 ms timer
-- **Flatpak appstream** — parses local appstream XML (or `.gz`) to build the app catalogue; cached to `~/.local/share/xpm/remote_flathub.json` (24 h TTL)
-
-### Pacman Backend (`xpm-alpm`)
-
-- Read operations (search, list, info) work without privileges
-- Write operations (install, remove, upgrade) run via PTY with automatic `sudo` escalation
-
-### Flatpak Backend (`xpm-flatpak`)
-
-- User-level installs work without root
-- Appstream XML parsed locally — no network calls for browsing
 
 ---
 
-## Building
+## Install
 
-### Dependencies
-
-```bash
-sudo pacman -S rust cargo flatpak alpm
-```
-
-### Run
-
-Keep in mind that this requires you to be on **XeroLinux** for better funcionality. If you are on another Distro you are on your own ;)
-
-### Install
-
-- **Add XeroLinux Repo** (Other Distro)
-
-```bash
-echo -e '\n[xerolinux]\nSigLevel = Optional TrustAll\nServer = https://repos.xerolinux.xyz/$repo/$arch' | sudo tee -a /etc/pacman.conf
-```
-
-- **Install App**
+**XeroLinux** (recommended):
 
 ```bash
 sudo pacman -Syy xpm-gui
 ```
+
+**Other Arch-based distros** (add XeroLinux repo first):
+
+```bash
+echo -e '\n[xerolinux]\nSigLevel = Optional TrustAll\nServer = https://repos.xerolinux.xyz/$repo/$arch' | sudo tee -a /etc/pacman.conf
+sudo pacman -Syy xpm-gui
+```
+
+---
 
 ### To Do
 
