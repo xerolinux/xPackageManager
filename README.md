@@ -94,7 +94,7 @@ sudo pacman -Syy xpm-gui
 
 ### To Do
 
-- [ ] Make Terminal output more verbose
+- [ ] Fix Terminal output issues (more robust)
 
 ---
 
