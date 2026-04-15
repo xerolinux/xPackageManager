@@ -2,8 +2,6 @@
 
 A package manager GUI for Arch Linux managing **pacman** and **Flatpak** from one interface. Built with Rust and [Slint](https://slint.dev). 
 
-Does **NOT** support the **A.U.R**, simply because on **XeroLinux** we have the **Chaotic-AUR** repo enabled which already includes pre-compiled AUR packages.
-
 > No AUR support by design. XeroLinux ships Chaotic-AUR repo with pre-compiled AUR packages.
 
 <img width="1128" height="774" alt="xPackageManager screenshot" src="Screenshot.png" />
