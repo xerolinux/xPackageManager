@@ -791,6 +791,8 @@ export component MainWindow inherits Window {
     in-out property <bool> terminal-focus-pending: false;
     in-out property <bool> terminal-is-upgrade: false;
     in-out property <bool> setting-aur-enabled: false;
+    in-out property <bool> aur-pill-dismissed: false;
+    callback aur-pill-dismiss();
     in-out property <bool> setting-flatpak-enabled: true;
     in-out property <bool> setting-check-updates-on-start: false;
     in-out property <bool> setting-tray-enabled: false;
@@ -988,6 +990,8 @@ export component MainWindow inherits Window {
     callback unlock-db;
     // Distro warning
     in-out property <bool> show-distro-warning: false;
+    in-out property <bool> distro-warning-dismissed: false;
+    callback distro-warning-dismiss();
     // IgnorePkg
     in-out property <bool> ignorepkg-active: false;
     in-out property <string> ignorepkg-value: "";
@@ -4972,18 +4976,18 @@ export component MainWindow inherits Window {
                     spacing: 20px;
                     alignment: start;
 
-                    // AUR info pill — centered, width = content
-                    HorizontalLayout {
+                    // AUR info pill — centered, width = content; hidden once dismissed
+                    if !aur-pill-dismissed: HorizontalLayout {
                         alignment: center;
                         Rectangle {
-                            width: aur-pill-text.preferred-width + 15px + 8px + 24px;
+                            width: aur-pill-text.preferred-width + 15px + 8px + 24px + 28px;
                             border-radius: 8px;
                             background: Cat.yellow.with-alpha(0.08);
                             border-width: 1px;
                             border-color: Cat.yellow.with-alpha(0.35);
 
                             HorizontalLayout {
-                                padding-left: 12px; padding-right: 12px;
+                                padding-left: 12px; padding-right: 8px;
                                 padding-top: 9px; padding-bottom: 9px;
                                 spacing: 8px;
 
@@ -5000,6 +5004,32 @@ export component MainWindow inherits Window {
                                     font-size: 13px;
                                     color: Cat.yellow;
                                     vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 20px; height: 20px;
+                                        border-radius: 4px;
+                                        background: aur-dismiss-ta.has-hover ? Cat.yellow.with-alpha(0.18) : transparent;
+
+                                        aur-dismiss-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                aur-pill-dismissed = true;
+                                                root.aur-pill-dismiss();
+                                            }
+                                        }
+
+                                        NavIcon {
+                                            d: "M18 6L6 18M6 6l12 12";
+                                            icon-color: Cat.yellow.with-alpha(0.7);
+                                            width: 12px; height: 12px;
+                                            x: (parent.width - 12px) / 2;
+                                            y: (parent.height - 12px) / 2;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -7327,6 +7357,7 @@ export component MainWindow inherits Window {
             layout := VerticalLayout {
                 padding: 28px;
                 spacing: 20px;
+                property <bool> never-show-checked: false;
 
                 // Red top stripe
                 Rectangle {
@@ -7377,10 +7408,52 @@ export component MainWindow inherits Window {
                 // Divider
                 Rectangle { height: 1px; background: Cat.red.with-alpha(0.2); }
 
-                // Buttons
+                // Buttons + never-show checkbox on same row
                 HorizontalLayout {
                     spacing: 12px;
                     alignment: end;
+
+                    // Never show again checkbox — left side
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 18px; height: 18px;
+                                    border-radius: 4px;
+                                    border-width: 1.5px;
+                                    border-color: layout.never-show-checked ? Cat.red.with-alpha(0.8) : Cat.red.with-alpha(0.35);
+                                    background: layout.never-show-checked ? Cat.red.with-alpha(0.18) : transparent;
+                                    animate background { duration: 60ms; }
+
+                                    if layout.never-show-checked: NavIcon {
+                                        d: "M5 12l4 4L19 7";
+                                        icon-color: Cat.red;
+                                        width: 12px; height: 12px;
+                                        x: (parent.width - 12px) / 2;
+                                        y: (parent.height - 12px) / 2;
+                                    }
+
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { layout.never-show-checked = !layout.never-show-checked; }
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Text {
+                                    text: "Don't show this again";
+                                    font-size: 13px;
+                                    color: #aa7777;
+                                }
+                            }
+                        }
+                    }
 
                     // Source code link
                     Rectangle {
@@ -7422,7 +7495,13 @@ export component MainWindow inherits Window {
                         }
                         ack-ta := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.show-distro-warning = false; }
+                            clicked => {
+                                if layout.never-show-checked {
+                                    root.distro-warning-dismissed = true;
+                                    root.distro-warning-dismiss();
+                                }
+                                root.show-distro-warning = false;
+                            }
                         }
                     }
                 }

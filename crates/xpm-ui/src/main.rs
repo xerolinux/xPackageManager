@@ -214,15 +214,31 @@ fn get_base_icon_32() -> &'static [u8] {
     })
 }
 
-/// Return a 32×32 RGBA image of the app icon with a red count badge in the
-/// top-right corner when `count > 0`.
+/// Return a 32×32 RGBA image of the app icon.
+/// When `count > 0`:
+///   • top-right  — red badge with the count
+///   • bottom-left — amber badge with an ↑ arrow (update indicator)
 fn make_tray_icon(count: u32) -> Vec<u8> {
     let mut buf = get_base_icon_32().to_vec();
     if count == 0 {
         return buf;
     }
 
-    // For 1-digit or 2-digit counts use 2× scale; "99+" uses 1× scale.
+    const IW: usize = 32;
+    const IH: usize = 32;
+
+    // Helper: paint one pixel with RGBA (no alpha-blend, full overwrite).
+    let mut set_px = |x: usize, y: usize, r: u8, g: u8, b: u8, a: u8| {
+        if x < IW && y < IH {
+            let i = (y * IW + x) * 4;
+            buf[i]     = r;
+            buf[i + 1] = g;
+            buf[i + 2] = b;
+            buf[i + 3] = a;
+        }
+    };
+
+    // ── Red count badge — top-right ─────────────────────────────────────────
     let (chars, scale): (Vec<usize>, usize) = if count <= 9 {
         (vec![count as usize], 2)
     } else if count <= 99 {
@@ -239,30 +255,15 @@ fn make_tray_icon(count: u32) -> Vec<u8> {
     let pad    = 2usize;
     let bw     = text_w + pad * 2;
     let bh     = text_h + pad * 2;
-    let bx     = 32usize.saturating_sub(bw); // align to top-right
+    let bx     = 32usize.saturating_sub(bw);
     let by     = 0usize;
-    const IW: usize = 32;
-    const IH: usize = 32;
 
-    // Draw red badge background (rounded corners = skip 1-px corners)
     for dy in 0..bh {
         for dx in 0..bw {
-            if (dy == 0 || dy == bh - 1) && (dx == 0 || dx == bw - 1) {
-                continue;
-            }
-            let px = bx + dx;
-            let py = by + dy;
-            if px < IW && py < IH {
-                let i = (py * IW + px) * 4;
-                buf[i]     = 220; // R
-                buf[i + 1] = 45;  // G
-                buf[i + 2] = 45;  // B
-                buf[i + 3] = 255; // A
-            }
+            if (dy == 0 || dy == bh - 1) && (dx == 0 || dx == bw - 1) { continue; }
+            set_px(bx + dx, by + dy, 220, 45, 45, 255);
         }
     }
-
-    // Draw white digit pixels
     let mut cx = bx + pad;
     let ty = by + pad;
     for &ch in &chars {
@@ -272,21 +273,55 @@ fn make_tray_icon(count: u32) -> Vec<u8> {
                 if (bits >> (2 - col)) & 1 == 1 {
                     for sy in 0..scale {
                         for sx in 0..scale {
-                            let px = cx + col * scale + sx;
-                            let py = ty + row * scale + sy;
-                            if px < IW && py < IH {
-                                let i = (py * IW + px) * 4;
-                                buf[i]     = 255;
-                                buf[i + 1] = 255;
-                                buf[i + 2] = 255;
-                                buf[i + 3] = 255;
-                            }
+                            set_px(cx + col * scale + sx, ty + row * scale + sy, 255, 255, 255, 255);
                         }
                     }
                 }
             }
         }
         cx += char_w + gap;
+    }
+
+    // ── Amber ↑ arrow badge — bottom-left ───────────────────────────────────
+    // 10×10 amber rounded-rect background, 7×7 arrow shape centred inside.
+    //
+    // Arrow bitmap (7 rows × 7 cols, read MSB-first from bit 6):
+    //   row 0: ..#..   head tip
+    //   row 1: .###.   head wide
+    //   row 2: #####   head base
+    //   row 3: ..#..   shaft
+    //   row 4: ..#..   shaft
+    //   row 5: ..#..   shaft
+    //   row 6: ..#..   shaft base
+    const ARROW: [u8; 7] = [
+        0b0001000,
+        0b0011100,
+        0b0111110,
+        0b0001000,
+        0b0001000,
+        0b0001000,
+        0b0001000,
+    ];
+    let ab_size: usize = 10; // badge side length
+    let ab_x: usize = 0;
+    let ab_y: usize = IH - ab_size;
+
+    for dy in 0..ab_size {
+        for dx in 0..ab_size {
+            // Clip 1-px corners for a slightly rounded look.
+            if (dy == 0 || dy == ab_size - 1) && (dx == 0 || dx == ab_size - 1) { continue; }
+            set_px(ab_x + dx, ab_y + dy, 220, 140, 20, 255); // amber
+        }
+    }
+    // Arrow pixels (white), centred in the 10×10 badge (offset 1.5 → use 1 and 2).
+    let arrow_ox = ab_x + 1; // x offset to centre 7-wide in 10-wide badge
+    let arrow_oy = ab_y + 1; // y offset
+    for (row, &bits) in ARROW.iter().enumerate() {
+        for col in 0..7usize {
+            if (bits >> (6 - col)) & 1 == 1 {
+                set_px(arrow_ox + col, arrow_oy + row, 255, 255, 255, 255);
+            }
+        }
     }
 
     buf
@@ -298,7 +333,7 @@ fn make_tray_icon(count: u32) -> Vec<u8> {
 /// When n == 0, shows "up to date". When n > 0, shows an "Update Now" action
 /// that opens the app and navigates to the Updates page (view 1).
 /// Blocking — meant to be called from tokio::task::spawn_blocking.
-fn send_update_notification(n: u32, window: slint::Weak<MainWindow>) {
+fn send_update_notification(n: u32, window: slint::Weak<MainWindow>, tx: mpsc::Sender<UiMessage>) {
     if n == 0 {
         Notification::new()
             .summary("System is up to date")
@@ -328,13 +363,22 @@ fn send_update_notification(n: u32, window: slint::Weak<MainWindow>) {
         Ok(handle) => {
             handle.wait_for_action(|action_id| {
                 if action_id == "update" {
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(win) = window.upgrade() {
-                            let _ = win.show();
-                            win.set_view(1); // Updates page
-                        }
-                    })
-                    .ok();
+                    // Trigger a full update check to populate the updates page,
+                    // then show the window on the Updates view once data is ready.
+                    let tx_load = tx.clone();
+                    let window_show = window.clone();
+                    thread::spawn(move || {
+                        let _ = tx_load.send(UiMessage::SetLoading(true));
+                        let rt = tokio::runtime::Runtime::new().expect("rt");
+                        rt.block_on(load_packages_async(&tx_load, true));
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(win) = window_show.upgrade() {
+                                let _ = win.show();
+                                win.set_view(1); // Updates page
+                            }
+                        })
+                        .ok();
+                    });
                 }
             });
         }
@@ -371,7 +415,7 @@ fn set_autostart(enabled: bool) {
     }
 }
 
-fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, interval_secs: u64) {
+fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, interval_secs: u64, tx: mpsc::Sender<UiMessage>) {
     stop_tray(&tray_shutdown);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -399,6 +443,7 @@ fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, inte
                     let handle_manual = handle.clone();
                     let count_manual  = update_count.clone();
                     let window_manual = window.clone();
+                    let tx_manual     = tx.clone();
                     tokio::spawn(async move {
                         while check_rx.recv().await.is_some() {
                             let n = tokio::task::spawn_blocking(check_update_count)
@@ -407,7 +452,8 @@ fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, inte
                             count_manual.store(n, Ordering::Relaxed);
                             handle_manual.update(|_| {}).await;
                             let w = window_manual.clone();
-                            tokio::task::spawn_blocking(move || send_update_notification(n, w))
+                            let t = tx_manual.clone();
+                            tokio::task::spawn_blocking(move || send_update_notification(n, w, t))
                                 .await
                                 .ok();
                         }
@@ -419,7 +465,25 @@ fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, inte
                     let handle_checker  = handle.clone();
                     let count_ref       = update_count.clone();
                     let window_periodic = window.clone();
+                    let tx_periodic     = tx.clone();
                     tokio::spawn(async move {
+                        // Check immediately on startup so the badge and
+                        // notification are current from the first moment
+                        // the tray is visible (covers boot/reboot).
+                        let n = tokio::task::spawn_blocking(check_update_count)
+                            .await
+                            .unwrap_or(0);
+                        let old = count_ref.swap(n, Ordering::Relaxed);
+                        handle_checker.update(|_| {}).await;
+                        if n > 0 && old == 0 {
+                            let w = window_periodic.clone();
+                            let t = tx_periodic.clone();
+                            tokio::task::spawn_blocking(move || send_update_notification(n, w, t))
+                                .await
+                                .ok();
+                        }
+
+                        // Then run on the configured interval forever.
                         loop {
                             tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
                             let n = tokio::task::spawn_blocking(check_update_count)
@@ -430,7 +494,8 @@ fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, inte
                             // Notify only when updates are newly available.
                             if n > 0 && old == 0 {
                                 let w = window_periodic.clone();
-                                tokio::task::spawn_blocking(move || send_update_notification(n, w))
+                                let t = tx_periodic.clone();
+                                tokio::task::spawn_blocking(move || send_update_notification(n, w, t))
                                     .await
                                     .ok();
                             }
@@ -597,6 +662,10 @@ struct AppConfig {
     tray_enabled: bool,
     #[serde(default = "default_tray_interval")]
     tray_check_interval_minutes: u32,
+    #[serde(default)]
+    aur_pill_dismissed: bool,
+    #[serde(default)]
+    distro_warning_dismissed: bool,
 }
 
 fn default_notify_interval() -> u32 { 30 }
@@ -612,6 +681,8 @@ impl Default for AppConfig {
             parallel_downloads: 5,
             tray_enabled: false,
             tray_check_interval_minutes: 30,
+            aur_pill_dismissed: false,
+            distro_warning_dismissed: false,
         }
     }
 }
@@ -652,6 +723,8 @@ fn build_config(window: &MainWindow) -> AppConfig {
         parallel_downloads: window.get_setting_parallel_downloads() as u32,
         tray_enabled: window.get_setting_tray_enabled(),
         tray_check_interval_minutes: window.get_setting_tray_check_interval() as u32,
+        aur_pill_dismissed: window.get_aur_pill_dismissed(),
+        distro_warning_dismissed: window.get_distro_warning_dismissed(),
     }
 }
 
@@ -4644,25 +4717,39 @@ fn main() {
 
     window.set_setting_tray_enabled(config.tray_enabled);
     window.set_setting_tray_check_interval(config.tray_check_interval_minutes as i32);
+    window.set_aur_pill_dismissed(config.aur_pill_dismissed);
     // Start tray if enabled in settings OR if launched with --tray.
     if effective_tray {
         let interval_secs = (config.tray_check_interval_minutes as u64) * 60;
-        start_tray(window.as_weak(), tray_shutdown.clone(), interval_secs);
+        start_tray(window.as_weak(), tray_shutdown.clone(), interval_secs, tx.clone());
     }
 
     let window_weak_tray = window.as_weak();
+    let tx_tray_toggle = tx.clone();
     window.on_toggle_tray_enabled(move |enabled| {
         tray_flag_toggle.store(enabled, Ordering::Relaxed);
         if let Some(win) = window_weak_tray.upgrade() {
             let interval_secs = (win.get_setting_tray_check_interval() as u64) * 60;
             if enabled {
                 set_autostart(true);
-                start_tray(window_weak_tray.clone(), tray_shutdown_toggle.clone(), interval_secs);
+                start_tray(window_weak_tray.clone(), tray_shutdown_toggle.clone(), interval_secs, tx_tray_toggle.clone());
             } else {
                 set_autostart(false);
                 stop_tray(&tray_shutdown_toggle);
             }
         }
+    });
+
+    window.on_aur_pill_dismiss(|| {
+        let mut cfg = load_config();
+        cfg.aur_pill_dismissed = true;
+        save_config(&cfg);
+    });
+
+    window.on_distro_warning_dismiss(|| {
+        let mut cfg = load_config();
+        cfg.distro_warning_dismissed = true;
+        save_config(&cfg);
     });
 
     // When the user closes the window while the tray is active, hide it instead
@@ -4679,7 +4766,7 @@ fn main() {
         }
     });
 
-    if !is_xerolinux() {
+    if !is_xerolinux() && !config.distro_warning_dismissed {
         window.set_show_distro_warning(true);
     }
 

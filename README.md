@@ -54,6 +54,8 @@ A package manager GUI for Arch Linux managing **pacman** and **Flatpak** from on
 
 **Settings**
 
+Settingsd are now stored in `~/.config/xpm/config.json` for easy modification.
+
 - Toggle Flatpak support, auto-update checks, parallel downloads, cache retention
 - Mirror list update, keyring fix, initramfs rebuild, GRUB rebuild
 
