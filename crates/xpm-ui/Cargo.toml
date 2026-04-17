@@ -30,4 +30,4 @@ notify-rust = "4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [build-dependencies]
-slint-build = "1.9"
+slint-build = "=1.16.0"

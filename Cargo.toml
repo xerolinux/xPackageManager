@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["xPackageManager Contributors"]
@@ -18,7 +18,7 @@ repository = "https://github.com/example/xpackagemanager"
 [workspace.dependencies]
 tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "sync", "macros"] }
 async-trait = "0.1"
-slint = { version = "1.9", default-features = false, features = ["backend-qt", "backend-winit", "renderer-femtovg", "compat-1-2"] }
+slint = { version = "=1.16.0", default-features = false, features = ["backend-qt", "backend-winit", "renderer-femtovg", "compat-1-2"] }
 alpm = "5.0"
 libflatpak = "0.7"
 thiserror = "2.0"
