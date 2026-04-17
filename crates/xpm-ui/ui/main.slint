@@ -144,17 +144,7 @@ component Input inherits Rectangle {
         : Cat.surface2;
     animate border-color { duration: 80ms; }
 
-    TouchArea { clicked => { input.focus(); } }
-
-    if input.text == "" && !input.has-focus: Text {
-        x: 12px;
-        width: parent.width - 24px;
-        height: parent.height;
-        text: root.placeholder;
-        font-size: 14px;
-        color: Cat.overlay0;
-        vertical-alignment: center;
-    }
+    TouchArea { width: 100%; height: 100%; clicked => { input.focus(); } }
 
     input := TextInput {
         x: 12px;
@@ -170,6 +160,16 @@ component Input inherits Rectangle {
         selection-foreground-color: Cat.text;
         accepted => { root.accepted(self.text); }
         edited => { root.edited(self.text); }
+    }
+
+    if input.text == "" && !input.has-focus: Text {
+        x: 12px;
+        width: parent.width - 24px;
+        height: parent.height;
+        text: root.placeholder;
+        font-size: 14px;
+        color: Cat.overlay0;
+        vertical-alignment: center;
     }
 }
 
@@ -1336,20 +1336,12 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            VerticalLayout {
-                                alignment: center;
+                            Rectangle {
                                 horizontal-stretch: 1;
-
-                                if installed-filter-text == "" && !inst-ti.has-focus: Text {
-                                    height: 29px;
-                                    text: "Filter installed...";
-                                    font-size: 12px;
-                                    color: Cat.overlay0;
-                                    vertical-alignment: center;
-                                }
+                                height: 29px;
 
                                 inst-ti := TextInput {
-                                    height: 29px;
+                                    width: 100%; height: 100%;
                                     text <=> installed-filter-text;
                                     font-size: 12px;
                                     color: Cat.text;
@@ -1359,6 +1351,14 @@ export component MainWindow inherits Window {
                                     selection-foreground-color: Cat.text;
                                     edited => { root.filter-installed(self.text); }
                                     accepted => { root.filter-installed(self.text); }
+                                }
+
+                                if installed-filter-text == "" && !inst-ti.has-focus: Text {
+                                    width: 100%; height: 100%;
+                                    text: "Filter installed...";
+                                    font-size: 12px;
+                                    color: Cat.overlay0;
+                                    vertical-alignment: center;
                                 }
                             }
 
@@ -1410,20 +1410,12 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            VerticalLayout {
-                                alignment: center;
+                            Rectangle {
                                 horizontal-stretch: 1;
-
-                                if search-text == "" && !all-pkg-ti.has-focus: Text {
-                                    height: 29px;
-                                    text: "Search all packages...";
-                                    font-size: 12px;
-                                    color: Cat.overlay0;
-                                    vertical-alignment: center;
-                                }
+                                height: 29px;
 
                                 all-pkg-ti := TextInput {
-                                    height: 29px;
+                                    width: 100%; height: 100%;
                                     text <=> search-text;
                                     font-size: 12px;
                                     color: Cat.text;
@@ -1437,6 +1429,14 @@ export component MainWindow inherits Window {
                                             root.search(search-text);
                                         }
                                     }
+                                }
+
+                                if search-text == "" && !all-pkg-ti.has-focus: Text {
+                                    width: 100%; height: 100%;
+                                    text: "Search all packages...";
+                                    font-size: 12px;
+                                    color: Cat.overlay0;
+                                    vertical-alignment: center;
                                 }
                             }
 
@@ -1734,20 +1734,12 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            VerticalLayout {
-                                alignment: center;
+                            Rectangle {
                                 horizontal-stretch: 1;
-
-                                if flatpak-search == "" && !fk-ti.has-focus: Text {
-                                    height: 32px;
-                                    text: "Search Flathub apps...";
-                                    font-size: 14px;
-                                    color: Cat.overlay0;
-                                    vertical-alignment: center;
-                                }
+                                height: 32px;
 
                                 fk-ti := TextInput {
-                                    height: 32px;
+                                    width: 100%; height: 100%;
                                     text <=> flatpak-search;
                                     font-size: 14px;
                                     color: Cat.text;
@@ -1763,6 +1755,14 @@ export component MainWindow inherits Window {
                                         show-flatpak-detail = false;
                                         root.filter-flatpak(selected-flatpak-category, self.text);
                                     }
+                                }
+
+                                if flatpak-search == "" && !fk-ti.has-focus: Text {
+                                    width: 100%; height: 100%;
+                                    text: "Search Flathub apps...";
+                                    font-size: 14px;
+                                    color: Cat.overlay0;
+                                    vertical-alignment: center;
                                 }
                             }
                         }
@@ -2644,20 +2644,12 @@ export component MainWindow inherits Window {
                                     }
                                 }
 
-                                VerticalLayout {
-                                    alignment: center;
+                                Rectangle {
                                     horizontal-stretch: 1;
-
-                                    if installed-flatpak-filter == "" && !ifk-search-ti.has-focus: Text {
-                                        height: 32px;
-                                        text: "Filter installed Flatpaks...";
-                                        font-size: 13px;
-                                        color: Cat.overlay0;
-                                        vertical-alignment: center;
-                                    }
+                                    height: 32px;
 
                                     ifk-search-ti := TextInput {
-                                        height: 32px;
+                                        width: 100%; height: 100%;
                                         text <=> installed-flatpak-filter;
                                         font-size: 13px;
                                         color: Cat.text;
@@ -2666,6 +2658,14 @@ export component MainWindow inherits Window {
                                         selection-background-color: Cat.green.with-alpha(0.3);
                                         selection-foreground-color: Cat.text;
                                         edited => { root.filter-installed-flatpaks(self.text); }
+                                    }
+
+                                    if installed-flatpak-filter == "" && !ifk-search-ti.has-focus: Text {
+                                        width: 100%; height: 100%;
+                                        text: "Filter installed Flatpaks...";
+                                        font-size: 13px;
+                                        color: Cat.overlay0;
+                                        vertical-alignment: center;
                                     }
                                 }
 
@@ -2978,20 +2978,12 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            VerticalLayout {
-                                alignment: center;
+                            Rectangle {
                                 horizontal-stretch: 1;
-
-                                if repo-search == "" && !rs-ti.has-focus: Text {
-                                    height: 32px;
-                                    text: selected-repo != "" ? "Search in " + selected-repo + "..." : "Search all packages...";
-                                    font-size: 14px;
-                                    color: Cat.overlay0;
-                                    vertical-alignment: center;
-                                }
+                                height: 32px;
 
                                 rs-ti := TextInput {
-                                    height: 32px;
+                                    width: 100%; height: 100%;
                                     text <=> repo-search;
                                     font-size: 14px;
                                     color: Cat.text;
@@ -3001,6 +2993,14 @@ export component MainWindow inherits Window {
                                     selection-foreground-color: Cat.text;
                                     accepted => { root.filter-repo(self.text); }
                                     edited => { root.filter-repo(self.text); }
+                                }
+
+                                if repo-search == "" && !rs-ti.has-focus: Text {
+                                    width: 100%; height: 100%;
+                                    text: selected-repo != "" ? "Search in " + selected-repo + "..." : "Search all packages...";
+                                    font-size: 14px;
+                                    color: Cat.overlay0;
+                                    vertical-alignment: center;
                                 }
                             }
                         }
@@ -3288,20 +3288,12 @@ export component MainWindow inherits Window {
                                     }
                                 }
 
-                                VerticalLayout {
-                                    alignment: center;
+                                Rectangle {
                                     horizontal-stretch: 1;
-
-                                    if installed-grouped-filter == "" && !ni-search-ti.has-focus: Text {
-                                        height: 32px;
-                                        text: "Filter installed packages...";
-                                        font-size: 13px;
-                                        color: Cat.overlay0;
-                                        vertical-alignment: center;
-                                    }
+                                    height: 32px;
 
                                     ni-search-ti := TextInput {
-                                        height: 32px;
+                                        width: 100%; height: 100%;
                                         text <=> installed-grouped-filter;
                                         font-size: 13px;
                                         color: Cat.text;
@@ -3311,6 +3303,14 @@ export component MainWindow inherits Window {
                                         selection-foreground-color: Cat.text;
                                         edited => { root.filter-installed-grouped(self.text); }
                                         accepted => { root.filter-installed-grouped(self.text); }
+                                    }
+
+                                    if installed-grouped-filter == "" && !ni-search-ti.has-focus: Text {
+                                        width: 100%; height: 100%;
+                                        text: "Filter installed packages...";
+                                        font-size: 13px;
+                                        color: Cat.overlay0;
+                                        vertical-alignment: center;
                                     }
                                 }
 
@@ -4938,15 +4938,23 @@ export component MainWindow inherits Window {
                                             border-width: ig-ti.has-focus ? 1px : 0px;
                                             border-color: Cat.peach.with-alpha(0.5);
                                             clip: true; animate border-width { duration: 80ms; }
-                                            HorizontalLayout {
-                                                padding-left: 8px; padding-right: 8px;
-                                                if ignorepkg-edit-text == "" && !ig-ti.has-focus: Text { height: 25px; text: "Packages (space-separated)"; font-size: 14px; color: Cat.overlay0; vertical-alignment: center; }
-                                                ig-ti := TextInput {
-                                                    height: 25px; text <=> ignorepkg-edit-text;
-                                                    font-size: 14px; color: Cat.text; single-line: true; vertical-alignment: center;
-                                                    selection-background-color: Cat.peach.with-alpha(0.3);
-                                                    accepted => { ignorepkg-value = ignorepkg-edit-text; root.save-ignorepkg(true, ignorepkg-edit-text); }
-                                                }
+
+                                            TouchArea { width: 100%; height: 100%; clicked => { ig-ti.focus(); } }
+
+                                            ig-ti := TextInput {
+                                                x: 8px; y: 0;
+                                                width: parent.width - 16px; height: 100%;
+                                                text <=> ignorepkg-edit-text;
+                                                font-size: 14px; color: Cat.text; single-line: true; vertical-alignment: center;
+                                                selection-background-color: Cat.peach.with-alpha(0.3);
+                                                accepted => { ignorepkg-value = ignorepkg-edit-text; root.save-ignorepkg(true, ignorepkg-edit-text); }
+                                            }
+
+                                            if ignorepkg-edit-text == "" && !ig-ti.has-focus: Text {
+                                                x: 8px; y: 0;
+                                                width: parent.width - 16px; height: 100%;
+                                                text: "Packages (space-separated)";
+                                                font-size: 14px; color: Cat.overlay0; vertical-alignment: center;
                                             }
                                         }
                                         Rectangle {
@@ -6330,7 +6338,7 @@ export component MainWindow inherits Window {
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: 400px; height: 210px;
+            width: 400px; height: fp-dlg-layout.min-height;
             background: Cat.base;
             border-radius: 14px;
             border-width: 1px;
@@ -6339,7 +6347,7 @@ export component MainWindow inherits Window {
             drop-shadow-color: Cat.crust.with-alpha(0.6);
             drop-shadow-offset-y: 8px;
 
-            VerticalLayout {
+            fp-dlg-layout := VerticalLayout {
                 padding: 24px; spacing: 16px;
 
                 // Header
@@ -6356,7 +6364,7 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         alignment: center; horizontal-stretch: 1; spacing: 3px;
                         Text { text: "Remove " + fp-confirm-name + "?"; font-size: 15px; font-weight: 700; color: Cat.text; overflow: elide; }
-                        Text { text: "This will uninstall the application from your system."; font-size: 15px; color: Cat.overlay1; }
+                        Text { text: "This will uninstall the application from your system."; font-size: 13px; color: Cat.overlay1; }
                     }
                 }
 
