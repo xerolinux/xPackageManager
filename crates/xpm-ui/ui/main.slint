@@ -70,6 +70,11 @@ export struct ArchNewsItem {
     summary: string,
 }
 
+export struct LogLine {
+    text: string,
+    level: int,
+}
+
 export global Cat {
     // Core backgrounds — all derived from Palette.background (reliable on all systems)
     // Palette.control-background is NOT used — it returns light colors on some Qt configs
@@ -831,6 +836,11 @@ export component MainWindow inherits Window {
     in-out property <bool> progress-popup-show-input: false;
     in-out property <string> progress-popup-prompt: "";
     in-out property <bool> show-progress-logs: false;
+    in-out property <bool> progress-show-details: false;
+    in-out property <bool> progress-popup-show-buttons: false;
+    in-out property <string> progress-popup-eta: "";
+    in-out property <[LogLine]> progress-log-lines: [];
+    in-out property <string> progress-error-summary: "";
 
     in-out property <int> current-page: 0;
     in-out property <int> total-pages: 1;
@@ -965,6 +975,7 @@ export component MainWindow inherits Window {
     callback close-progress-popup;
     callback cancel-operation;
     callback progress-popup-send-input(string);
+    callback progress-popup-proceed;
     callback conflict-force-overwrite;
     callback conflict-cancel;
 
@@ -6044,7 +6055,12 @@ export component MainWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: min(620px, parent.width - 40px);
-            height: min(500px, parent.height - 40px);
+            height: progress-show-details
+                ? min(520px, parent.height - 40px)
+                : (48px + 58px + 32px
+                   + (progress-popup-show-input && !progress-popup-done ? 76px : 0px)
+                   + (progress-popup-done ? 46px : 0px));
+            animate height { duration: 220ms; easing: ease-in-out; }
             background: Cat.base;
             border-radius: 12px;
             clip: true;
@@ -6092,31 +6108,6 @@ export component MainWindow inherits Window {
                             overflow: elide;
                         }
 
-                        if !progress-popup-done: VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: cancel-label.preferred-width + 20px;
-                                height: 32px;
-                                border-radius: 6px;
-                                background: cancel-touch.has-hover ? Cat.red.with-alpha(0.2) : Cat.surface0;
-                                animate background { duration: 80ms; }
-
-                                cancel-label := Text {
-                                    text: "Cancel";
-                                    font-size: 15px;
-                                    font-weight: 600;
-                                    color: cancel-touch.has-hover ? Cat.red : Cat.overlay0;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    animate color { duration: 80ms; }
-                                }
-
-                                cancel-touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.cancel-operation(); }
-                                }
-                            }
-                        }
 
                         if progress-popup-done: VerticalLayout {
                             alignment: center;
@@ -6144,9 +6135,9 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Progress bar + stage
+                // Progress bar + stage + inline details toggle
                 Rectangle {
-                    height: 50px;
+                    height: 58px;
                     background: Cat.mantle;
 
                     Rectangle {
@@ -6160,52 +6151,219 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         padding-left: 16px;
                         padding-right: 16px;
-                        padding-top: 10px;
-                        spacing: 6px;
+                        padding-top: 12px;
+                        padding-bottom: 10px;
+                        spacing: 8px;
 
+                        // Track
                         Rectangle {
-                            height: 5px;
+                            height: 6px;
                             border-radius: 3px;
                             background: Cat.surface0;
 
                             Rectangle {
                                 width: progress-popup-done ? parent.width :
-                                       (progress-popup-percent > 0 ? parent.width * progress-popup-percent / 100 : 4px);
+                                       (progress-popup-percent > 0
+                                           ? parent.width * progress-popup-percent / 100
+                                           : 20px);
                                 height: 100%;
                                 border-radius: 3px;
-                                background: progress-popup-done ?
-                                            (progress-popup-success ? Cat.green : Cat.red) : Cat.mauve;
-                                animate width { duration: 300ms; easing: ease-in-out; }
+                                background: progress-popup-done
+                                    ? (progress-popup-success ? Cat.green : Cat.red)
+                                    : Cat.mauve;
+                                animate width { duration: 350ms; easing: ease-in-out; }
                             }
                         }
 
+                        // Stage text | ETA | %
                         HorizontalLayout {
+                            spacing: 8px;
+
                             Text {
-                                text: progress-popup-done ?
-                                      (progress-popup-success ? "Completed successfully" : "Operation failed") :
-                                      progress-popup-stage;
-                                font-size: 15px;
-                                color: progress-popup-done ?
-                                       (progress-popup-success ? Cat.green : Cat.red) : Cat.overlay0;
+                                text: progress-popup-done
+                                    ? (progress-popup-success ? "Completed successfully" : "Operation failed")
+                                    : progress-popup-stage;
+                                font-size: 13px;
+                                color: progress-popup-done
+                                    ? (progress-popup-success ? Cat.green : Cat.red)
+                                    : Cat.overlay0;
                                 overflow: elide;
                                 horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+
+                            if progress-popup-eta != "" && !progress-popup-done: Text {
+                                text: progress-popup-eta;
+                                font-size: 11px;
+                                color: Cat.overlay0;
+                                vertical-alignment: center;
                             }
 
                             Text {
                                 text: progress-popup-done ? "done" : progress-popup-percent + "%";
-                                font-size: 15px;
-                                font-weight: 600;
-                                color: progress-popup-done ?
-                                       (progress-popup-success ? Cat.green : Cat.red) : Cat.mauve;
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: progress-popup-done
+                                    ? (progress-popup-success ? Cat.green : Cat.red)
+                                    : Cat.mauve;
+                                vertical-alignment: center;
                             }
                         }
                     }
                 }
 
-                Rectangle { height: 1px; background: Cat.surface0; opacity: 0.5; }
-
-                // Live log output — always visible
+                // Expand / collapse strip — centered pill with divider lines on each side
                 Rectangle {
+                    height: 32px;
+                    background: Cat.mantle;
+
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; opacity: 0.45; }
+
+                    HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        spacing: 12px;
+
+                        // Left divider line
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            Rectangle {
+                                height: 1px;
+                                background: expand-ta.has-hover
+                                    ? Cat.mauve.with-alpha(0.4)
+                                    : Cat.surface1;
+                                animate background { duration: 120ms; }
+                            }
+                        }
+
+                        // Center pill
+                        expand-pill := Rectangle {
+                            width: expand-row.preferred-width + 22px;
+                            height: 22px;
+                            border-radius: 11px;
+                            border-width: 1px;
+                            border-color: expand-ta.has-hover
+                                ? Cat.mauve.with-alpha(0.65)
+                                : Cat.mauve.with-alpha(0.28);
+                            background: expand-ta.has-hover
+                                ? Cat.mauve.with-alpha(0.12)
+                                : Cat.mauve.with-alpha(0.04);
+                            drop-shadow-blur: expand-ta.has-hover ? 10px : 3px;
+                            drop-shadow-color: Cat.mauve.with-alpha(expand-ta.has-hover ? 0.35 : 0.08);
+                            animate border-color { duration: 120ms; }
+                            animate background { duration: 120ms; }
+
+                            expand-row := HorizontalLayout {
+                                spacing: 5px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                alignment: center;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    NavIcon {
+                                        d: progress-show-details ? "M12 19V5m6 6l-6-6-6 6" : "M12 5v14m-6-6l6 6 6-6";
+                                        icon-color: expand-ta.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.7);
+                                        width: 12px;
+                                        height: 12px;
+                                        animate icon-color { duration: 120ms; }
+                                    }
+                                }
+
+                                Text {
+                                    text: progress-show-details ? "Hide Details" : "Show Details";
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: expand-ta.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.7);
+                                    vertical-alignment: center;
+                                    animate color { duration: 120ms; }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    NavIcon {
+                                        d: progress-show-details ? "M12 19V5m6 6l-6-6-6 6" : "M12 5v14m-6-6l6 6 6-6";
+                                        icon-color: expand-ta.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.7);
+                                        width: 12px;
+                                        height: 12px;
+                                        animate icon-color { duration: 120ms; }
+                                    }
+                                }
+                            }
+
+                            expand-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.progress-show-details = !root.progress-show-details; }
+                            }
+                        }
+
+                        // Right divider line
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            Rectangle {
+                                height: 1px;
+                                background: expand-ta.has-hover
+                                    ? Cat.mauve.with-alpha(0.4)
+                                    : Cat.surface1;
+                                animate background { duration: 120ms; }
+                            }
+                        }
+                    }
+                }
+
+                // Error summary bar — visible when error and details collapsed
+                if progress-error-summary != "" && !progress-show-details: Rectangle {
+                    height: 28px;
+                    background: Cat.red.with-alpha(0.08);
+                    border-width: 1px;
+                    border-color: Cat.red.with-alpha(0.2);
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 6px;
+                        VerticalLayout {
+                            alignment: center;
+                            NavIcon {
+                                d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z";
+                                icon-color: Cat.red;
+                                width: 13px;
+                                height: 13px;
+                            }
+                        }
+                        Text {
+                            text: progress-error-summary;
+                            font-size: 12px;
+                            color: Cat.red;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Show Details ↓";
+                                font-size: 11px;
+                                color: Cat.red.with-alpha(0.7);
+                                vertical-alignment: center;
+                            }
+                        }
+                        err-summary-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.progress-show-details = true; }
+                        }
+                    }
+                }
+
+                // Live log output — visible only when details expanded
+                if progress-show-details: Rectangle {
+                    height: 1px;
+                    background: Cat.surface0;
+                    opacity: 0.5;
+                }
+
+                if progress-show-details: Rectangle {
                     vertical-stretch: 1;
                     background: Cat.crust;
 
@@ -6216,6 +6374,8 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             padding: 12px;
 
+                            // Always show the full accumulated output buffer — this reflects
+                            // everything the PTY produced (apply_terminal_text keeps it current).
                             Text {
                                 text: progress-popup-output;
                                 font-size: 12px;
@@ -6230,30 +6390,123 @@ export component MainWindow inherits Window {
 
                 // User input prompt (conflict resolution / password / questions)
                 if progress-popup-show-input: Rectangle {
-                    height: 60px;
-                    background: Cat.yellow.with-alpha(0.06);
+                    height: 76px;
+                    background: Cat.mantle;
 
-                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; opacity: 0.5; }
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.yellow.with-alpha(0.35); }
 
                     VerticalLayout {
-                        padding: 8px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
                         padding-left: 16px;
                         padding-right: 16px;
-                        spacing: 3px;
+                        spacing: 8px;
 
-                        Text {
-                            text: progress-popup-prompt;
-                            font-size: 11px;
-                            font-weight: 500;
-                            color: Cat.yellow;
-                            overflow: elide;
+                        // Prompt label
+                        HorizontalLayout {
+                            spacing: 6px;
+                            NavIcon {
+                                d: "M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm0 14v-4m0-4h.01";
+                                icon-color: Cat.yellow;
+                                width: 13px;
+                                height: 13px;
+                            }
+                            Text {
+                                text: progress-popup-prompt;
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: Cat.yellow;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
                         }
 
-                        Input {
-                            placeholder: "Type response and press Enter...";
-                            accepted(text) => {
-                                root.progress-popup-send-input(text);
-                                self.text = "";
+                        // Proceed/Cancel buttons OR text input
+                        if progress-popup-show-buttons: HorizontalLayout {
+                            spacing: 8px;
+                            // Proceed button
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 28px;
+                                border-radius: 6px;
+                                background: proceed-ta.has-hover ? Cat.green.with-alpha(0.25) : Cat.green.with-alpha(0.12);
+                                border-width: 1px;
+                                border-color: Cat.green.with-alpha(proceed-ta.has-hover ? 0.6 : 0.3);
+                                animate background { duration: 80ms; }
+                                Text {
+                                    text: "Proceed";
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: Cat.green;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                proceed-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.progress-popup-proceed(); }
+                                }
+                            }
+                            // Cancel button
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 28px;
+                                border-radius: 6px;
+                                background: cancel-inp-ta.has-hover ? Cat.red.with-alpha(0.25) : Cat.red.with-alpha(0.12);
+                                border-width: 1px;
+                                border-color: Cat.red.with-alpha(cancel-inp-ta.has-hover ? 0.6 : 0.3);
+                                animate background { duration: 80ms; }
+                                Text {
+                                    text: "Cancel";
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: Cat.red;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                cancel-inp-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.progress-popup-send-input("n"); root.progress-popup-show-input = false; }
+                                }
+                            }
+                        }
+
+                        if !progress-popup-show-buttons: prog-input-box2 := Rectangle {
+                            height: 32px;
+                            border-radius: 6px;
+                            background: Cat.surface0;
+                            border-width: 1px;
+                            border-color: prog-input-ti2.has-focus
+                                ? Cat.yellow.with-alpha(0.6)
+                                : Cat.surface2;
+                            animate border-color { duration: 80ms; }
+
+                            TouchArea { width: 100%; height: 100%; clicked => { prog-input-ti2.focus(); } }
+
+                            prog-input-ti2 := TextInput {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                color: Cat.text;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                single-line: true;
+                                selection-background-color: Cat.yellow.with-alpha(0.25);
+                                selection-foreground-color: Cat.text;
+                                accepted => {
+                                    root.progress-popup-send-input(self.text);
+                                    self.text = "";
+                                }
+                            }
+
+                            if prog-input-ti2.text == "" && !prog-input-ti2.has-focus: Text {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                text: "Type response and press Enter…";
+                                font-size: 13px;
+                                color: Cat.overlay0;
+                                vertical-alignment: center;
                             }
                         }
                     }

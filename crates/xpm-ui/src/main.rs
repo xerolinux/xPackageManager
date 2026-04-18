@@ -415,8 +415,19 @@ fn set_autostart(enabled: bool) {
     }
 }
 
-fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, interval_secs: u64, tx: mpsc::Sender<UiMessage>) {
+type TrayCheckTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>>;
+
+fn start_tray(
+    window: slint::Weak<MainWindow>,
+    tray_shutdown: TrayShutdown,
+    interval_secs: u64,
+    tx: mpsc::Sender<UiMessage>,
+    shared_count: Arc<AtomicU32>,
+    shared_check_tx: TrayCheckTx,
+) {
     stop_tray(&tray_shutdown);
+    // Clear the shared check sender while tray is being restarted.
+    *shared_check_tx.lock().unwrap() = None;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     *tray_shutdown.lock().unwrap() = Some(shutdown_tx);
@@ -424,8 +435,10 @@ fn start_tray(window: slint::Weak<MainWindow>, tray_shutdown: TrayShutdown, inte
     thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime for tray");
         rt.block_on(async move {
-            let update_count = Arc::new(AtomicU32::new(0));
+            let update_count = shared_count;
             let (check_tx, mut check_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            // Expose the sender so the main thread can trigger rechecks.
+            *shared_check_tx.lock().unwrap() = Some(check_tx.clone());
             let tray = XpmTray {
                 window: window.clone(),
                 update_count: update_count.clone(),
@@ -520,6 +533,57 @@ fn stop_tray(tray_shutdown: &TrayShutdown) {
 
 // ─── End system tray ──────────────────────────────────────────────────────────
 
+// ─── Single-instance guard ────────────────────────────────────────────────────
+
+fn instance_lock_path() -> String {
+    let uid = unsafe { libc::getuid() };
+    format!("/tmp/xpackagemanager-{}.lock", uid)
+}
+
+fn instance_socket_path() -> String {
+    let uid = unsafe { libc::getuid() };
+    format!("/tmp/xpackagemanager-{}.sock", uid)
+}
+
+fn acquire_instance_lock() -> Option<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(instance_lock_path())
+        .ok()?;
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret == 0 { Some(file) } else { None }
+}
+
+fn signal_existing_instance() {
+    use std::io::Write;
+    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(instance_socket_path()) {
+        let _ = stream.write_all(b"show");
+    }
+}
+
+fn listen_for_instance_signals(window: slint::Weak<MainWindow>) {
+    let path = instance_socket_path();
+    let _ = std::fs::remove_file(&path);
+    if let Ok(listener) = std::os::unix::net::UnixListener::bind(&path) {
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stream.is_ok() {
+                    let win = window.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(w) = win.upgrade() {
+                            w.show().ok();
+                        }
+                    }).ok();
+                }
+            }
+        });
+    }
+}
+
+// ─── End single-instance guard ────────────────────────────────────────────────
+
 enum UiMessage {
     PackagesLoaded {
         installed: Vec<PackageData>,
@@ -547,6 +611,11 @@ enum UiMessage {
     ProgressOutput(String),
     ProgressPrompt(String),
     ProgressHidePrompt,
+    ProgressPromptButtons,
+    ProgressLogLine(String, u8),
+    ProgressETA(String),
+    ProgressErrorSummary(String),
+    ProgressAutoExpand,
     OperationDone(bool),
     ActivityLoaded(Vec<ActivityItem>),
     SysInfoLoaded(SysInfo),
@@ -1341,13 +1410,15 @@ fn run_in_terminal(
     input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
     pid_holder: &Arc<Mutex<Option<u32>>>,
 ) {
-    let _ = tx.send(UiMessage::ShowTerminal(title.to_string()));
+    // Route through the progress popup so all operations share the compact
+    // progress bar + "Show Details" UX instead of the raw terminal modal.
+    let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
 
     let (master_fd, child_pid) = match spawn_in_pty(cmd, args) {
         Ok(pair) => pair,
         Err(e) => {
-            let _ = tx.send(UiMessage::TerminalOutput(format!("Error: {}\n", e)));
-            let _ = tx.send(UiMessage::TerminalDone(false));
+            let _ = tx.send(UiMessage::ProgressOutput(format!("Error: {}\n", e)));
+            let _ = tx.send(UiMessage::OperationDone(false));
             return;
         }
     };
@@ -1355,46 +1426,184 @@ fn run_in_terminal(
     *pid_holder.lock().unwrap() = Some(child_pid);
 
     let (in_tx, in_rx) = mpsc::channel::<String>();
-    let in_tx_auto = in_tx.clone(); // clone for auto-confirm in reader
+    let in_tx_auto = in_tx.clone();
     *input_sender.lock().unwrap() = Some(in_tx);
 
     let tx_reader = tx.clone();
     let master_fd_reader = master_fd;
+    let total_packages: usize = 1; // unknown for generic commands; % parser degrades gracefully
+
     let reader_handle = thread::spawn(move || {
         use std::io::Read;
         let mut file = unsafe { std::fs::File::from_raw_fd(master_fd_reader) };
         let mut buf = [0u8; 4096];
+        let mut current_percent: i32 = 0;
+        let mut pending_output = String::new();
+        let mut last_output_flush = std::time::Instant::now() - std::time::Duration::from_millis(100);
+        const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        const MAX_OUTPUT_LINES: usize = 500;
+        let op_start = std::time::Instant::now();
+        let mut first_error_line: Option<String> = None;
+
         loop {
-            // Poll with 100ms timeout - avoids blocking when process awaits input
             let ready = unsafe {
                 let mut pfd = libc::pollfd { fd: master_fd_reader, events: libc::POLLIN, revents: 0 };
                 libc::poll(&mut pfd as *mut libc::pollfd, 1, 20)
             };
-            if ready < 0 { break; } // error / signal
-            if ready == 0 { continue; } // timeout - keep polling
+            if ready < 0 { break; }
+
+            let now = std::time::Instant::now();
+
+            if ready == 0 {
+                if !pending_output.is_empty() {
+                    let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
+                    last_output_flush = now;
+                }
+                continue;
+            }
+
             match file.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let text = String::from_utf8_lossy(&buf[..n]);
                     let cleaned = strip_ansi(&text);
-                    if !cleaned.is_empty() {
-                        // Auto-confirm known safe pacman prompts
-                        if PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p)) {
-                            let _ = in_tx_auto.send("y".to_string());
+                    if cleaned.is_empty() { continue; }
+
+                    pending_output = apply_terminal_text(&pending_output, &cleaned);
+
+                    let line_count = pending_output.split('\n').count();
+                    if line_count > MAX_OUTPUT_LINES {
+                        let skip = line_count - MAX_OUTPUT_LINES;
+                        let start = pending_output.split('\n').take(skip).map(|l| l.len() + 1).sum::<usize>();
+                        pending_output.drain(..start.min(pending_output.len()));
+                    }
+
+                    let is_auto_confirm = PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
+                    let mut force_flush = false;
+
+                    if is_auto_confirm {
+                        let _ = in_tx_auto.send("y".to_string());
+                        let _ = tx_reader.send(UiMessage::ProgressHidePrompt);
+                        force_flush = true;
+                    } else {
+                        let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]");
+                        let has_yN = cleaned.contains("[y/N]") && !is_auto_confirm;
+                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_yN;
+                        if needs_user_input || has_yn {
+                            let prompt_text = cleaned.lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .last()
+                                .unwrap_or(&cleaned)
+                                .trim()
+                                .to_string();
+                            if has_yn || has_yN {
+                                // Simple Y/n → stay compact, show Proceed/Cancel buttons
+                                let _ = tx_reader.send(UiMessage::ProgressPromptButtons);
+                                let _ = tx_reader.send(UiMessage::ProgressPrompt("Proceed with transaction?".to_string()));
+                            } else {
+                                // Conflict/replacement/numbered choice → expand + text input
+                                let _ = tx_reader.send(UiMessage::ProgressPrompt(prompt_text));
+                                let _ = tx_reader.send(UiMessage::ProgressAutoExpand);
+                            }
+                            force_flush = true;
                         }
-                        // Detect password / auth prompts - surface to UI
-                        if PASSWORD_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) {
-                            let _ = tx_reader.send(UiMessage::TerminalPasswordMode(true));
+                    }
+
+                    for line in cleaned.split('\n') {
+                        let clean_line = line.split('\r').last().unwrap_or(line);
+                        let lower_line = clean_line.to_lowercase();
+                        let trimmed = clean_line.trim().to_string();
+                        if trimmed.is_empty() { continue; }
+
+                        let level: u8 = if lower_line.contains("error:") { 1 }
+                            else if lower_line.contains("warning:") { 2 }
+                            else if (lower_line.contains("installed") || lower_line.contains("upgraded")
+                                || lower_line.contains("removed")) && !lower_line.contains("error:") { 3 }
+                            else { 0 };
+
+                        if level == 1 && first_error_line.is_none() {
+                            first_error_line = Some(trimmed.clone());
                         }
-                        // Detect interactive selection prompts - refocus input (no masking)
-                        if TERMINAL_INPUT_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) {
-                            let _ = tx_reader.send(UiMessage::TerminalFocusInput);
+
+                        let _ = tx_reader.send(UiMessage::ProgressLogLine(trimmed.clone(), level));
+
+                        let phase_label = if lower_line.contains("resolving dependencies") {
+                            Some(("Resolving dependencies...", 10i32))
+                        } else if lower_line.contains("looking for conflicting") {
+                            Some(("Checking for conflicts...", 15))
+                        } else if lower_line.contains("downloading") {
+                            let pct = parse_progress_fraction(line, 20, 50, total_packages).unwrap_or(35);
+                            Some(("Downloading packages...", pct))
+                        } else if lower_line.contains("checking keyring") {
+                            Some(("Verifying signatures...", 52))
+                        } else if lower_line.contains("checking integrity") {
+                            Some(("Verifying signatures...", 53))
+                        } else if lower_line.contains("checking package integrity") {
+                            Some(("Verifying signatures...", 55))
+                        } else if lower_line.contains("loading package files") {
+                            Some(("Loading package files...", 58))
+                        } else if lower_line.contains("installing") || lower_line.contains("upgrading") {
+                            let pct = parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72);
+                            Some(("Installing packages...", pct))
+                        } else if lower_line.contains("removing") || lower_line.contains("reinstalling") {
+                            let pct = parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72);
+                            Some(("Removing packages...", pct))
+                        } else if lower_line.contains("running post-transaction hooks") {
+                            Some(("Running post-install hooks...", 88))
+                        } else if lower_line.contains("arming conditionpathexists")
+                            || lower_line.contains("updating linux module") || lower_line.contains("dkms") {
+                            Some(("Running post-install hooks...", 90))
+                        } else if lower_line.contains("updating linux initcpios") || lower_line.contains("mkinitcpio") {
+                            Some(("Rebuilding initramfs...", 92))
+                        } else if lower_line.contains("updating grub") || lower_line.contains("grub-mkconfig") || lower_line.contains("grub") {
+                            Some(("Updating bootloader...", 95))
+                        } else if lower_line.contains("updating the desktop") || lower_line.contains("updating mime") {
+                            Some(("Updating system databases...", 97))
+                        } else if lower_line.contains("updating the info") {
+                            Some(("Updating system databases...", 97))
+                        } else {
+                            None
+                        };
+
+                        if let Some((label, new_pct)) = phase_label {
+                            if new_pct > current_percent {
+                                current_percent = new_pct;
+                                let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
+
+                                if current_percent > 5 {
+                                    let elapsed = op_start.elapsed().as_secs_f32();
+                                    if elapsed > 1.0 {
+                                        let rate = current_percent as f32 / elapsed;
+                                        let remaining = (100 - current_percent) as f32 / rate;
+                                        let eta_str = if remaining < 60.0 {
+                                            format!("~{}s", remaining as u32)
+                                        } else {
+                                            let mins = (remaining / 60.0) as u32;
+                                            let secs = (remaining as u32) % 60;
+                                            format!("~{}m {}s", mins, secs)
+                                        };
+                                        let _ = tx_reader.send(UiMessage::ProgressETA(eta_str));
+                                    }
+                                }
+                            } else if new_pct == current_percent && current_percent >= 88 {
+                                let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
+                            }
                         }
-                        let _ = tx_reader.send(UiMessage::TerminalOutput(cleaned));
+                    }
+
+                    if force_flush || now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
+                        let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
+                        last_output_flush = now;
                     }
                 }
                 Err(_) => break,
             }
+        }
+        if !pending_output.is_empty() {
+            let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output));
+        }
+        if let Some(err) = first_error_line {
+            let _ = tx_reader.send(UiMessage::ProgressErrorSummary(err));
         }
         std::mem::forget(file);
     });
@@ -1402,17 +1611,12 @@ fn run_in_terminal(
     let master_fd_writer = master_fd;
     let writer_handle = thread::spawn(move || {
         use std::io::Write;
-        use std::os::unix::io::FromRawFd;
         let dup_fd = unsafe { libc::dup(master_fd_writer) };
-        if dup_fd < 0 {
-            return;
-        }
+        if dup_fd < 0 { return; }
         let mut file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
         while let Ok(input) = in_rx.recv() {
             let data = format!("{}\n", input);
-            if file.write_all(data.as_bytes()).is_err() {
-                break;
-            }
+            if file.write_all(data.as_bytes()).is_err() { break; }
             let _ = file.flush();
         }
     });
@@ -1433,8 +1637,10 @@ fn run_in_terminal(
     let _ = reader_handle.join();
     let _ = writer_handle.join();
 
-    let _ = tx.send(UiMessage::TerminalPasswordMode(false));
-    let _ = tx.send(UiMessage::TerminalDone(success));
+    if !success {
+        let _ = tx.send(UiMessage::ProgressAutoExpand);
+    }
+    let _ = tx.send(UiMessage::OperationDone(success));
 }
 
 fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String, Vec<String>) {
@@ -1544,26 +1750,22 @@ fn run_managed_operation(
         let mut buf = [0u8; 4096];
         let mut current_percent: i32 = 0;
         let mut pending_output = String::new();
-        // initialise to 100ms in the past so the very first data chunk flushes immediately
         let mut last_output_flush = std::time::Instant::now() - std::time::Duration::from_millis(100);
         const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
         const MAX_OUTPUT_LINES: usize = 500;
+        let op_start = std::time::Instant::now();
+        let mut first_error_line: Option<String> = None;
 
         loop {
-            // Poll with 100ms timeout - prevents blocking when process waits for user input.
-            // Without this, a prompt like ":: Replace X with Y? [Y/n]" never reaches the UI
-            // because read() blocks waiting for the next byte that never comes.
             let ready = unsafe {
                 let mut pfd = libc::pollfd { fd: master_fd_reader, events: libc::POLLIN, revents: 0 };
                 libc::poll(&mut pfd as *mut libc::pollfd, 1, 20)
             };
-            if ready < 0 { break; } // error / interrupted
+            if ready < 0 { break; }
 
             let now = std::time::Instant::now();
 
             if ready == 0 {
-                // Timeout - process may be waiting for input. Flush pending output so
-                // the prompt text becomes visible in the UI.
                 if !pending_output.is_empty() {
                     let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
                     last_output_flush = now;
@@ -1578,16 +1780,13 @@ fn run_managed_operation(
                     let cleaned = strip_ansi(&text);
                     if cleaned.is_empty() { continue; }
 
-                    // Accumulate in conflict-detection buffer
                     {
                         let mut ob = output_buffer_r.lock().unwrap();
                         if ob.len() < 65536 { ob.push_str(&cleaned); }
                     }
 
-                    // Apply VT100 carriage-return semantics (pacman progress bars)
                     pending_output = apply_terminal_text(&pending_output, &cleaned);
 
-                    // Trim to MAX_OUTPUT_LINES
                     let line_count = pending_output.split('\n').count();
                     if line_count > MAX_OUTPUT_LINES {
                         let skip = line_count - MAX_OUTPUT_LINES;
@@ -1595,14 +1794,11 @@ fn run_managed_operation(
                         pending_output.drain(..start.min(pending_output.len()));
                     }
 
-                    // Conflict detection
                     let lower = cleaned.to_lowercase();
                     if CONFLICT_PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase())) {
                         *escalated_r.lock().unwrap() = true;
                     }
 
-                    // Prompt / auto-confirm detection - must happen BEFORE flush so
-                    // force_flush can push the prompt text to the UI immediately.
                     let is_auto_confirm = PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
                     let mut force_flush = false;
 
@@ -1611,55 +1807,115 @@ fn run_managed_operation(
                         let _ = tx_reader.send(UiMessage::ProgressHidePrompt);
                         force_flush = true;
                     } else {
-                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p))
-                            || (cleaned.contains("[y/N]") && !is_auto_confirm);
-                        if needs_user_input {
+                        let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]");
+                        let has_yN = cleaned.contains("[y/N]") && !is_auto_confirm;
+                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_yN;
+                        if needs_user_input || has_yn {
                             let prompt_text = cleaned.lines()
                                 .filter(|l| !l.trim().is_empty())
                                 .last()
                                 .unwrap_or(&cleaned)
                                 .trim()
                                 .to_string();
-                            let _ = tx_reader.send(UiMessage::ProgressPrompt(prompt_text));
-                            force_flush = true; // must be visible before waiting for user
+                            // Simple yes/no prompt → show Proceed/Cancel buttons
+                            if has_yn || has_yN {
+                                // Simple Y/n → stay compact, show Proceed/Cancel buttons
+                                let _ = tx_reader.send(UiMessage::ProgressPromptButtons);
+                                let _ = tx_reader.send(UiMessage::ProgressPrompt("Proceed with transaction?".to_string()));
+                            } else {
+                                // Conflict/replacement/numbered choice → expand + text input
+                                let _ = tx_reader.send(UiMessage::ProgressPrompt(prompt_text));
+                                let _ = tx_reader.send(UiMessage::ProgressAutoExpand);
+                            }
+                            force_flush = true;
                         }
                     }
 
-                    // Progress percent tracking
                     for line in cleaned.split('\n') {
                         let clean_line = line.split('\r').last().unwrap_or(line);
                         let lower_line = clean_line.to_lowercase();
                         let trimmed = clean_line.trim().to_string();
-                        let new_percent = if lower_line.contains("resolving dependencies") { 10 }
-                            else if lower_line.contains("looking for conflicting") { 15 }
-                            else if lower_line.contains("downloading") {
-                                parse_progress_fraction(line, 20, 50, total_packages).unwrap_or(35)
-                            }
-                            else if lower_line.contains("checking keyring") || lower_line.contains("checking integrity") { 52 }
-                            else if lower_line.contains("checking package integrity") { 55 }
-                            else if lower_line.contains("loading package files") { 58 }
-                            else if lower_line.contains("installing") || lower_line.contains("upgrading")
-                                || lower_line.contains("removing") || lower_line.contains("reinstalling") {
-                                parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72)
-                            }
-                            else if lower_line.contains("running post-transaction hooks") { 88 }
-                            else if lower_line.contains("arming conditionpathexists")
-                                || lower_line.contains("updating linux module") || lower_line.contains("dkms") { 90 }
-                            else if lower_line.contains("updating linux initcpios") || lower_line.contains("mkinitcpio") { 92 }
-                            else if lower_line.contains("updating grub") || lower_line.contains("grub-mkconfig") { 95 }
-                            else if lower_line.contains("updating the info")
-                                || lower_line.contains("updating the desktop") || lower_line.contains("updating mime") { 97 }
-                            else { current_percent };
+                        if trimmed.is_empty() { continue; }
 
-                        if new_percent > current_percent {
-                            current_percent = new_percent;
-                            let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, trimmed));
-                        } else if new_percent == current_percent && current_percent >= 88 && !trimmed.is_empty() {
-                            let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, trimmed));
+                        // Determine log level
+                        let level: u8 = if lower_line.contains("error:") { 1 }
+                            else if lower_line.contains("warning:") { 2 }
+                            else if (lower_line.contains("installed") || lower_line.contains("upgraded")
+                                || lower_line.contains("removed")) && !lower_line.contains("error:") { 3 }
+                            else { 0 };
+
+                        if level == 1 && first_error_line.is_none() {
+                            first_error_line = Some(trimmed.clone());
+                        }
+
+                        let _ = tx_reader.send(UiMessage::ProgressLogLine(trimmed.clone(), level));
+
+                        // Phase label mapping
+                        let phase_label = if lower_line.contains("resolving dependencies") {
+                            Some(("Resolving dependencies...", 10i32))
+                        } else if lower_line.contains("looking for conflicting") {
+                            Some(("Checking for conflicts...", 15))
+                        } else if lower_line.contains("downloading") {
+                            let pct = parse_progress_fraction(line, 20, 50, total_packages).unwrap_or(35);
+                            Some(("Downloading packages...", pct))
+                        } else if lower_line.contains("checking keyring") {
+                            Some(("Verifying signatures...", 52))
+                        } else if lower_line.contains("checking integrity") {
+                            Some(("Verifying signatures...", 53))
+                        } else if lower_line.contains("checking package integrity") {
+                            Some(("Verifying signatures...", 55))
+                        } else if lower_line.contains("loading package files") {
+                            Some(("Loading package files...", 58))
+                        } else if lower_line.contains("installing") || lower_line.contains("upgrading") {
+                            let pct = parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72);
+                            Some(("Installing packages...", pct))
+                        } else if lower_line.contains("removing") || lower_line.contains("reinstalling") {
+                            let pct = parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72);
+                            Some(("Removing packages...", pct))
+                        } else if lower_line.contains("running post-transaction hooks") {
+                            Some(("Running post-install hooks...", 88))
+                        } else if lower_line.contains("arming conditionpathexists")
+                            || lower_line.contains("updating linux module") || lower_line.contains("dkms") {
+                            Some(("Running post-install hooks...", 90))
+                        } else if lower_line.contains("updating linux initcpios") || lower_line.contains("mkinitcpio") {
+                            Some(("Rebuilding initramfs...", 92))
+                        } else if lower_line.contains("updating grub") || lower_line.contains("grub-mkconfig") || lower_line.contains("grub") {
+                            Some(("Updating bootloader...", 95))
+                        } else if lower_line.contains("updating the desktop") || lower_line.contains("updating mime") {
+                            Some(("Updating system databases...", 97))
+                        } else if lower_line.contains("updating the info") {
+                            Some(("Updating system databases...", 97))
+                        } else {
+                            None
+                        };
+
+                        if let Some((label, new_pct)) = phase_label {
+                            if new_pct > current_percent {
+                                current_percent = new_pct;
+                                let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
+
+                                // ETA calculation once we have meaningful progress
+                                if current_percent > 5 {
+                                    let elapsed = op_start.elapsed().as_secs_f32();
+                                    if elapsed > 1.0 {
+                                        let rate = current_percent as f32 / elapsed;
+                                        let remaining = (100 - current_percent) as f32 / rate;
+                                        let eta_str = if remaining < 60.0 {
+                                            format!("~{}s", remaining as u32)
+                                        } else {
+                                            let mins = (remaining / 60.0) as u32;
+                                            let secs = (remaining as u32) % 60;
+                                            format!("~{}m {}s", mins, secs)
+                                        };
+                                        let _ = tx_reader.send(UiMessage::ProgressETA(eta_str));
+                                    }
+                                }
+                            } else if new_pct == current_percent && current_percent >= 88 {
+                                let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
+                            }
                         }
                     }
 
-                    // Flush output to UI - immediately on prompts, throttled otherwise
                     if force_flush || now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
                         let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output.clone()));
                         last_output_flush = now;
@@ -1670,6 +1926,9 @@ fn run_managed_operation(
         }
         if !pending_output.is_empty() {
             let _ = tx_reader.send(UiMessage::ProgressOutput(pending_output));
+        }
+        if let Some(err) = first_error_line {
+            let _ = tx_reader.send(UiMessage::ProgressErrorSummary(err));
         }
         std::mem::forget(file);
     });
@@ -1713,6 +1972,9 @@ fn run_managed_operation(
         let (summary, can_force) = parse_conflict_summary(&output);
         let _ = tx.send(UiMessage::ShowConflict { summary, can_force });
     } else {
+        if !success {
+            let _ = tx.send(UiMessage::ProgressAutoExpand);
+        }
         let _ = tx.send(UiMessage::OperationDone(success));
     }
 }
@@ -2443,11 +2705,23 @@ fn main() {
         info!("Opening local package: {}", path);
     }
 
+    // Single-instance guard: if another instance is running, signal it to show
+    // its window and exit. Keep the lock file alive for the lifetime of this process.
+    let _instance_lock = match acquire_instance_lock() {
+        Some(f) => f,
+        None => {
+            info!("Another instance is already running — bringing it to foreground");
+            signal_existing_instance();
+            return;
+        }
+    };
 
     let window = MainWindow::new().expect("Failed to create window");
 
     let (tx, rx) = mpsc::channel::<UiMessage>();
     let rx = Rc::new(RefCell::new(rx));
+
+    listen_for_instance_signals(window.as_weak());
 
     let terminal_input_sender: Arc<Mutex<Option<mpsc::Sender<String>>>> = Arc::new(Mutex::new(None));
     let terminal_child_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
@@ -2497,6 +2771,9 @@ fn main() {
     let tx_load = tx.clone();
     let tx_search = tx.clone();
 
+    // Shared log model for colored progress log lines — reset when popup opens
+    let log_model: Rc<RefCell<Option<Rc<VecModel<LogLine>>>>> = Rc::new(RefCell::new(None));
+
     let timer = Timer::default();
     let window_weak = window.as_weak();
     let rx_clone = rx.clone();
@@ -2511,6 +2788,13 @@ fn main() {
     let conflict_ctx_timer = conflict_context.clone();
     let flatpak_ids_timer = flatpak_installed_ids.clone();
     let flatpak_store_timer = flatpak_app_store.clone();
+    let log_model_timer = log_model.clone();
+    // Shared tray state — created here so the timer closure can capture them.
+    // The tray setup section below reuses these same Arcs.
+    let tray_update_count: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+    let tray_check_tx: TrayCheckTx = Arc::new(Mutex::new(None));
+    let tray_count_op  = tray_update_count.clone();
+    let tray_check_op  = tray_check_tx.clone();
 
     timer.start(TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
         if let Some(window) = window_weak.upgrade() {
@@ -2669,6 +2953,13 @@ fn main() {
                         window.set_progress_popup_done(false);
                         window.set_progress_popup_success(false);
                         window.set_show_progress_logs(false);
+                        window.set_progress_show_details(false);
+                        window.set_progress_popup_show_buttons(false);
+                        window.set_progress_popup_eta(SharedString::from(""));
+                        window.set_progress_error_summary(SharedString::from(""));
+                        let new_log = Rc::new(VecModel::<LogLine>::default());
+                        window.set_progress_log_lines(ModelRc::new(new_log.clone()));
+                        *log_model_timer.borrow_mut() = Some(new_log);
                         window.set_show_progress_popup(true);
                         window.set_show_terminal(false);
                     }
@@ -2681,7 +2972,30 @@ fn main() {
                     }
                     UiMessage::ProgressHidePrompt => {
                         window.set_progress_popup_show_input(false);
+                        window.set_progress_popup_show_buttons(false);
                         window.set_progress_popup_prompt(SharedString::from(""));
+                    }
+                    UiMessage::ProgressPromptButtons => {
+                        window.set_progress_popup_show_buttons(true);
+                        window.set_progress_popup_show_input(true);
+                    }
+                    UiMessage::ProgressLogLine(text, level) => {
+                        let model_opt = log_model_timer.borrow();
+                        if let Some(model) = model_opt.as_ref() {
+                            model.push(LogLine {
+                                text: SharedString::from(text.as_str()),
+                                level: level as i32,
+                            });
+                        }
+                    }
+                    UiMessage::ProgressETA(eta) => {
+                        window.set_progress_popup_eta(SharedString::from(&eta));
+                    }
+                    UiMessage::ProgressErrorSummary(s) => {
+                        window.set_progress_error_summary(SharedString::from(&s));
+                    }
+                    UiMessage::ProgressAutoExpand => {
+                        window.set_progress_show_details(true);
                     }
                     UiMessage::OperationProgress(percent, stage) => {
                         window.set_progress_popup_percent(percent);
@@ -2729,11 +3043,21 @@ fn main() {
                         } else {
                             window.set_show_progress_logs(true);
                         }
-                        {
-                            let tx = tx_timer.clone();
+                        // Only reload after a successful operation. On failure/cancel nothing
+                        // actually changed on the system, so preserve the current UI state
+                        // (especially the updates list which load_packages_async(false) would clear).
+                        if success {
+                        let tx = tx_timer.clone();
                             let search_query = window.get_search_text().to_string();
                             let ids_ref = flatpak_ids_timer.clone();
                             let store_ref = flatpak_store_timer.clone();
+                            // Optimistically zero the tray badge — updates were just applied.
+                            // Then signal the check task to do a real recount and redraw.
+                            tray_count_op.store(0, Ordering::Relaxed);
+                            if let Some(check_tx) = tray_check_op.lock().unwrap().as_ref() {
+                                check_tx.send(()).ok();
+                            }
+
                             thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().expect("Runtime");
                                 rt.block_on(async {
@@ -2755,7 +3079,7 @@ fn main() {
                                     let _ = tx.send(UiMessage::InstalledFlatpaksLoaded(pkgs));
                                 });
                             });
-                        }
+                        } // end if success
                     }
                     UiMessage::ShowConflict { summary, can_force } => {
                         window.set_show_progress_popup(false);
@@ -3415,6 +3739,21 @@ fn main() {
             window.set_progress_popup_show_input(false);
             window.set_progress_popup_prompt(SharedString::from(""));
         }
+    });
+
+    let tx_proceed = tx.clone();
+    let input_proceed = terminal_input_sender.clone();
+    let window_weak_proceed = window.as_weak();
+    window.on_progress_popup_proceed(move || {
+        if let Some(sender) = input_proceed.lock().unwrap().as_ref() {
+            let _ = sender.send("y".to_string());
+        }
+        if let Some(window) = window_weak_proceed.upgrade() {
+            window.set_progress_popup_show_input(false);
+            window.set_progress_popup_show_buttons(false);
+            window.set_progress_popup_prompt(SharedString::from(""));
+        }
+        let _ = tx_proceed.send(UiMessage::ProgressHidePrompt);
     });
 
     let selected_pkgs_toggle = selected_packages.clone();
@@ -4187,13 +4526,16 @@ fn main() {
             }
             let tx = tx_bfi.clone();
             let title = format!("Installing {} Flatpak(s)...", ids.len());
-            let _ = tx.send(UiMessage::ShowTerminal(title));
+            let _ = tx.send(UiMessage::ShowTerminal(title.clone()));
             thread::spawn(move || {
                 let mut args = vec!["install".to_string(), "-y".to_string(), "flathub".to_string()];
-                args.extend(ids);
-                let _ = std::process::Command::new("flatpak")
+                args.extend(ids.iter().cloned());
+                let status = std::process::Command::new("flatpak")
                     .args(&args)
-                    .status();
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                let _ = tx.send(UiMessage::TerminalDone(status));
             });
         }
     });
@@ -4214,13 +4556,16 @@ fn main() {
             }
             let tx = tx_bfr.clone();
             let title = format!("Removing {} Flatpak(s)...", ids.len());
-            let _ = tx.send(UiMessage::ShowTerminal(title));
+            let _ = tx.send(UiMessage::ShowTerminal(title.clone()));
             thread::spawn(move || {
                 let mut args = vec!["uninstall".to_string(), "-y".to_string()];
-                args.extend(ids);
-                let _ = std::process::Command::new("flatpak")
+                args.extend(ids.iter().cloned());
+                let status = std::process::Command::new("flatpak")
                     .args(&args)
-                    .status();
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                let _ = tx.send(UiMessage::TerminalDone(status));
             });
         }
     });
@@ -4706,6 +5051,10 @@ fn main() {
     let tray_shutdown: TrayShutdown = Arc::new(Mutex::new(None));
     let tray_shutdown_toggle = tray_shutdown.clone();
 
+    // tray_update_count and tray_check_tx were created before the timer — reuse them.
+    let tray_count_toggle = tray_update_count.clone();
+    let tray_check_toggle = tray_check_tx.clone();
+
     // In --tray mode the tray is always considered enabled so the close handler
     // hides instead of quitting.
     let effective_tray = config.tray_enabled || tray_only;
@@ -4721,7 +5070,8 @@ fn main() {
     // Start tray if enabled in settings OR if launched with --tray.
     if effective_tray {
         let interval_secs = (config.tray_check_interval_minutes as u64) * 60;
-        start_tray(window.as_weak(), tray_shutdown.clone(), interval_secs, tx.clone());
+        start_tray(window.as_weak(), tray_shutdown.clone(), interval_secs, tx.clone(),
+                   tray_update_count.clone(), tray_check_tx.clone());
     }
 
     let window_weak_tray = window.as_weak();
@@ -4732,10 +5082,12 @@ fn main() {
             let interval_secs = (win.get_setting_tray_check_interval() as u64) * 60;
             if enabled {
                 set_autostart(true);
-                start_tray(window_weak_tray.clone(), tray_shutdown_toggle.clone(), interval_secs, tx_tray_toggle.clone());
+                start_tray(window_weak_tray.clone(), tray_shutdown_toggle.clone(), interval_secs,
+                           tx_tray_toggle.clone(), tray_count_toggle.clone(), tray_check_toggle.clone());
             } else {
                 set_autostart(false);
                 stop_tray(&tray_shutdown_toggle);
+                *tray_check_toggle.lock().unwrap() = None;
             }
         }
     });
