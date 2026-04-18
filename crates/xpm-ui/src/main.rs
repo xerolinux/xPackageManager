@@ -602,8 +602,6 @@ enum UiMessage {
     ShowTerminal(String),
     TerminalOutput(String),
     TerminalDone(bool),
-    TerminalPasswordMode(bool),
-    TerminalFocusInput,
     SetTerminalIsUpgrade(bool),
     HideTerminal,
     ShowProgressPopup(String),
@@ -676,22 +674,6 @@ exit 1
 "#;
 
 // Non-password interactive prompts that need input focus but not masking
-const TERMINAL_INPUT_PROMPT_PATTERNS: &[&str] = &[
-    "Enter number to select",   // fake fzf selection prompt
-    "to cancel)",               // "0 to cancel)"
-];
-
-// Password / auth prompts that require the user to type a secret
-const PASSWORD_PROMPT_PATTERNS: &[&str] = &[
-    "[sudo] password",
-    "Password:",
-    "password for ",
-    "Enter password",
-    "Fingerprint",          // fprintd/Howdy timeout fallback
-    "PIN:",
-    "PKCS#11",
-    "passphrase for key",
-];
 
 const PACMAN_AUTO_CONFIRM_PATTERNS: &[&str] = &[];
 
@@ -1487,8 +1469,8 @@ fn run_in_terminal(
                         force_flush = true;
                     } else {
                         let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]");
-                        let has_yN = cleaned.contains("[y/N]") && !is_auto_confirm;
-                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_yN;
+                        let has_y_n = cleaned.contains("[y/N]") && !is_auto_confirm;
+                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_y_n;
                         if needs_user_input || has_yn {
                             let prompt_text = cleaned.lines()
                                 .filter(|l| !l.trim().is_empty())
@@ -1496,7 +1478,7 @@ fn run_in_terminal(
                                 .unwrap_or(&cleaned)
                                 .trim()
                                 .to_string();
-                            if has_yn || has_yN {
+                            if has_yn || has_y_n {
                                 // Simple Y/n → stay compact, show Proceed/Cancel buttons
                                 let _ = tx_reader.send(UiMessage::ProgressPromptButtons);
                                 let _ = tx_reader.send(UiMessage::ProgressPrompt("Proceed with transaction?".to_string()));
@@ -1808,8 +1790,8 @@ fn run_managed_operation(
                         force_flush = true;
                     } else {
                         let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]");
-                        let has_yN = cleaned.contains("[y/N]") && !is_auto_confirm;
-                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_yN;
+                        let has_y_n = cleaned.contains("[y/N]") && !is_auto_confirm;
+                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_y_n;
                         if needs_user_input || has_yn {
                             let prompt_text = cleaned.lines()
                                 .filter(|l| !l.trim().is_empty())
@@ -1818,7 +1800,7 @@ fn run_managed_operation(
                                 .trim()
                                 .to_string();
                             // Simple yes/no prompt → show Proceed/Cancel buttons
-                            if has_yn || has_yN {
+                            if has_yn || has_y_n {
                                 // Simple Y/n → stay compact, show Proceed/Cancel buttons
                                 let _ = tx_reader.send(UiMessage::ProgressPromptButtons);
                                 let _ = tx_reader.send(UiMessage::ProgressPrompt("Proceed with transaction?".to_string()));
@@ -2863,15 +2845,6 @@ fn main() {
                             let cut = pending_terminal.len() - 262144;
                             pending_terminal.drain(..cut);
                         }
-                    }
-                    UiMessage::TerminalPasswordMode(on) => {
-                        window.set_terminal_show_password(on);
-                        if on {
-                            window.set_terminal_focus_pending(true);
-                        }
-                    }
-                    UiMessage::TerminalFocusInput => {
-                        window.set_terminal_focus_pending(true);
                     }
                     UiMessage::TerminalDone(success) => {
                         flush_now = true;
