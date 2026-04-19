@@ -85,7 +85,16 @@ xPackageManager/
 sudo pacman -Syy xpm-gui
 ```
 
-**Other Arch-based distros** (add XeroLinux repo first):
+**Other Arch-based distros** :
+
+- Without XeroLinux repo :
+
+```bash
+git clone https://github.com/xerolinux/xPackageManager
+cd xPackageManager && makepkg -rsifcd
+```
+
+- With XeroLinux repo :
 
 ```bash
 echo -e '\n[xerolinux]\nSigLevel = Optional TrustAll\nServer = https://repos.xerolinux.xyz/$repo/$arch' | sudo tee -a /etc/pacman.conf
