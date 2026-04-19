@@ -63,7 +63,7 @@ package() {
     install -Dm644 "packaging/org.xpackagemanager.policy" "$pkgdir/usr/share/polkit-1/actions/org.xpackagemanager.policy"
 
     # Clean up build artifacts
-    cargo clean
+    cargo clean --release-only
 }
 
 post_install() {

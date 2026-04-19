@@ -834,6 +834,7 @@ export component MainWindow inherits Window {
 
     in-out property <bool> show-progress-popup: false;
     in-out property <bool> progress-popup-show-close: false;
+    in-out property <bool> progress-input-focus-pending: false;
     in-out property <string> progress-popup-title: "";
     in-out property <int> progress-popup-percent: 0;
     in-out property <string> progress-popup-stage: "";
@@ -6487,6 +6488,17 @@ export component MainWindow inherits Window {
                                 ? Cat.yellow.with-alpha(0.6)
                                 : Cat.surface2;
                             animate border-color { duration: 80ms; }
+
+                            // Deferred focus via Timer avoids Slint's "Recursion detected" panic
+                            // that occurs when focus() is called directly during init/property eval.
+                            Timer {
+                                interval: 8ms;
+                                running: root.progress-input-focus-pending;
+                                triggered => {
+                                    root.progress-input-focus-pending = false;
+                                    prog-input-ti2.focus();
+                                }
+                            }
 
                             TouchArea { width: 100%; height: 100%; clicked => { prog-input-ti2.focus(); } }
 

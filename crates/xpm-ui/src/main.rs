@@ -681,10 +681,6 @@ done
 exit 1
 "#;
 
-// Non-password interactive prompts that need input focus but not masking
-
-const PACMAN_AUTO_CONFIRM_PATTERNS: &[&str] = &[];
-
 const PACMAN_USER_PROMPT_PATTERNS: &[&str] = &[
     "Proceed with installation? [Y/n]",
     "Proceed with download? [Y/n]",
@@ -1393,6 +1389,96 @@ fn spawn_in_pty(cmd: &str, args: &[&str]) -> Result<(i32, u32), String> {
     }
 }
 
+// ─── Shared PTY reader helpers ────────────────────────────────────────────────
+
+fn classify_log_level(lower: &str) -> u8 {
+    if lower.contains("error:") { 1 }
+    else if lower.contains("warning:") { 2 }
+    else if (lower.contains("installed") || lower.contains("upgraded") || lower.contains("removed"))
+        && !lower.contains("error:") { 3 }
+    else { 0 }
+}
+
+fn detect_phase(lower: &str, raw: &str, total_packages: usize) -> Option<(&'static str, i32)> {
+    if lower.contains("resolving dependencies") {
+        Some(("Resolving dependencies...", 10))
+    } else if lower.contains("looking for conflicting") {
+        Some(("Checking for conflicts...", 15))
+    } else if lower.contains("downloading") {
+        let pct = parse_progress_fraction(raw, 20, 50, total_packages).unwrap_or(35);
+        Some(("Downloading packages...", pct))
+    } else if lower.contains("checking keyring") {
+        Some(("Verifying signatures...", 52))
+    } else if lower.contains("checking integrity") {
+        Some(("Verifying signatures...", 53))
+    } else if lower.contains("checking package integrity") {
+        Some(("Verifying signatures...", 55))
+    } else if lower.contains("loading package files") {
+        Some(("Loading package files...", 58))
+    } else if lower.contains("installing") || lower.contains("upgrading") {
+        let pct = parse_progress_fraction(raw, 60, 85, total_packages).unwrap_or(72);
+        Some(("Installing packages...", pct))
+    } else if lower.contains("removing") || lower.contains("reinstalling") {
+        let pct = parse_progress_fraction(raw, 60, 85, total_packages).unwrap_or(72);
+        Some(("Removing packages...", pct))
+    } else if lower.contains("running post-transaction hooks") {
+        Some(("Running post-install hooks...", 88))
+    } else if lower.contains("arming conditionpathexists")
+        || lower.contains("updating linux module") || lower.contains("dkms") {
+        Some(("Running post-install hooks...", 90))
+    } else if lower.contains("updating linux initcpios") || lower.contains("mkinitcpio") {
+        Some(("Rebuilding initramfs...", 92))
+    } else if lower.contains("updating grub") || lower.contains("grub-mkconfig") || lower.contains("grub") {
+        Some(("Updating bootloader...", 95))
+    } else if lower.contains("updating the desktop") || lower.contains("updating mime")
+        || lower.contains("updating the info") {
+        Some(("Updating system databases...", 97))
+    } else {
+        None
+    }
+}
+
+fn format_eta(current_percent: i32, op_start: std::time::Instant) -> Option<String> {
+    if current_percent <= 5 { return None; }
+    let elapsed = op_start.elapsed().as_secs_f32();
+    if elapsed <= 1.0 { return None; }
+    let rate = current_percent as f32 / elapsed;
+    let remaining = (100 - current_percent) as f32 / rate;
+    if remaining < 60.0 {
+        Some(format!("~{}s", remaining as u32))
+    } else {
+        Some(format!("~{}m {}s", (remaining / 60.0) as u32, (remaining as u32) % 60))
+    }
+}
+
+/// Detects interactive prompts and sends the appropriate UI messages.
+/// Returns true if the output should be force-flushed to the UI immediately.
+fn handle_pty_prompt(cleaned: &str, always_input: bool, tx: &mpsc::Sender<UiMessage>) -> bool {
+    let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]");
+    let has_y_n = cleaned.contains("[y/N]");
+    let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_y_n;
+    if needs_user_input || has_yn {
+        let prompt_text = cleaned.lines()
+            .filter(|l| !l.trim().is_empty())
+            .last()
+            .unwrap_or(cleaned)
+            .trim()
+            .to_string();
+        if (has_yn || has_y_n) && !always_input {
+            let _ = tx.send(UiMessage::ProgressPromptButtons);
+            let _ = tx.send(UiMessage::ProgressPrompt("Proceed with transaction?".to_string()));
+        } else {
+            let _ = tx.send(UiMessage::ProgressPrompt(prompt_text));
+            let _ = tx.send(UiMessage::ProgressAutoExpand);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+// ─── End shared PTY reader helpers ────────────────────────────────────────────
+
 fn run_in_terminal(
     tx: &mpsc::Sender<UiMessage>,
     title: &str,
@@ -1443,7 +1529,6 @@ fn run_in_terminal_impl(
     *pid_holder.lock().unwrap() = Some(child_pid);
 
     let (in_tx, in_rx) = mpsc::channel::<String>();
-    let in_tx_auto = in_tx.clone();
     *input_sender.lock().unwrap() = Some(in_tx);
 
     let tx_reader = tx.clone();
@@ -1495,36 +1580,7 @@ fn run_in_terminal_impl(
                         pending_output.drain(..start.min(pending_output.len()));
                     }
 
-                    let is_auto_confirm = PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
-                    let mut force_flush = false;
-
-                    if is_auto_confirm {
-                        let _ = in_tx_auto.send("y".to_string());
-                        let _ = tx_reader.send(UiMessage::ProgressHidePrompt);
-                        force_flush = true;
-                    } else {
-                        let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]");
-                        let has_y_n = cleaned.contains("[y/N]") && !is_auto_confirm;
-                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_y_n;
-                        if needs_user_input || has_yn {
-                            let prompt_text = cleaned.lines()
-                                .filter(|l| !l.trim().is_empty())
-                                .last()
-                                .unwrap_or(&cleaned)
-                                .trim()
-                                .to_string();
-                            if (has_yn || has_y_n) && !always_input {
-                                // Simple Y/n → stay compact, show Proceed/Cancel buttons
-                                let _ = tx_reader.send(UiMessage::ProgressPromptButtons);
-                                let _ = tx_reader.send(UiMessage::ProgressPrompt("Proceed with transaction?".to_string()));
-                            } else {
-                                // always_input mode (downgrade) or conflict/numbered choice → text input
-                                let _ = tx_reader.send(UiMessage::ProgressPrompt(prompt_text));
-                                let _ = tx_reader.send(UiMessage::ProgressAutoExpand);
-                            }
-                            force_flush = true;
-                        }
-                    }
+                    let force_flush = handle_pty_prompt(&cleaned, always_input, &tx_reader);
 
                     for line in cleaned.split('\n') {
                         let clean_line = line.split('\r').last().unwrap_or(line);
@@ -1532,75 +1588,18 @@ fn run_in_terminal_impl(
                         let trimmed = clean_line.trim().to_string();
                         if trimmed.is_empty() { continue; }
 
-                        let level: u8 = if lower_line.contains("error:") { 1 }
-                            else if lower_line.contains("warning:") { 2 }
-                            else if (lower_line.contains("installed") || lower_line.contains("upgraded")
-                                || lower_line.contains("removed")) && !lower_line.contains("error:") { 3 }
-                            else { 0 };
-
+                        let level = classify_log_level(&lower_line);
                         if level == 1 && first_error_line.is_none() {
                             first_error_line = Some(trimmed.clone());
                         }
+                        let _ = tx_reader.send(UiMessage::ProgressLogLine(trimmed, level));
 
-                        let _ = tx_reader.send(UiMessage::ProgressLogLine(trimmed.clone(), level));
-
-                        let phase_label = if lower_line.contains("resolving dependencies") {
-                            Some(("Resolving dependencies...", 10i32))
-                        } else if lower_line.contains("looking for conflicting") {
-                            Some(("Checking for conflicts...", 15))
-                        } else if lower_line.contains("downloading") {
-                            let pct = parse_progress_fraction(line, 20, 50, total_packages).unwrap_or(35);
-                            Some(("Downloading packages...", pct))
-                        } else if lower_line.contains("checking keyring") {
-                            Some(("Verifying signatures...", 52))
-                        } else if lower_line.contains("checking integrity") {
-                            Some(("Verifying signatures...", 53))
-                        } else if lower_line.contains("checking package integrity") {
-                            Some(("Verifying signatures...", 55))
-                        } else if lower_line.contains("loading package files") {
-                            Some(("Loading package files...", 58))
-                        } else if lower_line.contains("installing") || lower_line.contains("upgrading") {
-                            let pct = parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72);
-                            Some(("Installing packages...", pct))
-                        } else if lower_line.contains("removing") || lower_line.contains("reinstalling") {
-                            let pct = parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72);
-                            Some(("Removing packages...", pct))
-                        } else if lower_line.contains("running post-transaction hooks") {
-                            Some(("Running post-install hooks...", 88))
-                        } else if lower_line.contains("arming conditionpathexists")
-                            || lower_line.contains("updating linux module") || lower_line.contains("dkms") {
-                            Some(("Running post-install hooks...", 90))
-                        } else if lower_line.contains("updating linux initcpios") || lower_line.contains("mkinitcpio") {
-                            Some(("Rebuilding initramfs...", 92))
-                        } else if lower_line.contains("updating grub") || lower_line.contains("grub-mkconfig") || lower_line.contains("grub") {
-                            Some(("Updating bootloader...", 95))
-                        } else if lower_line.contains("updating the desktop") || lower_line.contains("updating mime") {
-                            Some(("Updating system databases...", 97))
-                        } else if lower_line.contains("updating the info") {
-                            Some(("Updating system databases...", 97))
-                        } else {
-                            None
-                        };
-
-                        if let Some((label, new_pct)) = phase_label {
+                        if let Some((label, new_pct)) = detect_phase(&lower_line, line, total_packages) {
                             if new_pct > current_percent {
                                 current_percent = new_pct;
                                 let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
-
-                                if current_percent > 5 {
-                                    let elapsed = op_start.elapsed().as_secs_f32();
-                                    if elapsed > 1.0 {
-                                        let rate = current_percent as f32 / elapsed;
-                                        let remaining = (100 - current_percent) as f32 / rate;
-                                        let eta_str = if remaining < 60.0 {
-                                            format!("~{}s", remaining as u32)
-                                        } else {
-                                            let mins = (remaining / 60.0) as u32;
-                                            let secs = (remaining as u32) % 60;
-                                            format!("~{}m {}s", mins, secs)
-                                        };
-                                        let _ = tx_reader.send(UiMessage::ProgressETA(eta_str));
-                                    }
+                                if let Some(eta) = format_eta(current_percent, op_start) {
+                                    let _ = tx_reader.send(UiMessage::ProgressETA(eta));
                                 }
                             } else if new_pct == current_percent && current_percent >= 88 {
                                 let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
@@ -1758,7 +1757,6 @@ fn run_managed_operation(
     let master_fd_reader = master_fd;
     let escalated_r = escalated.clone();
     let output_buffer_r = output_buffer.clone();
-    let in_tx_r = in_tx;
     let total_packages = names.len().max(1);
 
     let reader_handle = thread::spawn(move || {
@@ -1816,37 +1814,7 @@ fn run_managed_operation(
                         *escalated_r.lock().unwrap() = true;
                     }
 
-                    let is_auto_confirm = PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
-                    let mut force_flush = false;
-
-                    if is_auto_confirm {
-                        let _ = in_tx_r.send("y".to_string());
-                        let _ = tx_reader.send(UiMessage::ProgressHidePrompt);
-                        force_flush = true;
-                    } else {
-                        let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]");
-                        let has_y_n = cleaned.contains("[y/N]") && !is_auto_confirm;
-                        let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_y_n;
-                        if needs_user_input || has_yn {
-                            let prompt_text = cleaned.lines()
-                                .filter(|l| !l.trim().is_empty())
-                                .last()
-                                .unwrap_or(&cleaned)
-                                .trim()
-                                .to_string();
-                            // Simple yes/no prompt → show Proceed/Cancel buttons
-                            if has_yn || has_y_n {
-                                // Simple Y/n → stay compact, show Proceed/Cancel buttons
-                                let _ = tx_reader.send(UiMessage::ProgressPromptButtons);
-                                let _ = tx_reader.send(UiMessage::ProgressPrompt("Proceed with transaction?".to_string()));
-                            } else {
-                                // Conflict/replacement/numbered choice → expand + text input
-                                let _ = tx_reader.send(UiMessage::ProgressPrompt(prompt_text));
-                                let _ = tx_reader.send(UiMessage::ProgressAutoExpand);
-                            }
-                            force_flush = true;
-                        }
-                    }
+                    let force_flush = handle_pty_prompt(&cleaned, false, &tx_reader);
 
                     for line in cleaned.split('\n') {
                         let clean_line = line.split('\r').last().unwrap_or(line);
@@ -1854,78 +1822,18 @@ fn run_managed_operation(
                         let trimmed = clean_line.trim().to_string();
                         if trimmed.is_empty() { continue; }
 
-                        // Determine log level
-                        let level: u8 = if lower_line.contains("error:") { 1 }
-                            else if lower_line.contains("warning:") { 2 }
-                            else if (lower_line.contains("installed") || lower_line.contains("upgraded")
-                                || lower_line.contains("removed")) && !lower_line.contains("error:") { 3 }
-                            else { 0 };
-
+                        let level = classify_log_level(&lower_line);
                         if level == 1 && first_error_line.is_none() {
                             first_error_line = Some(trimmed.clone());
                         }
+                        let _ = tx_reader.send(UiMessage::ProgressLogLine(trimmed, level));
 
-                        let _ = tx_reader.send(UiMessage::ProgressLogLine(trimmed.clone(), level));
-
-                        // Phase label mapping
-                        let phase_label = if lower_line.contains("resolving dependencies") {
-                            Some(("Resolving dependencies...", 10i32))
-                        } else if lower_line.contains("looking for conflicting") {
-                            Some(("Checking for conflicts...", 15))
-                        } else if lower_line.contains("downloading") {
-                            let pct = parse_progress_fraction(line, 20, 50, total_packages).unwrap_or(35);
-                            Some(("Downloading packages...", pct))
-                        } else if lower_line.contains("checking keyring") {
-                            Some(("Verifying signatures...", 52))
-                        } else if lower_line.contains("checking integrity") {
-                            Some(("Verifying signatures...", 53))
-                        } else if lower_line.contains("checking package integrity") {
-                            Some(("Verifying signatures...", 55))
-                        } else if lower_line.contains("loading package files") {
-                            Some(("Loading package files...", 58))
-                        } else if lower_line.contains("installing") || lower_line.contains("upgrading") {
-                            let pct = parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72);
-                            Some(("Installing packages...", pct))
-                        } else if lower_line.contains("removing") || lower_line.contains("reinstalling") {
-                            let pct = parse_progress_fraction(line, 60, 85, total_packages).unwrap_or(72);
-                            Some(("Removing packages...", pct))
-                        } else if lower_line.contains("running post-transaction hooks") {
-                            Some(("Running post-install hooks...", 88))
-                        } else if lower_line.contains("arming conditionpathexists")
-                            || lower_line.contains("updating linux module") || lower_line.contains("dkms") {
-                            Some(("Running post-install hooks...", 90))
-                        } else if lower_line.contains("updating linux initcpios") || lower_line.contains("mkinitcpio") {
-                            Some(("Rebuilding initramfs...", 92))
-                        } else if lower_line.contains("updating grub") || lower_line.contains("grub-mkconfig") || lower_line.contains("grub") {
-                            Some(("Updating bootloader...", 95))
-                        } else if lower_line.contains("updating the desktop") || lower_line.contains("updating mime") {
-                            Some(("Updating system databases...", 97))
-                        } else if lower_line.contains("updating the info") {
-                            Some(("Updating system databases...", 97))
-                        } else {
-                            None
-                        };
-
-                        if let Some((label, new_pct)) = phase_label {
+                        if let Some((label, new_pct)) = detect_phase(&lower_line, line, total_packages) {
                             if new_pct > current_percent {
                                 current_percent = new_pct;
                                 let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
-
-                                // ETA calculation once we have meaningful progress
-                                if current_percent > 5 {
-                                    let elapsed = op_start.elapsed().as_secs_f32();
-                                    if elapsed > 1.0 {
-                                        let rate = current_percent as f32 / elapsed;
-                                        let remaining = (100 - current_percent) as f32 / rate;
-                                        let eta_str = if remaining < 60.0 {
-                                            format!("~{}s", remaining as u32)
-                                        } else {
-                                            let mins = (remaining / 60.0) as u32;
-                                            let secs = (remaining as u32) % 60;
-                                            format!("~{}m {}s", mins, secs)
-                                        };
-                                        let _ = tx_reader.send(UiMessage::ProgressETA(eta_str));
-                                    }
+                                if let Some(eta) = format_eta(current_percent, op_start) {
+                                    let _ = tx_reader.send(UiMessage::ProgressETA(eta));
                                 }
                             } else if new_pct == current_percent && current_percent >= 88 {
                                 let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
@@ -2966,6 +2874,7 @@ fn main() {
                         window.set_progress_popup_eta(SharedString::from(""));
                         window.set_progress_error_summary(SharedString::from(""));
                         window.set_progress_popup_show_close(false);
+                        window.set_progress_input_focus_pending(false);
                         let new_log = Rc::new(VecModel::<LogLine>::default());
                         window.set_progress_log_lines(ModelRc::new(new_log.clone()));
                         *log_model_timer.borrow_mut() = Some(new_log);
@@ -2978,6 +2887,10 @@ fn main() {
                     UiMessage::ProgressPrompt(prompt) => {
                         window.set_progress_popup_prompt(SharedString::from(&prompt));
                         window.set_progress_popup_show_input(true);
+                        // Auto-focus the text input when not in button mode (e.g. downgrade)
+                        if !window.get_progress_popup_show_buttons() {
+                            window.set_progress_input_focus_pending(true);
+                        }
                     }
                     UiMessage::ProgressHidePrompt => {
                         window.set_progress_popup_show_input(false);
