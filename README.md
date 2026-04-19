@@ -87,6 +87,12 @@ sudo pacman -Syy xpm-gui
 
 **Other Arch-based distros** :
 
+- Dependencies :
+
+```bash
+sudo pacman -S rust cargo flatpak alpm
+```
+
 - Without XeroLinux repo :
 
 ```bash
