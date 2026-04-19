@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.9"
+version = "0.3.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["xPackageManager Contributors"]
@@ -38,3 +38,9 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Faster packaging build: thin LTO + parallel codegen, same quality output
+[profile.pkg]
+inherits = "release"
+lto = "thin"
+codegen-units = 4

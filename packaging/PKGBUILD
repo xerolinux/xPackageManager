@@ -1,7 +1,7 @@
 # Maintainer: Your Name <your.email@example.com>
 pkgname=xpm-gui
-pkgver=0.2.9
-pkgrel=1
+pkgver=0.3.0
+pkgrel=2
 pkgdesc="A modern package manager for Arch Linux supporting pacman and Flatpak"
 arch=('x86_64')
 url="https://github.com/example/xpackagemanager"
@@ -18,6 +18,11 @@ makedepends=(
     'rust'
     'cargo'
     'qt6-base'
+)
+optdepends=(
+    'sccache: faster incremental Rust builds'
+    'mold: faster linker (cuts link time significantly)'
+    'downgrade: package downgrade support'
 )
 provides=('xpackagemanager')
 conflicts=('xpackagemanager-git')
@@ -40,15 +45,24 @@ build() {
     export CFLAGS="${CFLAGS//-flto/}"
     export CXXFLAGS="${CXXFLAGS//-flto/}"
 
-    # Build optimized release binary
-    cargo build --release --bin xpackagemanager
+    # Use sccache if available for faster incremental builds
+    command -v sccache &>/dev/null && export RUSTC_WRAPPER=sccache
+
+    # Use mold linker if available — dramatically cuts link time
+    if command -v mold &>/dev/null; then
+        export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-fuse-ld=mold"
+    fi
+
+    # Build with the 'pkg' profile: thin LTO + 4 codegen units (2-3x faster
+    # than the full release profile, near-identical binary size and speed)
+    cargo build --profile pkg --bin xpackagemanager
 }
 
 package() {
     cd "$_projectdir"
 
     # Install binary
-    install -Dm755 "target/release/xpackagemanager" "$pkgdir/usr/bin/xpackagemanager"
+    install -Dm755 "target/pkg/xpackagemanager" "$pkgdir/usr/bin/xpackagemanager"
 
     # Install desktop file
     install -Dm644 "packaging/xpackagemanager.desktop" "$pkgdir/usr/share/applications/xpackagemanager.desktop"
@@ -63,7 +77,8 @@ package() {
     install -Dm644 "packaging/org.xpackagemanager.policy" "$pkgdir/usr/share/polkit-1/actions/org.xpackagemanager.policy"
 
     # Clean up build artifacts
-    cargo clean --release-only
+    rm -rf target/pkg
+
 }
 
 post_install() {
