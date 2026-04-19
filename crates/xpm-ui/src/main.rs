@@ -545,6 +545,12 @@ fn instance_socket_path() -> String {
     format!("/tmp/xpackagemanager-{}.sock", uid)
 }
 
+fn is_chaotic_aur_enabled() -> bool {
+    std::fs::read_to_string("/etc/pacman.conf")
+        .map(|s| s.lines().any(|l| l.trim() == "[chaotic-aur]"))
+        .unwrap_or(false)
+}
+
 fn acquire_instance_lock() -> Option<std::fs::File> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new()
@@ -645,6 +651,8 @@ enum UiMessage {
     DepTreeLoaded { deps: Vec<DepNode>, reqby: Vec<DepNode>, root_version: String },
     ArchNewsLoaded(Vec<ArchNewsItem>),
     ArchNewsLoading,
+    ShowWarning { message: String, chaotic_aur: bool },
+    ProgressShowClose,
 }
 
 // Plain-text fzf replacement for programs (like downgrade) that pipe through fzf.
@@ -687,6 +695,7 @@ const PACMAN_USER_PROMPT_PATTERNS: &[&str] = &[
     ":: Replace",
     ":: Import",
     "Enter a number",
+    "Enter number to select",
     "Enter a selection",
     "Terminate batch job",
 ];
@@ -1392,9 +1401,35 @@ fn run_in_terminal(
     input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
     pid_holder: &Arc<Mutex<Option<u32>>>,
 ) {
-    // Route through the progress popup so all operations share the compact
-    // progress bar + "Show Details" UX instead of the raw terminal modal.
+    run_in_terminal_impl(tx, title, cmd, args, input_sender, pid_holder, false, false);
+}
+
+fn run_in_terminal_expanded(
+    tx: &mpsc::Sender<UiMessage>,
+    title: &str,
+    cmd: &str,
+    args: &[&str],
+    input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    pid_holder: &Arc<Mutex<Option<u32>>>,
+) {
+    run_in_terminal_impl(tx, title, cmd, args, input_sender, pid_holder, true, true);
+}
+
+fn run_in_terminal_impl(
+    tx: &mpsc::Sender<UiMessage>,
+    title: &str,
+    cmd: &str,
+    args: &[&str],
+    input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    pid_holder: &Arc<Mutex<Option<u32>>>,
+    auto_expand: bool,
+    always_input: bool,
+) {
     let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
+    if auto_expand {
+        let _ = tx.send(UiMessage::ProgressAutoExpand);
+        let _ = tx.send(UiMessage::ProgressShowClose);
+    }
 
     let (master_fd, child_pid) = match spawn_in_pty(cmd, args) {
         Ok(pair) => pair,
@@ -1478,12 +1513,12 @@ fn run_in_terminal(
                                 .unwrap_or(&cleaned)
                                 .trim()
                                 .to_string();
-                            if has_yn || has_y_n {
+                            if (has_yn || has_y_n) && !always_input {
                                 // Simple Y/n → stay compact, show Proceed/Cancel buttons
                                 let _ = tx_reader.send(UiMessage::ProgressPromptButtons);
                                 let _ = tx_reader.send(UiMessage::ProgressPrompt("Proceed with transaction?".to_string()));
                             } else {
-                                // Conflict/replacement/numbered choice → expand + text input
+                                // always_input mode (downgrade) or conflict/numbered choice → text input
                                 let _ = tx_reader.send(UiMessage::ProgressPrompt(prompt_text));
                                 let _ = tx_reader.send(UiMessage::ProgressAutoExpand);
                             }
@@ -2930,6 +2965,7 @@ fn main() {
                         window.set_progress_popup_show_buttons(false);
                         window.set_progress_popup_eta(SharedString::from(""));
                         window.set_progress_error_summary(SharedString::from(""));
+                        window.set_progress_popup_show_close(false);
                         let new_log = Rc::new(VecModel::<LogLine>::default());
                         window.set_progress_log_lines(ModelRc::new(new_log.clone()));
                         *log_model_timer.borrow_mut() = Some(new_log);
@@ -3185,6 +3221,14 @@ fn main() {
                     UiMessage::ArchNewsLoaded(items) => {
                         window.set_arch_news_loading(false);
                         window.set_arch_news_items(ModelRc::new(VecModel::from(items)));
+                    }
+                    UiMessage::ProgressShowClose => {
+                        window.set_progress_popup_show_close(true);
+                    }
+                    UiMessage::ShowWarning { message, chaotic_aur } => {
+                        window.set_warning_popup_message(SharedString::from(&message));
+                        window.set_warning_popup_chaotic_aur(chaotic_aur);
+                        window.set_show_warning_popup(true);
                     }
                 }
             }
@@ -3682,8 +3726,19 @@ fn main() {
 
 
     let window_weak_cp = window.as_weak();
+    let cp_pid = terminal_child_pid.clone();
+    let cp_input = terminal_input_sender.clone();
+    let tx_cp = tx.clone();
     window.on_close_progress_popup(move || {
         if let Some(window) = window_weak_cp.upgrade() {
+            // If operation is still running (show-close mode = downgrade X button), kill it
+            if !window.get_progress_popup_done() {
+                if let Some(pid) = *cp_pid.lock().unwrap() {
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                }
+                *cp_input.lock().unwrap() = None;
+                let _ = tx_cp.send(UiMessage::OperationDone(false));
+            }
             window.set_show_progress_popup(false);
             window.set_show_progress_logs(false);
         }
@@ -4869,10 +4924,40 @@ fn main() {
     let tx_dg = tx.clone();
     let dg_input = terminal_input_sender.clone();
     let dg_pid = terminal_child_pid.clone();
+    window.on_dismiss_warning_popup(|| {});
+
+    let tx_idg = tx.clone();
+    let idg_input = terminal_input_sender.clone();
+    let idg_pid = terminal_child_pid.clone();
+    window.on_install_downgrade(move || {
+        let tx = tx_idg.clone();
+        let input = idg_input.clone();
+        let pid = idg_pid.clone();
+        thread::spawn(move || {
+            run_in_terminal(
+                &tx,
+                "Install downgrade",
+                "pkexec",
+                &["pacman", "-S", "--noconfirm", "downgrade"],
+                &input,
+                &pid,
+            );
+        });
+    });
+
     window.on_downgrade_package(move |pkg_name| {
         let name = pkg_name.to_string();
         info!("Downgrade: {}", name);
         let tx = tx_dg.clone();
+
+        if !std::path::Path::new("/usr/bin/downgrade").exists() {
+            let _ = tx.send(UiMessage::ShowWarning {
+                message: "The downgrade package is not installed on this system.\n\nThis feature requires it to function.".to_string(),
+                chaotic_aur: is_chaotic_aur_enabled(),
+            });
+            return;
+        }
+
         let input = dg_input.clone();
         let pid = dg_pid.clone();
         thread::spawn(move || {
@@ -4895,7 +4980,7 @@ fn main() {
                 dir = fake_dir,
                 name = name,
             );
-            run_in_terminal(
+            run_in_terminal_expanded(
                 &tx,
                 &format!("Downgrade {}", name),
                 "pkexec",

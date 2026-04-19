@@ -826,7 +826,14 @@ export component MainWindow inherits Window {
     in-out property <string> conflict-summary: "";
     in-out property <bool> conflict-can-force: false;
 
+    in-out property <bool> show-warning-popup: false;
+    in-out property <string> warning-popup-message: "";
+    in-out property <bool> warning-popup-chaotic-aur: false;
+    callback dismiss-warning-popup;
+    callback install-downgrade;
+
     in-out property <bool> show-progress-popup: false;
+    in-out property <bool> progress-popup-show-close: false;
     in-out property <string> progress-popup-title: "";
     in-out property <int> progress-popup-percent: 0;
     in-out property <string> progress-popup-stage: "";
@@ -6109,7 +6116,7 @@ export component MainWindow inherits Window {
                         }
 
 
-                        if progress-popup-done: VerticalLayout {
+                        if progress-popup-done || progress-popup-show-close: VerticalLayout {
                             alignment: center;
                             Rectangle {
                                 width: 28px;
@@ -7763,6 +7770,178 @@ export component MainWindow inherits Window {
                                 }
                                 root.show-distro-warning = false;
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Missing dependency warning popup ─────────────────────────────────────
+    if show-warning-popup: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Cat.crust.with-alpha(0.65);
+
+        TouchArea {}
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(480px, parent.width - 40px);
+            height: warn-layout.preferred-height + 32px;
+            background: Cat.base;
+            border-radius: 12px;
+            clip: true;
+            border-width: 1px;
+            border-color: Cat.yellow.with-alpha(0.35);
+            drop-shadow-blur: 32px;
+            drop-shadow-color: Cat.yellow.with-alpha(0.18);
+            drop-shadow-offset-y: 8px;
+
+            warn-layout := VerticalLayout {
+                padding: 20px;
+                spacing: 14px;
+
+                // Title row
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        NavIcon {
+                            d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
+                            icon-color: Cat.yellow;
+                            width: 20px;
+                            height: 20px;
+                        }
+                    }
+                    Text {
+                        text: "Package Required";
+                        font-size: 16px;
+                        font-weight: 700;
+                        color: Cat.yellow;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    // X close button
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 6px;
+                        background: close-warn-ta.has-hover ? Cat.surface1 : transparent;
+                        animate background { duration: 80ms; }
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: center;
+                                NavIcon {
+                                    d: icon-close;
+                                    icon-color: close-warn-ta.has-hover ? Cat.text : Cat.subtext0;
+                                    width: 14px;
+                                    height: 14px;
+                                }
+                            }
+                        }
+                        close-warn-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.show-warning-popup = false;
+                                root.dismiss-warning-popup();
+                            }
+                        }
+                    }
+                }
+
+                // Divider
+                Rectangle { height: 1px; background: Cat.yellow.with-alpha(0.22); }
+
+                // Message body
+                Text {
+                    text: warning-popup-message;
+                    font-size: 13px;
+                    color: Cat.text;
+                    wrap: word-wrap;
+                }
+
+                // Chaotic-AUR path: install button
+                if warning-popup-chaotic-aur: Rectangle {
+                    background: Cat.green.with-alpha(0.08);
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Cat.green.with-alpha(0.25);
+                    height: chaotic-hint.preferred-height + 16px;
+
+                    chaotic-hint := VerticalLayout {
+                        padding: 10px;
+                        spacing: 3px;
+                        Text {
+                            text: "Chaotic-AUR is enabled on this system.";
+                            font-size: 11px;
+                            color: Cat.green.with-alpha(0.85);
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "Click Install Downgrade below to install it now.";
+                            font-size: 11px;
+                            color: Cat.subtext0;
+                        }
+                    }
+                }
+
+                // No Chaotic-AUR: AUR helper hint
+                if !warning-popup-chaotic-aur: Rectangle {
+                    background: Cat.yellow.with-alpha(0.06);
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Cat.yellow.with-alpha(0.18);
+                    height: aur-hint.preferred-height + 16px;
+
+                    aur-hint := VerticalLayout {
+                        padding: 10px;
+                        spacing: 4px;
+                        Text {
+                            text: "Install via your AUR helper:";
+                            font-size: 11px;
+                            color: Cat.yellow.with-alpha(0.8);
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "paru -S downgrade";
+                            font-size: 12px;
+                            color: Cat.green;
+                            font-family: "monospace";
+                        }
+                        Text {
+                            text: "yay -S downgrade";
+                            font-size: 12px;
+                            color: Cat.green;
+                            font-family: "monospace";
+                        }
+                    }
+                }
+
+                // Install button — only when Chaotic-AUR available
+                if warning-popup-chaotic-aur: Rectangle {
+                    height: 36px;
+                    border-radius: 8px;
+                    background: install-dg-ta.has-hover ? Cat.green.with-alpha(0.28) : Cat.green.with-alpha(0.15);
+                    border-width: 1px;
+                    border-color: Cat.green.with-alpha(0.5);
+                    animate background { duration: 100ms; }
+
+                    Text {
+                        text: "Install Downgrade";
+                        font-size: 13px;
+                        font-weight: 700;
+                        color: Cat.green;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    install-dg-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.show-warning-popup = false;
+                            root.install-downgrade();
                         }
                     }
                 }
