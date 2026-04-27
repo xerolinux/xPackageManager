@@ -97,7 +97,7 @@ sudo pacman -S rust cargo flatpak alpm
 
 ```bash
 git clone https://github.com/xerolinux/xPackageManager
-cd xPackageManager && makepkg -rsifcd
+cd xPackageManager/packaging/ && makepkg -rsifcd
 ```
 
 - With XeroLinux repo :
@@ -111,6 +111,8 @@ sudo pacman -Syy xpm-gui
 
 ### To Do
 
+- [X] New feature : Repo manager
+- [X] Change Browse Repos to Native Packages
 - [ ] Fix Terminal output issues (more robust)
 
 ---

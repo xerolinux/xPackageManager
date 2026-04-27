@@ -653,6 +653,21 @@ enum UiMessage {
     ArchNewsLoading,
     ShowWarning { message: String, chaotic_aur: bool },
     ProgressShowClose,
+    RepoListLoaded(Vec<(String, bool, String)>),
+    PacmanOptsLoaded(PacmanOpts),
+}
+
+#[derive(Clone)]
+struct PacmanOpts {
+    color: bool,
+    love_candy: bool,
+    verbose_pkg_lists: bool,
+    disable_dl_timeout: bool,
+    check_space: bool,
+    disable_sandbox: bool,
+    no_progress_bar: bool,
+    use_syslog: bool,
+    clean_method: i32,
 }
 
 // Plain-text fzf replacement for programs (like downgrade) that pipe through fzf.
@@ -695,6 +710,257 @@ const PACMAN_USER_PROMPT_PATTERNS: &[&str] = &[
     "Enter a selection",
     "Terminate batch job",
 ];
+
+fn parse_pacman_repos(content: &str) -> Vec<(String, bool, String)> {
+    let mut repos: Vec<(String, bool, String)> = Vec::new();
+    let mut current: Option<(String, bool, String)> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let uncommented = trimmed.trim_start_matches('#').trim();
+
+        if uncommented.starts_with('[') && uncommented.ends_with(']') {
+            if let Some(r) = current.take() {
+                if r.0 != "options" {
+                    repos.push(r);
+                }
+            }
+            let name = uncommented[1..uncommented.len() - 1].to_string();
+            let enabled = !trimmed.starts_with('#');
+            current = Some((name, enabled, String::new()));
+            continue;
+        }
+
+        if let Some(ref mut cur) = current {
+            if cur.0 != "options" && cur.2.is_empty() {
+                let effective = if trimmed.starts_with('#') {
+                    trimmed.trim_start_matches('#').trim()
+                } else {
+                    trimmed
+                };
+                if effective.starts_with("Include") || effective.starts_with("Server") {
+                    cur.2 = effective.to_string();
+                }
+            }
+        }
+    }
+    if let Some(r) = current {
+        if r.0 != "options" {
+            repos.push(r);
+        }
+    }
+    repos
+}
+
+fn toggle_repo_in_conf(content: &str, repo_name: &str, enable: bool) -> String {
+    let mut result: Vec<String> = Vec::new();
+    let mut in_target = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let uncommented = trimmed.trim_start_matches('#').trim();
+
+        if uncommented.starts_with('[') && uncommented.ends_with(']') {
+            let name = &uncommented[1..uncommented.len() - 1];
+            in_target = name == repo_name;
+        }
+
+        if in_target && !trimmed.is_empty() {
+            if enable {
+                if trimmed.starts_with('#') {
+                    result.push(trimmed[1..].trim_start().to_string());
+                } else {
+                    result.push(line.to_string());
+                }
+            } else if !trimmed.starts_with('#') {
+                result.push(format!("#{}", trimmed));
+            } else {
+                result.push(line.to_string());
+            }
+        } else {
+            result.push(line.to_string());
+        }
+    }
+    result.join("\n")
+}
+
+fn remove_repo_from_conf(content: &str, repo_name: &str) -> String {
+    let mut result: Vec<String> = Vec::new();
+    let mut in_target = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let uncommented = trimmed.trim_start_matches('#').trim();
+
+        if uncommented.starts_with('[') && uncommented.ends_with(']') {
+            let name = &uncommented[1..uncommented.len() - 1];
+            in_target = name == repo_name;
+        } else if trimmed.is_empty() {
+            in_target = false;
+        }
+
+        if !in_target {
+            result.push(line.to_string());
+        }
+    }
+
+    // Collapse consecutive blank lines left by removed sections
+    let mut collapsed: Vec<String> = Vec::new();
+    let mut prev_blank = false;
+    for line in result {
+        let is_blank = line.trim().is_empty();
+        if is_blank && prev_blank {
+            continue;
+        }
+        prev_blank = is_blank;
+        collapsed.push(line);
+    }
+    collapsed.join("\n")
+}
+
+fn add_repo_to_conf(content: &str, name: &str, server: &str, siglevel: &str) -> String {
+    let mut result = content.to_string();
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result.push('\n');
+    result.push_str(&format!("[{}]\n", name));
+    if !siglevel.is_empty() {
+        result.push_str(&format!("SigLevel = {}\n", siglevel));
+    }
+    if server.starts_with('/') {
+        result.push_str(&format!("Include = {}\n", server));
+    } else {
+        result.push_str(&format!("Server = {}\n", server));
+    }
+    result
+}
+
+fn write_pacman_conf(content: &str) -> bool {
+    let tmp = format!(
+        "/tmp/xpm_pacman_conf_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    if std::fs::write(&tmp, content).is_err() {
+        return false;
+    }
+    let script = format!("cp '{}' /etc/pacman.conf && rm -f '{}'", tmp, tmp);
+    let ok = std::process::Command::new("pkexec")
+        .args(["bash", "-c", &script])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&tmp);
+    ok
+}
+
+fn parse_pacman_opts(content: &str) -> PacmanOpts {
+    let bool_keys = [
+        "color", "ilovecandy", "verbosepkglists", "disabledownloadtimeout",
+        "checkspace", "disablesandbox", "noprogressbar", "usesyslog",
+    ];
+    let mut in_opts = false;
+    let mut flags = [false; 8];
+    let mut clean_method = 0i32;
+
+    for line in content.lines() {
+        let t = line.trim();
+        if t == "[options]" { in_opts = true; continue; }
+        if in_opts && t.starts_with('[') { break; }
+        if !in_opts || t.starts_with('#') { continue; }
+        let tl = t.to_lowercase();
+        for (i, key) in bool_keys.iter().enumerate() {
+            if tl == *key { flags[i] = true; }
+        }
+        if tl.starts_with("cleanmethod") && tl.contains("keepcurrent") {
+            clean_method = 1;
+        }
+    }
+    PacmanOpts {
+        color: flags[0],
+        love_candy: flags[1],
+        verbose_pkg_lists: flags[2],
+        disable_dl_timeout: flags[3],
+        check_space: flags[4],
+        disable_sandbox: flags[5],
+        no_progress_bar: flags[6],
+        use_syslog: flags[7],
+        clean_method,
+    }
+}
+
+fn write_pacman_opts(content: &str, opts: &PacmanOpts) -> String {
+    let bool_opts: &[(&str, bool)] = &[
+        ("Color", opts.color),
+        ("ILoveCandy", opts.love_candy),
+        ("VerbosePkgLists", opts.verbose_pkg_lists),
+        ("DisableDownloadTimeout", opts.disable_dl_timeout),
+        ("CheckSpace", opts.check_space),
+        ("DisableSandbox", opts.disable_sandbox),
+        ("NoProgressBar", opts.no_progress_bar),
+        ("UseSyslog", opts.use_syslog),
+    ];
+    let mut in_opts = false;
+    let mut result: Vec<String> = Vec::new();
+    let mut seen = [false; 8];
+    let mut seen_clean = false;
+
+    for line in content.lines() {
+        let t = line.trim();
+        if t == "[options]" {
+            in_opts = true;
+            result.push(line.to_string());
+            continue;
+        }
+        if in_opts && t.starts_with('[') {
+            for (i, (kw, en)) in bool_opts.iter().enumerate() {
+                if !seen[i] && *en { result.push(kw.to_string()); }
+            }
+            if !seen_clean && opts.clean_method == 1 {
+                result.push("CleanMethod = KeepCurrent".to_string());
+            }
+            in_opts = false;
+            result.push(line.to_string());
+            continue;
+        }
+        if !in_opts { result.push(line.to_string()); continue; }
+
+        let stripped = t.trim_start_matches('#').trim().to_lowercase();
+        let mut handled = false;
+        for (i, (kw, en)) in bool_opts.iter().enumerate() {
+            if stripped == kw.to_lowercase() {
+                seen[i] = true;
+                if *en { result.push(kw.to_string()); } else { result.push(format!("#{}", kw)); }
+                handled = true;
+                break;
+            }
+        }
+        if !handled {
+            if stripped.starts_with("cleanmethod") {
+                seen_clean = true;
+                if opts.clean_method == 1 {
+                    result.push("CleanMethod = KeepCurrent".to_string());
+                } else {
+                    result.push("#CleanMethod = KeepInstalled".to_string());
+                }
+            } else {
+                result.push(line.to_string());
+            }
+        }
+    }
+    if in_opts {
+        for (i, (kw, en)) in bool_opts.iter().enumerate() {
+            if !seen[i] && *en { result.push(kw.to_string()); }
+        }
+        if !seen_clean && opts.clean_method == 1 {
+            result.push("CleanMethod = KeepCurrent".to_string());
+        }
+    }
+    result.join("\n")
+}
 
 const CONFLICT_PATTERNS: &[&str] = &[
     "conflicting files",
@@ -3143,6 +3409,27 @@ fn main() {
                         window.set_warning_popup_chaotic_aur(chaotic_aur);
                         window.set_show_warning_popup(true);
                     }
+                    UiMessage::RepoListLoaded(repos) => {
+                        let entries: Vec<RepoEntry> = repos.iter().map(|(name, _, server)| RepoEntry {
+                            name: SharedString::from(name.as_str()),
+                            server: SharedString::from(server.as_str()),
+                        }).collect();
+                        let enabled: Vec<bool> = repos.iter().map(|(_, en, _)| *en).collect();
+                        window.set_repo_mgr_list(ModelRc::new(VecModel::from(entries)));
+                        window.set_repo_mgr_enabled(ModelRc::new(VecModel::from(enabled)));
+                        window.set_repo_mgr_loading(false);
+                    }
+                    UiMessage::PacmanOptsLoaded(opts) => {
+                        window.set_opt_color(opts.color);
+                        window.set_opt_love_candy(opts.love_candy);
+                        window.set_opt_verbose_pkg_lists(opts.verbose_pkg_lists);
+                        window.set_opt_disable_dl_timeout(opts.disable_dl_timeout);
+                        window.set_opt_check_space(opts.check_space);
+                        window.set_opt_disable_sandbox(opts.disable_sandbox);
+                        window.set_opt_no_progress_bar(opts.no_progress_bar);
+                        window.set_opt_use_syslog(opts.use_syslog);
+                        window.set_opt_clean_method(opts.clean_method);
+                    }
                 }
             }
 
@@ -3396,6 +3683,179 @@ fn main() {
                 .status();
         });
     });
+
+    // ── Repo Manager callbacks ────────────────────────────────────────────────
+
+    window.on_load_repo_list({
+        let tx = tx.clone();
+        move || {
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let repos = std::fs::read_to_string("/etc/pacman.conf")
+                    .map(|c| parse_pacman_repos(&c))
+                    .unwrap_or_default();
+                let _ = tx.send(UiMessage::RepoListLoaded(repos));
+            });
+        }
+    });
+
+    window.on_repo_mgr_toggle({
+        let window_weak = window.as_weak();
+        move |idx| {
+            if let Some(w) = window_weak.upgrade() {
+                let mut enabled: Vec<bool> = w.get_repo_mgr_enabled().iter().collect();
+                let i = idx as usize;
+                if i < enabled.len() {
+                    enabled[i] = !enabled[i];
+                }
+                w.set_repo_mgr_enabled(ModelRc::new(VecModel::from(enabled)));
+            }
+        }
+    });
+
+    window.on_repo_apply_changes({
+        let tx = tx.clone();
+        let window_weak = window.as_weak();
+        move || {
+            let window = window_weak.unwrap();
+            let list: Vec<RepoEntry> = window.get_repo_mgr_list().iter().collect();
+            let enabled: Vec<bool> = window.get_repo_mgr_enabled().iter().collect();
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let content = match std::fs::read_to_string("/etc/pacman.conf") {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let _ = tx.send(UiMessage::SetStatus("Failed to read /etc/pacman.conf".to_string()));
+                        return;
+                    }
+                };
+                let mut new_content = content;
+                for (repo, &en) in list.iter().zip(enabled.iter()) {
+                    new_content = toggle_repo_in_conf(&new_content, &repo.name, en);
+                }
+                let ok = write_pacman_conf(&new_content);
+                let msg = if ok {
+                    "Repo changes saved successfully"
+                } else {
+                    "Failed to save repo changes (authentication cancelled?)"
+                };
+                let _ = tx.send(UiMessage::SetStatus(msg.to_string()));
+            });
+        }
+    });
+
+    window.on_repo_remove({
+        let tx = tx.clone();
+        move |name| {
+            let name = name.to_string();
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let content = match std::fs::read_to_string("/etc/pacman.conf") {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let _ = tx.send(UiMessage::SetStatus("Failed to read /etc/pacman.conf".to_string()));
+                        return;
+                    }
+                };
+                let new_content = remove_repo_from_conf(&content, &name);
+                let ok = write_pacman_conf(&new_content);
+                if ok {
+                    let repos = parse_pacman_repos(&new_content);
+                    let _ = tx.send(UiMessage::RepoListLoaded(repos));
+                    let _ = tx.send(UiMessage::SetStatus(format!("Repo '{}' removed", name)));
+                } else {
+                    let _ = tx.send(UiMessage::SetStatus("Failed to remove repo (authentication cancelled?)".to_string()));
+                }
+            });
+        }
+    });
+
+    window.on_repo_add({
+        let tx = tx.clone();
+        move |name, server, siglevel| {
+            let name = name.to_string();
+            let server = server.to_string();
+            let siglevel = siglevel.to_string();
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let content = match std::fs::read_to_string("/etc/pacman.conf") {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let _ = tx.send(UiMessage::SetStatus("Failed to read /etc/pacman.conf".to_string()));
+                        return;
+                    }
+                };
+                let new_content = add_repo_to_conf(&content, &name, &server, &siglevel);
+                let ok = write_pacman_conf(&new_content);
+                if ok {
+                    let repos = parse_pacman_repos(&new_content);
+                    let _ = tx.send(UiMessage::RepoListLoaded(repos));
+                    let _ = tx.send(UiMessage::SetStatus(format!("Repo '{}' added", name)));
+                } else {
+                    let _ = tx.send(UiMessage::SetStatus("Failed to add repo (authentication cancelled?)".to_string()));
+                }
+            });
+        }
+    });
+
+    window.on_open_pacman_conf_editor(move || {
+        let _ = std::process::Command::new("bash")
+            .arg("-c")
+            .arg("konsole -e sudo nano /etc/pacman.conf 2>/dev/null \
+                  || xterm -e 'sudo nano /etc/pacman.conf' 2>/dev/null \
+                  || alacritty -e sudo nano /etc/pacman.conf 2>/dev/null \
+                  || foot -e sudo nano /etc/pacman.conf 2>/dev/null \
+                  || kitty sudo nano /etc/pacman.conf 2>/dev/null \
+                  || gnome-terminal -- sudo nano /etc/pacman.conf 2>/dev/null")
+            .spawn();
+    });
+
+    let tx_load_opts = tx.clone();
+    window.on_load_pacman_opts(move || {
+        let tx = tx_load_opts.clone();
+        thread::spawn(move || {
+            let content = std::fs::read_to_string("/etc/pacman.conf").unwrap_or_default();
+            let opts = parse_pacman_opts(&content);
+            let _ = tx.send(UiMessage::PacmanOptsLoaded(opts));
+        });
+    });
+
+    let tx_save_opts = tx.clone();
+    let win_save_opts = window.as_weak();
+    window.on_save_pacman_opts(move || {
+        let tx = tx_save_opts.clone();
+        let window = win_save_opts.upgrade().unwrap();
+        let opts = PacmanOpts {
+            color: window.get_opt_color(),
+            love_candy: window.get_opt_love_candy(),
+            verbose_pkg_lists: window.get_opt_verbose_pkg_lists(),
+            disable_dl_timeout: window.get_opt_disable_dl_timeout(),
+            check_space: window.get_opt_check_space(),
+            disable_sandbox: window.get_opt_disable_sandbox(),
+            no_progress_bar: window.get_opt_no_progress_bar(),
+            use_syslog: window.get_opt_use_syslog(),
+            clean_method: window.get_opt_clean_method(),
+        };
+        thread::spawn(move || {
+            let content = match std::fs::read_to_string("/etc/pacman.conf") {
+                Ok(c) => c,
+                Err(_) => {
+                    let _ = tx.send(UiMessage::SetStatus("Failed to read /etc/pacman.conf".to_string()));
+                    return;
+                }
+            };
+            let new_content = write_pacman_opts(&content, &opts);
+            if write_pacman_conf(&new_content) {
+                let _ = tx.send(UiMessage::SetStatus("pacman.conf options saved".to_string()));
+                let reloaded = parse_pacman_opts(&new_content);
+                let _ = tx.send(UiMessage::PacmanOptsLoaded(reloaded));
+            } else {
+                let _ = tx.send(UiMessage::SetStatus("Failed to save options (authentication cancelled?)".to_string()));
+            }
+        });
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     let tx_install = tx.clone();
     let install_input = terminal_input_sender.clone();

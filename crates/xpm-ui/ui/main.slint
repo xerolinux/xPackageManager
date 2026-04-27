@@ -75,6 +75,11 @@ export struct LogLine {
     level: int,
 }
 
+export struct RepoEntry {
+    name: string,
+    server: string,
+}
+
 export global Cat {
     // Core backgrounds — all derived from Palette.background (reliable on all systems)
     // Palette.control-background is NOT used — it returns light colors on some Qt configs
@@ -1027,6 +1032,36 @@ export component MainWindow inherits Window {
     in-out property <bool> arch-news-loading: false;
     callback refresh-arch-news;
 
+    // Repo Manager
+    in-out property <[RepoEntry]> repo-mgr-list: [];
+    in-out property <[bool]> repo-mgr-enabled: [];
+    in-out property <bool> repo-mgr-loading: false;
+    in-out property <bool> show-repo-enable-modal: false;
+    in-out property <bool> show-repo-manage-modal: false;
+    in-out property <bool> show-repo-delete-confirm: false;
+    in-out property <string> repo-delete-target: "";
+    in-out property <string> new-repo-name-text: "";
+    in-out property <string> new-repo-server-text: "";
+    in-out property <string> new-repo-siglevel-text: "";
+    callback load-repo-list;
+    callback repo-mgr-toggle(int);
+    callback repo-apply-changes;
+    callback repo-remove(string);
+    callback repo-add(string, string, string);
+    callback open-pacman-conf-editor;
+    in-out property <bool> show-pacman-opts-modal: false;
+    in-out property <bool> opt-color: false;
+    in-out property <bool> opt-love-candy: false;
+    in-out property <bool> opt-verbose-pkg-lists: false;
+    in-out property <bool> opt-disable-dl-timeout: false;
+    in-out property <bool> opt-check-space: false;
+    in-out property <bool> opt-disable-sandbox: false;
+    in-out property <bool> opt-no-progress-bar: false;
+    in-out property <bool> opt-use-syslog: false;
+    in-out property <int> opt-clean-method: 0;
+    callback load-pacman-opts;
+    callback save-pacman-opts;
+
     property <string> icon-home: "M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10";
     property <string> icon-grid: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z";
     property <string> icon-list: "M3 5h18v2H3zM3 11h18v2H3zM3 17h18v2H3z";
@@ -1150,7 +1185,7 @@ export component MainWindow inherits Window {
 
             NavButton {
                 icon-path: icon-folder;
-                label: "Browse Repos";
+                label: "Packages";
                 active: view == 7 || view == 8;
                 clicked => {
                     view = 7; repos-view = 0; selected-index = -1;
@@ -1172,7 +1207,7 @@ export component MainWindow inherits Window {
 
             NavButton {
                 icon-path: icon-gear;
-                label: "App Settings";
+                label: "Settings & Tweaks";
                 active: view == 5;
                 clicked => { view = 5; }
             }
@@ -1263,7 +1298,7 @@ export component MainWindow inherits Window {
                           view == 1 ? "Updates" :
                           view == 2 ? "Search Results" :
                           view == 5 ? "Settings" :
-                          view == 7 ? "Browse Repos" :
+                          view == 7 ? "Packages" :
                           view == 8 ? selected-repo :
                           view == 10 ? (show-flatpak-detail ? flatpak-detail-name : "Flatpaks") :
                           view == 13 ? "Arch News" : "";
@@ -3918,11 +3953,150 @@ export component MainWindow inherits Window {
 
                     VerticalLayout {
                         spacing: 8px;
+                        SectionLabel { section-title: "REPO MANAGER"; }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            // Enable / Disable button
+                            Rectangle {
+                                height: 68px;
+                                horizontal-stretch: 1;
+                                border-radius: 8px;
+                                background: rm-btn1-ta.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.4);
+                                border-width: 1px;
+                                border-color: Cat.surface1;
+                                clip: true;
+                                animate background { duration: 80ms; }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    padding: 10px;
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        NavIcon {
+                                            d: "M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11";
+                                            icon-color: Cat.green;
+                                            width: 16px; height: 16px;
+                                        }
+                                    }
+                                    Text {
+                                        text: "Enable / Disable";
+                                        font-size: 12px; font-weight: 600;
+                                        color: Cat.text; horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Toggle repos on/off";
+                                        font-size: 10px;
+                                        color: Cat.subtext0; horizontal-alignment: center;
+                                    }
+                                }
+
+                                rm-btn1-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.repo-mgr-loading = true;
+                                        root.show-repo-enable-modal = true;
+                                        root.load-repo-list();
+                                    }
+                                }
+                            }
+
+                            // Add / Remove button
+                            Rectangle {
+                                height: 68px;
+                                horizontal-stretch: 1;
+                                border-radius: 8px;
+                                background: rm-btn2-ta.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.4);
+                                border-width: 1px;
+                                border-color: Cat.surface1;
+                                clip: true;
+                                animate background { duration: 80ms; }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    padding: 10px;
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        NavIcon {
+                                            d: "M12 15a3 3 0 100-6 3 3 0 000 6zM19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z";
+                                            icon-color: Cat.teal;
+                                            width: 16px; height: 16px;
+                                        }
+                                    }
+                                    Text {
+                                        text: "pacman Options";
+                                        font-size: 12px; font-weight: 600;
+                                        color: Cat.text; horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Configure pacman.conf flags";
+                                        font-size: 10px;
+                                        color: Cat.subtext0; horizontal-alignment: center;
+                                    }
+                                }
+
+                                rm-btn2-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.load-pacman-opts();
+                                        root.show-pacman-opts-modal = true;
+                                    }
+                                }
+                            }
+
+                            // Edit pacman.conf button
+                            Rectangle {
+                                height: 68px;
+                                horizontal-stretch: 1;
+                                border-radius: 8px;
+                                background: rm-btn3-ta.has-hover ? Cat.surface1 : Cat.surface0.with-alpha(0.4);
+                                border-width: 1px;
+                                border-color: Cat.surface1;
+                                clip: true;
+                                animate background { duration: 80ms; }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    padding: 10px;
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        NavIcon {
+                                            d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z";
+                                            icon-color: Cat.peach;
+                                            width: 16px; height: 16px;
+                                        }
+                                    }
+                                    Text {
+                                        text: "Edit pacman.conf";
+                                        font-size: 12px; font-weight: 600;
+                                        color: Cat.text; horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Advanced manual edit (Terminal)";
+                                        font-size: 10px;
+                                        color: Cat.subtext0; horizontal-alignment: center;
+                                    }
+                                }
+
+                                rm-btn3-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.open-pacman-conf-editor(); }
+                                }
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 8px;
                         SectionLabel { section-title: "SYSTEM TRAY"; }
 
                         SettingsRow {
                             label: "Enable System Tray Icon";
-                            subtitle: "Show xPM in the system tray — also enables autostart on login";
+                            subtitle: "Not required on XeroLinux — Apdatifier handles that. Only enable for other distros.";
                             checked: setting-tray-enabled;
                             toggled(val) => {
                                 setting-tray-enabled = val;
@@ -3991,38 +4165,6 @@ export component MainWindow inherits Window {
                             }
                         }
 
-                        // Info box
-                        Rectangle {
-                            border-radius: 8px;
-                            background: Cat.blue.with-alpha(0.06);
-                            border-width: 1px;
-                            border-color: Cat.blue.with-alpha(0.2);
-
-                            HorizontalLayout {
-                                padding-left: 14px; padding-right: 14px;
-                                padding-top: 10px; padding-bottom: 10px;
-                                spacing: 12px;
-
-                                VerticalLayout {
-                                    alignment: start;
-                                    padding-top: 1px;
-                                    NavIcon {
-                                        d: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z";
-                                        icon-color: Cat.blue;
-                                        width: 15px; height: 15px;
-                                    }
-                                }
-
-                                Text {
-                                    text: "Not required on XeroLinux. The Apdatifier plasmoid already handles that stuff and more. Only enable if needed (Other Distros).";
-                                    font-size: 11px;
-                                    color: Cat.blue.with-alpha(0.85);
-                                    vertical-alignment: center;
-                                    wrap: word-wrap;
-                                    horizontal-stretch: 1;
-                                }
-                            }
-                        }
                     }
 
                     VerticalLayout {
@@ -4031,7 +4173,7 @@ export component MainWindow inherits Window {
 
                         // ── Geeky about card ──────────────────────────────────
                         Rectangle {
-                            height: 180px;
+                            height: 140px;
                             border-radius: 12px;
                             background: Cat.crust;
                             border-width: 1px;
@@ -4041,30 +4183,30 @@ export component MainWindow inherits Window {
                             VerticalLayout {
                                 // Terminal title bar with traffic-light dots
                                 Rectangle {
-                                    height: 31px;
+                                    height: 26px;
                                     background: Cat.mantle;
 
                                     HorizontalLayout {
                                         padding-left: 12px; padding-right: 12px;
 
                                         VerticalLayout { alignment: center;
-                                            HorizontalLayout { spacing: 6px;
-                                                Rectangle { width: 10px; height: 10px; border-radius: 5px; background: #ed6a5e; }
-                                                Rectangle { width: 10px; height: 10px; border-radius: 5px; background: #f4bf4f; }
-                                                Rectangle { width: 10px; height: 10px; border-radius: 5px; background: #61c554; }
+                                            HorizontalLayout { spacing: 5px;
+                                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #ed6a5e; }
+                                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #f4bf4f; }
+                                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #61c554; }
                                             }
                                         }
 
                                         Text {
                                             text: "xpm  —  about";
-                                            font-size: 15px; font-family: "monospace";
+                                            font-size: 12px; font-family: "monospace";
                                             color: Cat.overlay0;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
                                             horizontal-stretch: 1;
                                         }
 
-                                        Rectangle { width: 34px; }
+                                        Rectangle { width: 29px; }
                                     }
                                 }
 
@@ -4073,26 +4215,26 @@ export component MainWindow inherits Window {
                                 // Centered content body
                                 VerticalLayout {
                                     alignment: center;
-                                    padding-left: 20px; padding-right: 20px;
-                                    padding-top: 12px; padding-bottom: 12px;
-                                    spacing: 10px;
+                                    padding-left: 16px; padding-right: 16px;
+                                    padding-top: 8px; padding-bottom: 8px;
+                                    spacing: 6px;
 
                                     // App info — centered
                                     VerticalLayout {
-                                        spacing: 4px;
+                                        spacing: 2px;
                                         Text {
                                             text: "XeroLinux Package Manager";
-                                            font-size: 14px; font-family: "monospace"; font-weight: 700;
+                                            font-size: 13px; font-family: "monospace"; font-weight: 700;
                                             color: Cat.text; horizontal-alignment: center;
                                         }
                                         Text {
-                                            text: "Built with Rust + Slint  /  pacman + flatpak backends";
-                                            font-size: 11px; font-family: "monospace";
+                                            text: "Rust + Slint  /  pacman + flatpak";
+                                            font-size: 10px; font-family: "monospace";
                                             color: Cat.overlay1; horizontal-alignment: center;
                                         }
                                         Text {
                                             text: "\u{25A0} " + stats.pacman-count + " pacman   \u{25A0} " + stats.flatpak-count + " flatpak   \u{25A0} " + stats.orphan-count + " orphans";
-                                            font-size: 14px; font-family: "monospace";
+                                            font-size: 11px; font-family: "monospace";
                                             color: Cat.mauve.with-alpha(0.65); horizontal-alignment: center;
                                         }
                                     }
@@ -4101,56 +4243,56 @@ export component MainWindow inherits Window {
 
                                     // Social links row
                                     HorizontalLayout {
-                                        spacing: 8px;
+                                        spacing: 6px;
 
                                         // GitHub
                                         Rectangle {
-                                            horizontal-stretch: 1; height: 31px; border-radius: 8px;
+                                            horizontal-stretch: 1; height: 26px; border-radius: 7px;
                                             background: gh-ta.has-hover ? Cat.surface1 : Cat.surface0;
                                             border-width: 1px; border-color: Cat.surface1;
                                             animate background { duration: 80ms; }
                                             HorizontalLayout {
-                                                alignment: center; spacing: 7px;
+                                                alignment: center; spacing: 6px;
                                                 VerticalLayout { alignment: center;
                                                     NavIcon {
                                                         d: "M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z";
-                                                        icon-color: Cat.text; width: 13px; height: 13px;
+                                                        icon-color: Cat.text; width: 12px; height: 12px;
                                                     }
                                                 }
-                                                Text { text: "GitHub"; font-size: 12px; font-weight: 600; color: Cat.text; vertical-alignment: center; }
+                                                Text { text: "GitHub"; font-size: 11px; font-weight: 600; color: Cat.text; vertical-alignment: center; }
                                             }
                                             gh-ta := TouchArea { mouse-cursor: pointer; clicked => { root.open-url("https://github.com/xerolinux"); } }
                                         }
 
                                         // Ko-Fi
                                         Rectangle {
-                                            horizontal-stretch: 1; height: 31px; border-radius: 8px;
+                                            horizontal-stretch: 1; height: 26px; border-radius: 7px;
                                             background: kofi-ta2.has-hover ? #ff5e5b.with-alpha(0.28) : #ff5e5b.with-alpha(0.12);
                                             border-width: 1px; border-color: #ff5e5b.with-alpha(0.35);
                                             animate background { duration: 80ms; }
                                             HorizontalLayout {
-                                                alignment: center; spacing: 6px;
-                                                Text { text: "☕"; font-size: 14px; vertical-alignment: center; }
-                                                Text { text: "Ko-Fi"; font-size: 12px; font-weight: 700; color: #ff5e5b; vertical-alignment: center; }
+                                                alignment: center; spacing: 5px;
+                                                Text { text: "☕"; font-size: 12px; vertical-alignment: center; }
+                                                Text { text: "Ko-Fi"; font-size: 11px; font-weight: 700; color: #ff5e5b; vertical-alignment: center; }
                                             }
                                             kofi-ta2 := TouchArea { mouse-cursor: pointer; clicked => { root.open-url("https://ko-fi.com/xerolinux"); } }
                                         }
 
                                         // Discord
                                         Rectangle {
-                                            horizontal-stretch: 1; height: 31px; border-radius: 8px;
+                                            horizontal-stretch: 1; height: 26px; border-radius: 7px;
                                             background: disc-ta.has-hover ? #5865f2.with-alpha(0.28) : #5865f2.with-alpha(0.12);
                                             border-width: 1px; border-color: #5865f2.with-alpha(0.35);
                                             animate background { duration: 80ms; }
                                             HorizontalLayout {
-                                                alignment: center; spacing: 6px;
+                                                alignment: center; spacing: 5px;
                                                 VerticalLayout { alignment: center;
                                                     NavIcon {
                                                         d: "M20.317 4.37a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z";
-                                                        icon-color: #5865f2; width: 13px; height: 13px;
+                                                        icon-color: #5865f2; width: 12px; height: 12px;
                                                     }
                                                 }
-                                                Text { text: "Discord"; font-size: 12px; font-weight: 700; color: #5865f2; vertical-alignment: center; }
+                                                Text { text: "Discord"; font-size: 11px; font-weight: 700; color: #5865f2; vertical-alignment: center; }
                                             }
                                             disc-ta := TouchArea { mouse-cursor: pointer; clicked => { root.open-url("https://discord.gg/5sqxTSuKZu"); } }
                                         }
@@ -7781,6 +7923,941 @@ export component MainWindow inherits Window {
                                     root.distro-warning-dismiss();
                                 }
                                 root.show-distro-warning = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Repo Manager: Enable/Disable modal ───────────────────────────────────
+    if show-repo-enable-modal: Rectangle {
+        width: 100%; height: 100%;
+        background: Cat.crust.with-alpha(0.75);
+        TouchArea {}
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(540px, parent.width - 40px);
+            height: min(580px, parent.height - 40px);
+            background: Cat.base;
+            border-radius: 12px;
+            clip: true;
+            border-width: 1px;
+            border-color: Cat.green.with-alpha(0.4);
+            drop-shadow-blur: 36px;
+            drop-shadow-color: Cat.crust.with-alpha(0.8);
+            drop-shadow-offset-y: 12px;
+
+            VerticalLayout {
+                spacing: 0;
+
+                // Header
+                Rectangle {
+                    height: 56px;
+                    background: Cat.green.with-alpha(0.1);
+                    Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.green.with-alpha(0.25); }
+
+                    HorizontalLayout {
+                        padding-left: 18px; padding-right: 18px; spacing: 12px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            NavIcon {
+                                d: "M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11";
+                                icon-color: Cat.green; width: 20px; height: 20px;
+                            }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1; alignment: center; spacing: 2px;
+                            Text { text: "Enable / Disable Repositories"; font-size: 15px; font-weight: 700; color: Cat.text; }
+                            Text { text: repo-mgr-list.length + " repositories"; font-size: 11px; color: Cat.subtext0; }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 28px; height: 25px; border-radius: 8px;
+                                background: ren-close-ta.has-hover ? Cat.surface1 : transparent;
+                                NavIcon { d: "M18 6L6 18M6 6l12 12"; icon-color: Cat.overlay1; width: 14px; height: 14px; x: 7px; y: 7px; }
+                                ren-close-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.show-repo-enable-modal = false; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Info note
+                Rectangle {
+                    background: Cat.blue.with-alpha(0.06);
+                    Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.surface0; }
+                    HorizontalLayout {
+                        padding-left: 14px; padding-right: 14px;
+                        padding-top: 8px; padding-bottom: 8px; spacing: 8px;
+                        VerticalLayout { alignment: center; padding-top: 1px;
+                            NavIcon {
+                                d: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z";
+                                icon-color: Cat.blue; width: 14px; height: 14px;
+                            }
+                        }
+                        Text {
+                            text: "After applying changes, run 'sudo pacman -Sy' to sync the updated repo list.";
+                            font-size: 11px; color: Cat.blue.with-alpha(0.85);
+                            vertical-alignment: center; wrap: word-wrap; horizontal-stretch: 1;
+                        }
+                    }
+                }
+
+                // Loading spinner
+                if repo-mgr-loading: Rectangle {
+                    vertical-stretch: 1;
+                    HorizontalLayout {
+                        alignment: center;
+                        VerticalLayout { alignment: center; Spinner { width: 32px; height: 32px; } }
+                    }
+                }
+
+                // Repo list
+                if !repo-mgr-loading: ListView {
+                    vertical-stretch: 1;
+
+                    for repo[i] in repo-mgr-list: Rectangle {
+                        height: 52px;
+                        background: ren-row-ta.has-hover ? Cat.surface0.with-alpha(0.5) : transparent;
+                        animate background { duration: 60ms; }
+
+                        ren-row-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.repo-mgr-toggle(i); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 16px; padding-right: 16px; spacing: 12px;
+
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 18px; height: 18px; border-radius: 5px;
+                                    background: repo-mgr-enabled[i] ? Cat.green.with-alpha(0.2) : Cat.surface0;
+                                    border-width: 1px;
+                                    border-color: repo-mgr-enabled[i] ? Cat.green : Cat.overlay0;
+                                    animate background { duration: 60ms; }
+                                    NavIcon {
+                                        visible: repo-mgr-enabled[i];
+                                        d: "M5 13l4 4L19 7";
+                                        icon-color: Cat.green;
+                                        width: 11px; height: 11px; x: 3.5px; y: 3.5px;
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: repo.name; font-size: 13px; font-weight: 600; color: Cat.text; overflow: elide; }
+                                Text { text: repo.server; font-size: 11px; color: Cat.subtext0; overflow: elide; }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 62px; height: 20px; border-radius: 5px;
+                                    background: repo-mgr-enabled[i] ? Cat.green.with-alpha(0.18) : Cat.surface1;
+                                    border-width: 1px;
+                                    border-color: repo-mgr-enabled[i] ? Cat.green.with-alpha(0.4) : Cat.overlay0.with-alpha(0.3);
+                                    Text {
+                                        text: repo-mgr-enabled[i] ? "Enabled" : "Disabled";
+                                        font-size: 9px; font-weight: 600;
+                                        color: repo-mgr-enabled[i] ? Cat.green : Cat.overlay1;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            x: 16px; y: parent.height - 1px;
+                            width: parent.width - 32px; height: 1px;
+                            background: Cat.surface0; opacity: 0.4;
+                        }
+                    }
+                }
+
+                // Footer
+                Rectangle {
+                    height: 60px; background: Cat.mantle;
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; }
+                    HorizontalLayout {
+                        padding-left: 16px; padding-right: 16px;
+                        padding-top: 0; padding-bottom: 0;
+                        spacing: 8px; alignment: end;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 90px; height: 34px; border-radius: 8px;
+                                background: ren-cancel-ta.has-hover ? Cat.surface1 : Cat.surface0;
+                                animate background { duration: 80ms; }
+                                Text { text: "Cancel"; font-size: 13px; color: Cat.subtext0; horizontal-alignment: center; vertical-alignment: center; }
+                                ren-cancel-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.show-repo-enable-modal = false; }
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 130px; height: 34px; border-radius: 8px;
+                                background: ren-apply-ta.has-hover ? Cat.green.with-alpha(0.28) : Cat.green.with-alpha(0.18);
+                                border-width: 1px; border-color: Cat.green.with-alpha(0.5);
+                                animate background { duration: 80ms; }
+                                Text { text: "Apply Changes"; font-size: 13px; font-weight: 700; color: Cat.green; horizontal-alignment: center; vertical-alignment: center; }
+                                ren-apply-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.repo-apply-changes();
+                                        root.show-repo-enable-modal = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Repo Manager: Add/Remove modal ───────────────────────────────────────
+    if show-repo-manage-modal: Rectangle {
+        width: 100%; height: 100%;
+        background: Cat.crust.with-alpha(0.75);
+        TouchArea {}
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(560px, parent.width - 40px);
+            height: min(640px, parent.height - 40px);
+            background: Cat.base;
+            border-radius: 12px;
+            clip: true;
+            border-width: 1px;
+            border-color: Cat.blue.with-alpha(0.4);
+            drop-shadow-blur: 36px;
+            drop-shadow-color: Cat.crust.with-alpha(0.8);
+            drop-shadow-offset-y: 12px;
+
+            VerticalLayout {
+                spacing: 0;
+
+                // Header
+                Rectangle {
+                    height: 56px;
+                    background: Cat.blue.with-alpha(0.1);
+                    Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.blue.with-alpha(0.25); }
+
+                    HorizontalLayout {
+                        padding-left: 18px; padding-right: 18px; spacing: 12px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            NavIcon { d: "M12 5v14M5 12h14"; icon-color: Cat.blue; width: 20px; height: 20px; }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1; alignment: center; spacing: 2px;
+                            Text { text: "Add / Remove Repositories"; font-size: 15px; font-weight: 700; color: Cat.text; }
+                            Text { text: "Changes are written directly to /etc/pacman.conf"; font-size: 11px; color: Cat.subtext0; }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 28px; height: 25px; border-radius: 8px;
+                                background: rm2-close-ta.has-hover ? Cat.surface1 : transparent;
+                                NavIcon { d: "M18 6L6 18M6 6l12 12"; icon-color: Cat.overlay1; width: 14px; height: 14px; x: 7px; y: 7px; }
+                                rm2-close-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.show-repo-manage-modal = false;
+                                        root.show-repo-delete-confirm = false;
+                                        root.repo-delete-target = "";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Danger warning
+                Rectangle {
+                    background: Cat.red.with-alpha(0.07);
+                    Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.red.with-alpha(0.18); }
+                    HorizontalLayout {
+                        padding-left: 14px; padding-right: 14px;
+                        padding-top: 8px; padding-bottom: 8px; spacing: 8px;
+                        VerticalLayout { alignment: center;
+                            NavIcon {
+                                d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
+                                icon-color: Cat.red; width: 14px; height: 14px;
+                            }
+                        }
+                        Text {
+                            text: "Removing a repo permanently deletes its section from /etc/pacman.conf and cannot be undone. NOT intended for repos that use separate keyrings or mirrorlists — use 'Edit pacman.conf' for those.";
+                            font-size: 11px; color: Cat.red.with-alpha(0.9);
+                            vertical-alignment: center; wrap: word-wrap; horizontal-stretch: 1;
+                        }
+                    }
+                }
+
+                // Delete confirm bar (inline, shown when a repo is targeted for removal)
+                if show-repo-delete-confirm: Rectangle {
+                    height: 48px;
+                    background: Cat.red.with-alpha(0.12);
+                    border-width: 1px; border-color: Cat.red.with-alpha(0.35);
+                    Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.red.with-alpha(0.25); }
+
+                    HorizontalLayout {
+                        padding-left: 14px; padding-right: 14px; spacing: 10px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: "Delete '" + repo-delete-target + "'? This cannot be undone.";
+                                font-size: 12px; font-weight: 600; color: Cat.red;
+                                overflow: elide;
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 65px; height: 28px; border-radius: 6px;
+                                background: rdel-no-ta.has-hover ? Cat.surface1 : Cat.surface0;
+                                animate background { duration: 60ms; }
+                                Text { text: "Cancel"; font-size: 11px; color: Cat.subtext0; horizontal-alignment: center; vertical-alignment: center; }
+                                rdel-no-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.show-repo-delete-confirm = false;
+                                        root.repo-delete-target = "";
+                                    }
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 65px; height: 28px; border-radius: 6px;
+                                background: rdel-yes-ta.has-hover ? Cat.red.with-alpha(0.5) : Cat.red.with-alpha(0.3);
+                                border-width: 1px; border-color: Cat.red.with-alpha(0.6);
+                                animate background { duration: 60ms; }
+                                Text { text: "Delete"; font-size: 11px; font-weight: 700; color: Cat.red; horizontal-alignment: center; vertical-alignment: center; }
+                                rdel-yes-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.repo-remove(root.repo-delete-target);
+                                        root.show-repo-delete-confirm = false;
+                                        root.repo-delete-target = "";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Loading spinner
+                if repo-mgr-loading: Rectangle {
+                    vertical-stretch: 1;
+                    HorizontalLayout {
+                        alignment: center;
+                        VerticalLayout { alignment: center; Spinner { width: 32px; height: 32px; } }
+                    }
+                }
+
+                // Repo list — height capped to content so add form isn't pushed down
+                if !repo-mgr-loading: ListView {
+                    height: min(repo-mgr-list.length * 52px, 280px);
+
+                    for repo[i] in repo-mgr-list: Rectangle {
+                        height: 52px;
+                        background: transparent;
+
+                        HorizontalLayout {
+                            padding-left: 16px; padding-right: 16px; spacing: 12px;
+
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: repo.name; font-size: 13px; font-weight: 600; color: Cat.text; overflow: elide; }
+                                Text { text: repo.server; font-size: 11px; color: Cat.subtext0; overflow: elide; }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 62px; height: 20px; border-radius: 5px;
+                                    background: repo-mgr-enabled[i] ? Cat.green.with-alpha(0.18) : Cat.surface1;
+                                    border-width: 1px;
+                                    border-color: repo-mgr-enabled[i] ? Cat.green.with-alpha(0.4) : Cat.overlay0.with-alpha(0.3);
+                                    Text {
+                                        text: repo-mgr-enabled[i] ? "Enabled" : "Disabled";
+                                        font-size: 9px; font-weight: 600;
+                                        color: repo-mgr-enabled[i] ? Cat.green : Cat.overlay1;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 62px; height: 26px; border-radius: 6px;
+                                    background: rm2-del-ta.has-hover ? Cat.red.with-alpha(0.28) : Cat.red.with-alpha(0.12);
+                                    border-width: 1px; border-color: Cat.red.with-alpha(0.4);
+                                    animate background { duration: 60ms; }
+                                    Text { text: "Remove"; font-size: 10px; font-weight: 700; color: Cat.red; horizontal-alignment: center; vertical-alignment: center; }
+                                    rm2-del-ta := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.repo-delete-target = repo.name;
+                                            root.show-repo-delete-confirm = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            x: 16px; y: parent.height - 1px;
+                            width: parent.width - 32px; height: 1px;
+                            background: Cat.surface0; opacity: 0.4;
+                        }
+                    }
+                }
+
+                // Add repo form
+                Rectangle {
+                    background: Cat.surface0.with-alpha(0.3);
+                    border-width: 1px; border-color: Cat.surface1;
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; }
+
+                    VerticalLayout {
+                        padding-left: 14px; padding-right: 14px;
+                        padding-top: 10px; padding-bottom: 10px;
+                        spacing: 7px;
+
+                        Text { text: "Add New Repository"; font-size: 12px; font-weight: 700; color: Cat.subtext0; }
+
+                        // Row 1: Name + URL
+                        HorizontalLayout {
+                            spacing: 6px;
+
+                            Rectangle {
+                                width: 150px; height: 30px; border-radius: 6px;
+                                background: Cat.surface1; clip: true;
+                                border-width: 1px;
+                                border-color: add-name-ti.has-focus ? Cat.blue.with-alpha(0.6) : transparent;
+                                add-name-ti := TextInput {
+                                    x: 8px; width: parent.width - 16px; height: parent.height;
+                                    text <=> root.new-repo-name-text;
+                                    font-size: 12px; color: Cat.text;
+                                    single-line: true; vertical-alignment: center;
+                                }
+                                if new-repo-name-text == "" && !add-name-ti.has-focus: Text {
+                                    x: 8px; width: parent.width - 16px; height: parent.height;
+                                    text: "Name (e.g. myrepo)";
+                                    font-size: 11px; color: Cat.overlay0; vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1; height: 30px; border-radius: 6px;
+                                background: Cat.surface1; clip: true;
+                                border-width: 1px;
+                                border-color: add-srv-ti.has-focus ? Cat.blue.with-alpha(0.6) : transparent;
+                                add-srv-ti := TextInput {
+                                    x: 8px; width: parent.width - 16px; height: parent.height;
+                                    text <=> root.new-repo-server-text;
+                                    font-size: 12px; color: Cat.text;
+                                    single-line: true; vertical-alignment: center;
+                                }
+                                if new-repo-server-text == "" && !add-srv-ti.has-focus: Text {
+                                    x: 8px; width: parent.width - 16px; height: parent.height;
+                                    text: "Server URL or /etc/pacman.d/mirrorfile";
+                                    font-size: 11px; color: Cat.overlay0; vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        // Row 2: SigLevel + Add button
+                        HorizontalLayout {
+                            spacing: 6px;
+
+                            VerticalLayout {
+                                alignment: center; width: 70px;
+                                Text {
+                                    text: "SigLevel =";
+                                    font-size: 11px; color: Cat.overlay1;
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1; height: 30px; border-radius: 6px;
+                                background: Cat.surface1; clip: true;
+                                border-width: 1px;
+                                border-color: add-sig-ti.has-focus ? Cat.blue.with-alpha(0.6) : transparent;
+                                add-sig-ti := TextInput {
+                                    x: 8px; width: parent.width - 16px; height: parent.height;
+                                    text <=> root.new-repo-siglevel-text;
+                                    font-size: 12px; color: Cat.text;
+                                    single-line: true; vertical-alignment: center;
+                                }
+                                if new-repo-siglevel-text == "" && !add-sig-ti.has-focus: Text {
+                                    x: 8px; width: parent.width - 16px; height: parent.height;
+                                    text: "Optional (e.g. Required DatabaseOptional)";
+                                    font-size: 11px; color: Cat.overlay0; vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 52px; height: 30px; border-radius: 6px;
+                                background: add-repo-ta.has-hover ? Cat.blue.with-alpha(0.35) : Cat.blue.with-alpha(0.2);
+                                border-width: 1px; border-color: Cat.blue.with-alpha(0.5);
+                                animate background { duration: 80ms; }
+                                Text { text: "Add"; font-size: 12px; font-weight: 700; color: Cat.blue; horizontal-alignment: center; vertical-alignment: center; }
+                                add-repo-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if root.new-repo-name-text != "" && root.new-repo-server-text != "" {
+                                            root.repo-add(root.new-repo-name-text, root.new-repo-server-text, root.new-repo-siglevel-text);
+                                            root.new-repo-name-text = "";
+                                            root.new-repo-server-text = "";
+                                            root.new-repo-siglevel-text = "";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Footer close
+                Rectangle {
+                    height: 52px; background: Cat.mantle;
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; }
+                    HorizontalLayout {
+                        padding-left: 16px; padding-right: 16px; spacing: 8px; alignment: end;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 80px; height: 32px; border-radius: 8px;
+                                background: rm2-done-ta.has-hover ? Cat.surface1 : Cat.surface0;
+                                animate background { duration: 80ms; }
+                                Text { text: "Done"; font-size: 13px; font-weight: 600; color: Cat.text; horizontal-alignment: center; vertical-alignment: center; }
+                                rm2-done-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.show-repo-manage-modal = false;
+                                        root.show-repo-delete-confirm = false;
+                                        root.repo-delete-target = "";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── pacman.conf Options modal ─────────────────────────────────────────────
+    if show-pacman-opts-modal: Rectangle {
+        width: 100%; height: 100%;
+        background: Cat.crust.with-alpha(0.65);
+        TouchArea {}
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(480px, parent.width - 40px);
+            height: opts-card-layout.preferred-height;
+            background: Cat.base;
+            border-radius: 12px;
+            clip: true;
+            border-width: 1px;
+            border-color: Cat.teal.with-alpha(0.35);
+            drop-shadow-blur: 32px;
+            drop-shadow-color: Cat.teal.with-alpha(0.15);
+            drop-shadow-offset-y: 8px;
+
+            opts-card-layout := VerticalLayout {
+                // Header
+                Rectangle {
+                    height: 52px;
+                    background: Cat.teal.with-alpha(0.12);
+                    Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.teal.with-alpha(0.25); }
+                    HorizontalLayout {
+                        padding-left: 16px; padding-right: 16px; spacing: 10px; alignment: start;
+                        VerticalLayout {
+                            alignment: center;
+                            NavIcon {
+                                d: "M12 15a3 3 0 100-6 3 3 0 000 6zM19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z";
+                                icon-color: Cat.teal; width: 18px; height: 18px;
+                            }
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1; alignment: center; spacing: 2px;
+                            Text { text: "pacman.conf Options"; font-size: 14px; font-weight: 700; color: Cat.text; }
+                            Text { text: "Toggle pacman behaviour flags"; font-size: 11px; color: Cat.subtext0; }
+                        }
+                    }
+                }
+
+                // Option rows
+                VerticalLayout {
+                    padding-left: 16px; padding-right: 16px;
+                    padding-top: 8px; padding-bottom: 4px;
+                    spacing: 0px;
+
+                    // Color
+                    Rectangle {
+                        height: 46px; background: transparent;
+                        Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.surface0.with-alpha(0.5); }
+                        HorizontalLayout {
+                            alignment: stretch; spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: "Color"; font-size: 13px; font-weight: 600; color: Cat.text; }
+                                Text { text: "Colorize pacman output in terminal"; font-size: 11px; color: Cat.subtext0; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                opt-color-ta := TouchArea {
+                                    width: 44px; height: 24px; mouse-cursor: pointer;
+                                    clicked => { root.opt-color = !root.opt-color; }
+                                    Rectangle {
+                                        width: 44px; height: 24px; border-radius: 12px;
+                                        background: root.opt-color ? Cat.teal.with-alpha(0.85) : Cat.surface1;
+                                        animate background { duration: 120ms; }
+                                        Rectangle {
+                                            x: root.opt-color ? parent.width - self.width - 3px : 3px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px; height: 18px; border-radius: 9px;
+                                            background: white;
+                                            animate x { duration: 120ms; easing: ease-in-out; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ILoveCandy
+                    Rectangle {
+                        height: 46px; background: transparent;
+                        Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.surface0.with-alpha(0.5); }
+                        HorizontalLayout {
+                            alignment: stretch; spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: "ILoveCandy"; font-size: 13px; font-weight: 600; color: Cat.text; }
+                                Text { text: "Pac-Man progress bar easter egg"; font-size: 11px; color: Cat.subtext0; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                opt-candy-ta := TouchArea {
+                                    width: 44px; height: 24px; mouse-cursor: pointer;
+                                    clicked => { root.opt-love-candy = !root.opt-love-candy; }
+                                    Rectangle {
+                                        width: 44px; height: 24px; border-radius: 12px;
+                                        background: root.opt-love-candy ? Cat.teal.with-alpha(0.85) : Cat.surface1;
+                                        animate background { duration: 120ms; }
+                                        Rectangle {
+                                            x: root.opt-love-candy ? parent.width - self.width - 3px : 3px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px; height: 18px; border-radius: 9px;
+                                            background: white;
+                                            animate x { duration: 120ms; easing: ease-in-out; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // VerbosePkgLists
+                    Rectangle {
+                        height: 46px; background: transparent;
+                        Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.surface0.with-alpha(0.5); }
+                        HorizontalLayout {
+                            alignment: stretch; spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: "VerbosePkgLists"; font-size: 13px; font-weight: 600; color: Cat.text; }
+                                Text { text: "Show old and new versions in package lists"; font-size: 11px; color: Cat.subtext0; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                opt-verbose-ta := TouchArea {
+                                    width: 44px; height: 24px; mouse-cursor: pointer;
+                                    clicked => { root.opt-verbose-pkg-lists = !root.opt-verbose-pkg-lists; }
+                                    Rectangle {
+                                        width: 44px; height: 24px; border-radius: 12px;
+                                        background: root.opt-verbose-pkg-lists ? Cat.teal.with-alpha(0.85) : Cat.surface1;
+                                        animate background { duration: 120ms; }
+                                        Rectangle {
+                                            x: root.opt-verbose-pkg-lists ? parent.width - self.width - 3px : 3px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px; height: 18px; border-radius: 9px;
+                                            background: white;
+                                            animate x { duration: 120ms; easing: ease-in-out; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // DisableDownloadTimeout
+                    Rectangle {
+                        height: 46px; background: transparent;
+                        Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.surface0.with-alpha(0.5); }
+                        HorizontalLayout {
+                            alignment: stretch; spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: "DisableDownloadTimeout"; font-size: 13px; font-weight: 600; color: Cat.text; }
+                                Text { text: "No timeout on slow mirrors"; font-size: 11px; color: Cat.subtext0; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                opt-timeout-ta := TouchArea {
+                                    width: 44px; height: 24px; mouse-cursor: pointer;
+                                    clicked => { root.opt-disable-dl-timeout = !root.opt-disable-dl-timeout; }
+                                    Rectangle {
+                                        width: 44px; height: 24px; border-radius: 12px;
+                                        background: root.opt-disable-dl-timeout ? Cat.teal.with-alpha(0.85) : Cat.surface1;
+                                        animate background { duration: 120ms; }
+                                        Rectangle {
+                                            x: root.opt-disable-dl-timeout ? parent.width - self.width - 3px : 3px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px; height: 18px; border-radius: 9px;
+                                            background: white;
+                                            animate x { duration: 120ms; easing: ease-in-out; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // CheckSpace
+                    Rectangle {
+                        height: 46px; background: transparent;
+                        Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.surface0.with-alpha(0.5); }
+                        HorizontalLayout {
+                            alignment: stretch; spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: "CheckSpace"; font-size: 13px; font-weight: 600; color: Cat.text; }
+                                Text { text: "Verify disk space before installing (recommended)"; font-size: 11px; color: Cat.subtext0; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                opt-checksp-ta := TouchArea {
+                                    width: 44px; height: 24px; mouse-cursor: pointer;
+                                    clicked => { root.opt-check-space = !root.opt-check-space; }
+                                    Rectangle {
+                                        width: 44px; height: 24px; border-radius: 12px;
+                                        background: root.opt-check-space ? Cat.teal.with-alpha(0.85) : Cat.surface1;
+                                        animate background { duration: 120ms; }
+                                        Rectangle {
+                                            x: root.opt-check-space ? parent.width - self.width - 3px : 3px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px; height: 18px; border-radius: 9px;
+                                            background: white;
+                                            animate x { duration: 120ms; easing: ease-in-out; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // DisableSandbox
+                    Rectangle {
+                        height: 46px; background: transparent;
+                        Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.surface0.with-alpha(0.5); }
+                        HorizontalLayout {
+                            alignment: stretch; spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: "DisableSandbox"; font-size: 13px; font-weight: 600; color: Cat.text; }
+                                Text { text: "Disable download sandbox (use if having issues)"; font-size: 11px; color: Cat.subtext0; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                opt-sandbox-ta := TouchArea {
+                                    width: 44px; height: 24px; mouse-cursor: pointer;
+                                    clicked => { root.opt-disable-sandbox = !root.opt-disable-sandbox; }
+                                    Rectangle {
+                                        width: 44px; height: 24px; border-radius: 12px;
+                                        background: root.opt-disable-sandbox ? Cat.teal.with-alpha(0.85) : Cat.surface1;
+                                        animate background { duration: 120ms; }
+                                        Rectangle {
+                                            x: root.opt-disable-sandbox ? parent.width - self.width - 3px : 3px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px; height: 18px; border-radius: 9px;
+                                            background: white;
+                                            animate x { duration: 120ms; easing: ease-in-out; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // NoProgressBar
+                    Rectangle {
+                        height: 46px; background: transparent;
+                        Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Cat.surface0.with-alpha(0.5); }
+                        HorizontalLayout {
+                            alignment: stretch; spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: "NoProgressBar"; font-size: 13px; font-weight: 600; color: Cat.text; }
+                                Text { text: "Suppress progress bar in terminal output"; font-size: 11px; color: Cat.subtext0; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                opt-nopbar-ta := TouchArea {
+                                    width: 44px; height: 24px; mouse-cursor: pointer;
+                                    clicked => { root.opt-no-progress-bar = !root.opt-no-progress-bar; }
+                                    Rectangle {
+                                        width: 44px; height: 24px; border-radius: 12px;
+                                        background: root.opt-no-progress-bar ? Cat.teal.with-alpha(0.85) : Cat.surface1;
+                                        animate background { duration: 120ms; }
+                                        Rectangle {
+                                            x: root.opt-no-progress-bar ? parent.width - self.width - 3px : 3px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px; height: 18px; border-radius: 9px;
+                                            background: white;
+                                            animate x { duration: 120ms; easing: ease-in-out; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // UseSyslog
+                    Rectangle {
+                        height: 46px; background: transparent;
+                        HorizontalLayout {
+                            alignment: stretch; spacing: 12px;
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Text { text: "UseSyslog"; font-size: 13px; font-weight: 600; color: Cat.text; }
+                                Text { text: "Log pacman operations to syslog"; font-size: 11px; color: Cat.subtext0; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                opt-syslog-ta := TouchArea {
+                                    width: 44px; height: 24px; mouse-cursor: pointer;
+                                    clicked => { root.opt-use-syslog = !root.opt-use-syslog; }
+                                    Rectangle {
+                                        width: 44px; height: 24px; border-radius: 12px;
+                                        background: root.opt-use-syslog ? Cat.teal.with-alpha(0.85) : Cat.surface1;
+                                        animate background { duration: 120ms; }
+                                        Rectangle {
+                                            x: root.opt-use-syslog ? parent.width - self.width - 3px : 3px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px; height: 18px; border-radius: 9px;
+                                            background: white;
+                                            animate x { duration: 120ms; easing: ease-in-out; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // CleanMethod selector
+                Rectangle {
+                    background: Cat.surface0.with-alpha(0.3);
+                    border-width: 1px; border-color: Cat.surface1;
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; }
+                    VerticalLayout {
+                        padding: 12px; spacing: 8px;
+                        Text { text: "CleanMethod"; font-size: 12px; font-weight: 700; color: Cat.subtext0; }
+                        Text { text: "Which cached packages to keep when cleaning cache"; font-size: 11px; color: Cat.overlay1; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                height: 32px; horizontal-stretch: 1; border-radius: 7px;
+                                background: opt-clean-method == 0 ? Cat.teal.with-alpha(0.22) : Cat.surface1;
+                                border-width: 1px;
+                                border-color: opt-clean-method == 0 ? Cat.teal.with-alpha(0.6) : Cat.surface2;
+                                animate background { duration: 100ms; }
+                                Text { text: "KeepInstalled"; font-size: 12px; font-weight: 600; color: opt-clean-method == 0 ? Cat.teal : Cat.subtext0; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.opt-clean-method = 0; } }
+                            }
+                            Rectangle {
+                                height: 32px; horizontal-stretch: 1; border-radius: 7px;
+                                background: opt-clean-method == 1 ? Cat.teal.with-alpha(0.22) : Cat.surface1;
+                                border-width: 1px;
+                                border-color: opt-clean-method == 1 ? Cat.teal.with-alpha(0.6) : Cat.surface2;
+                                animate background { duration: 100ms; }
+                                Text { text: "KeepCurrent"; font-size: 12px; font-weight: 600; color: opt-clean-method == 1 ? Cat.teal : Cat.subtext0; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.opt-clean-method = 1; } }
+                            }
+                        }
+                    }
+                }
+
+                // Footer
+                Rectangle {
+                    height: 56px; background: Cat.mantle;
+                    Rectangle { y: 0; width: 100%; height: 1px; background: Cat.surface0; }
+                    HorizontalLayout {
+                        padding-left: 16px; padding-right: 16px; spacing: 8px; alignment: end;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 80px; height: 32px; border-radius: 8px;
+                                background: opts-cancel-ta.has-hover ? Cat.surface1 : Cat.surface0;
+                                animate background { duration: 80ms; }
+                                Text { text: "Cancel"; font-size: 13px; font-weight: 600; color: Cat.subtext0; horizontal-alignment: center; vertical-alignment: center; }
+                                opts-cancel-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.show-pacman-opts-modal = false;
+                                        root.load-pacman-opts();
+                                    }
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 100px; height: 32px; border-radius: 8px;
+                                background: opts-apply-ta.has-hover ? Cat.teal.with-alpha(0.85) : Cat.teal.with-alpha(0.7);
+                                animate background { duration: 80ms; }
+                                Text { text: "Apply"; font-size: 13px; font-weight: 700; color: Cat.base; horizontal-alignment: center; vertical-alignment: center; }
+                                opts-apply-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.save-pacman-opts();
+                                        root.show-pacman-opts-modal = false;
+                                    }
+                                }
                             }
                         }
                     }
