@@ -100,7 +100,6 @@ enum UiMessage {
     TerminalDone(bool),
     SetTerminalIsUpgrade(bool),
     HideTerminal,
-    SetExternalTerminal(bool),
     ShowProgressPopup(String),
     OperationProgress(i32, String),
     ProgressOutput(String),
@@ -108,7 +107,6 @@ enum UiMessage {
     ProgressHidePrompt,
     ProgressPromptButtons,
     ProgressLogLine(String, u8),
-    #[allow(dead_code)]
     ProgressETA(String),
     ProgressErrorSummary(String),
     ProgressAutoExpand,
@@ -1202,148 +1200,6 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
     (dep_nodes, reqby_nodes, root_version)
 }
 
-// ─── External terminal support ────────────────────────────────────────────────
-
-fn detect_terminal() -> Option<String> {
-    // KDE preferred terminal via kreadconfig5
-    if let Ok(out) = std::process::Command::new("kreadconfig5")
-        .args(["--file", "kdeglobals", "--group", "General", "--key", "TerminalApplication"])
-        .output()
-    {
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !s.is_empty() {
-            if std::process::Command::new("which").arg(&s)
-                .status().map(|st| st.success()).unwrap_or(false)
-            {
-                return Some(s);
-            }
-        }
-    }
-    for t in &["konsole", "alacritty", "kitty", "wezterm", "xterm", "gnome-terminal"] {
-        if std::process::Command::new("which").arg(t)
-            .status().map(|st| st.success()).unwrap_or(false)
-        {
-            return Some(t.to_string());
-        }
-    }
-    None
-}
-
-/// Returns (program, args) to launch `script` in the given terminal,
-/// keeping the window open after the script exits so the user can read output.
-/// Returns `(program, args)` to run `script` in the given terminal emulator.
-/// Script is responsible for all output and the final "press Enter" prompt.
-fn terminal_command(terminal: &str, script: &str) -> (String, Vec<String>) {
-    match terminal {
-        "konsole" => ("konsole".into(), vec![
-            "-e".into(), "sh".into(), "-c".into(), script.into(),
-        ]),
-        "xterm" => ("xterm".into(), vec![
-            "-e".into(), "sh".into(), "-c".into(), script.into(),
-        ]),
-        "gnome-terminal" => ("gnome-terminal".into(), vec![
-            "--".into(), "sh".into(), "-c".into(), script.into(),
-        ]),
-        "alacritty" => ("alacritty".into(), vec![
-            "-e".into(), "sh".into(), "-c".into(), script.into(),
-        ]),
-        "kitty" => ("kitty".into(), vec![
-            "sh".into(), "-c".into(), script.into(),
-        ]),
-        "wezterm" => ("wezterm".into(), vec![
-            "start".into(), "--".into(), "sh".into(), "-c".into(), script.into(),
-        ]),
-        other => (other.into(), vec![
-            "-e".into(), "sh".into(), "-c".into(), script.into(),
-        ]),
-    }
-}
-
-fn run_in_external_terminal(
-    tx: &mpsc::Sender<UiMessage>,
-    title: &str,
-    cmd: &str,
-    args: &[String],
-    terminal: &str,
-    pid_holder: &Arc<Mutex<Option<u32>>>,
-    conflict_ctx: &Arc<Mutex<Option<(String, Vec<String>, i32)>>>,
-) {
-    let pacman_cmd: String = std::iter::once(cmd)
-        .chain(args.iter().map(|s| s.as_str()))
-        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let result_file = format!("/tmp/xpm-result-{}.txt", unsafe { libc::getpid() });
-    let _ = std::fs::remove_file(&result_file);
-
-    // Capture exit code BEFORE any echo so $? isn't clobbered.
-    let script = format!(
-        r#"{cmd}
-_xpm_exit=$?
-echo $_xpm_exit > '{rf}'
-echo ''
-if [ $_xpm_exit -eq 0 ]; then
-    echo '╔════════════════════════════════════════════╗'
-    echo '║                                            ║'
-    echo '║  ✔  Operation completed successfully.      ║'
-    echo '║                                            ║'
-    echo '╚════════════════════════════════════════════╝'
-else
-    echo '╔════════════════════════════════════════════╗'
-    echo '║                                            ║'
-    echo '║  ✘  Operation finished with errors.        ║'
-    echo '║                                            ║'
-    echo '╚════════════════════════════════════════════╝'
-fi
-echo ''
-echo '  Press Enter to close...'
-read"#,
-        cmd = pacman_cmd,
-        rf  = result_file,
-    );
-    let (prog, t_args) = terminal_command(terminal, &script);
-    let t_args_str: Vec<&str> = t_args.iter().map(|s| s.as_str()).collect();
-
-    let child = match std::process::Command::new(&prog)
-        .args(&t_args_str)
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(UiMessage::ProgressOutput(format!("Failed to launch {}: {}\n", prog, e)));
-            let _ = tx.send(UiMessage::OperationDone(false));
-            return;
-        }
-    };
-
-    *pid_holder.lock().unwrap() = Some(child.id());
-
-    let tx2 = tx.clone();
-    let result_file2 = result_file.clone();
-    let _conflict_ctx2 = conflict_ctx.clone();
-    let _title2 = title.to_string();
-
-    thread::spawn(move || {
-        // waitpid via std — Child::wait() blocks until terminal closes
-        let mut child = child;
-        let _ = child.wait();
-
-        let success = std::fs::read_to_string(&result_file2)
-            .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .map(|code| code == 0)
-            .unwrap_or(false);
-
-        let _ = std::fs::remove_file(&result_file2);
-        // Do NOT clear conflict_ctx here — the OperationDone handler on the main
-        // thread reads it to flip Install/Remove buttons. Next operation overwrites it.
-        let _ = tx2.send(UiMessage::OperationDone(success));
-    });
-}
-
-// ─── End external terminal support ────────────────────────────────────────────
-
 fn spawn_in_pty(cmd: &str, args: &[&str]) -> Result<(i32, u32), String> {
     use std::os::unix::io::FromRawFd;
 
@@ -1490,6 +1346,35 @@ fn detect_phase(lower: &str, raw: &str, _total_packages: usize) -> Option<(&'sta
     None
 }
 
+/// Collapse runs of blank lines to a single blank line for cleaner terminal display.
+fn collapse_blank_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev_blank = false;
+    for line in text.split('\n') {
+        if line.trim().is_empty() {
+            if !prev_blank { out.push('\n'); }
+            prev_blank = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+            prev_blank = false;
+        }
+    }
+    out
+}
+
+fn format_eta(current_percent: i32, op_start: std::time::Instant) -> Option<String> {
+    if current_percent <= 5 { return None; }
+    let elapsed = op_start.elapsed().as_secs_f32();
+    if elapsed <= 1.0 { return None; }
+    let rate = current_percent as f32 / elapsed;
+    let remaining = (100 - current_percent) as f32 / rate;
+    if remaining < 60.0 {
+        Some(format!("~{}s", remaining as u32))
+    } else {
+        Some(format!("~{}m {}s", (remaining / 60.0) as u32, (remaining as u32) % 60))
+    }
+}
 
 /// Detects interactive prompts and sends the appropriate UI messages.
 /// Returns true if the output should be force-flushed to the UI immediately.
@@ -1606,7 +1491,7 @@ fn run_in_terminal_impl(
         let mut last_output_flush = std::time::Instant::now() - std::time::Duration::from_millis(100);
         const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
         const MAX_OUTPUT_LINES: usize = 500;
-        let _op_start = std::time::Instant::now();
+        let op_start = std::time::Instant::now();
         let mut first_error_line: Option<String> = None;
         let mut line_acc: Vec<char> = Vec::new();
         let mut write_pos: usize = 0;
@@ -1831,26 +1716,9 @@ fn run_managed_operation(
     conflict_ctx: &Arc<Mutex<Option<(String, Vec<String>, i32)>>>,
 ) {
     *conflict_ctx.lock().unwrap() = Some((action.to_string(), names.to_vec(), backend));
+    let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
 
     let (cmd, args) = build_pacman_command(action, names, backend);
-
-    // Flatpak always uses PTY (interactive -y flag handles prompts; no pkexec).
-    // Native pacman ops try external terminal first for real output.
-    let use_external = backend != 1 && detect_terminal().is_some();
-
-    if use_external {
-        let terminal = detect_terminal().unwrap();
-        let stage = format!("Running in {}...", terminal);
-        let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
-        let _ = tx.send(UiMessage::OperationProgress(0, stage));
-        let _ = tx.send(UiMessage::SetExternalTerminal(true));
-        run_in_external_terminal(tx, title, &cmd, &args, &terminal, pid_holder, conflict_ctx);
-        return;
-    }
-
-    let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
-    let _ = tx.send(UiMessage::SetExternalTerminal(false));
-
     let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     let (master_fd, child_pid) = match spawn_in_pty(&cmd, &args_str) {
@@ -1888,7 +1756,7 @@ fn run_managed_operation(
         let mut last_output_flush = std::time::Instant::now() - std::time::Duration::from_millis(100);
         const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
         const MAX_OUTPUT_LINES: usize = 500;
-        let _op_start = std::time::Instant::now();
+        let op_start = std::time::Instant::now();
         let mut first_error_line: Option<String> = None;
         let mut line_acc: Vec<char> = Vec::new();
         let mut write_pos: usize = 0;
@@ -3019,12 +2887,8 @@ fn main() {
                         let new_log = Rc::new(VecModel::<LogLine>::default());
                         window.set_progress_log_lines(ModelRc::new(new_log.clone()));
                         *log_model_timer.borrow_mut() = Some(new_log);
-                        window.set_progress_popup_external(false);
                         window.set_show_progress_popup(true);
                         window.set_show_terminal(false);
-                    }
-                    UiMessage::SetExternalTerminal(ext) => {
-                        window.set_progress_popup_external(ext);
                     }
                     UiMessage::ProgressOutput(text) => {
                         window.set_progress_popup_output(SharedString::from(&text));

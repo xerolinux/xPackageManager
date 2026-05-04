@@ -93,19 +93,14 @@ sudo pacman -Syy xpm-gui
 sudo pacman -S rust cargo flatpak alpm
 ```
 
-- Without XeroLinux repo :
+- Build & Install :
 
 ```bash
 git clone https://github.com/xerolinux/xPackageManager
 cd xPackageManager/packaging/ && makepkg -rsifcd
 ```
 
-- With XeroLinux repo :
-
-```bash
-echo -e '\n[xerolinux]\nSigLevel = Optional TrustAll\nServer = https://repos.xerolinux.xyz/$repo/$arch' | sudo tee -a /etc/pacman.conf
-sudo pacman -Syy xpm-gui
-```
+> This will require you to manually do a git pull and rebuild with every update...
 
 ---
 

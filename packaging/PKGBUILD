@@ -1,6 +1,6 @@
 # Maintainer: Your Name <your.email@example.com>
 pkgname=xpm-gui
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=2
 pkgdesc="A modern package manager for Arch Linux supporting pacman and Flatpak"
 arch=('x86_64')
@@ -9,6 +9,8 @@ license=('GPL-3.0-or-later')
 depends=(
     'pacman'
     'flatpak'
+    'fwupd'
+    'fwupd-efi'
     'polkit'
     'fontconfig'
     'freetype2'

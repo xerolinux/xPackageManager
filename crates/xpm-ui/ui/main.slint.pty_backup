@@ -892,7 +892,6 @@ export component MainWindow inherits Window {
     in-out property <bool> show-progress-popup: false;
     in-out property <bool> progress-popup-show-close: false;
     in-out property <bool> progress-input-focus-pending: false;
-    in-out property <bool> progress-popup-external: false;
     in-out property <string> progress-popup-title: "";
     in-out property <int> progress-popup-percent: 0;
     in-out property <string> progress-popup-stage: "";
@@ -6706,8 +6705,8 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Expand / collapse strip — hidden in external-terminal mode (no PTY output to show)
-                if !progress-popup-external: Rectangle {
+                // Expand / collapse strip — centered pill with divider lines on each side
+                Rectangle {
                     height: 32px;
                     background: Cat.mantle;
 
@@ -6857,7 +6856,7 @@ export component MainWindow inherits Window {
                     opacity: 0.5;
                 }
 
-                if progress-show-details && !progress-popup-external: Rectangle {
+                if progress-show-details: Rectangle {
                     vertical-stretch: 1;
                     background: Cat.crust;
 
