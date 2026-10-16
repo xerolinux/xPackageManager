@@ -190,7 +190,7 @@ EDITOR=vim
         let kf = parse_keyfile(META);
         assert!(has_token(&kf, "shared", "network"));
         assert!(has_token(&kf, "sockets", "x11"));
-        assert!(!has_token(&kf, "sockets", "wayland") == false); // wayland present
+        assert!(has_token(&kf, "sockets", "wayland")); // wayland present
         assert_eq!(list_tokens(&kf, "filesystems"), vec!["host", "xdg-download"]);
         assert_eq!(env_entries(&kf).get("LANG").map(|s| s.as_str()), Some("C"));
         assert_eq!(

@@ -61,9 +61,9 @@ fn which(cmd: &str) -> Option<PathBuf> {
     std::env::split_paths(&path).map(|d| d.join(cmd)).find(|p| p.is_file())
 }
 
-/// Optional GitHub API token. Unauthenticated requests are capped at 60/hr per IP
-/// - a library of a few dozen apps exhausts that fast on a single update check. A
-/// token raises the limit to 5000/hr. Set once at startup and on settings change.
+/// Optional GitHub API token. Unauthenticated requests are capped at 60/hr per IP,
+/// which a library of a few dozen apps exhausts on a single update check. A token
+/// raises the limit to 5000/hr. Set once at startup and on settings change.
 static GITHUB_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 /// Set (or clear with an empty/None value) the GitHub API token used for release
@@ -194,11 +194,10 @@ fn cached_feed_body(url: &str) -> Result<String> {
             .and_then(|m| m.elapsed().ok())
             .map(|age| age.as_secs() < FEED_CACHE_SECS)
             .unwrap_or(false);
-        if fresh {
-            if let Ok(body) = std::fs::read_to_string(&cache) {
+        if fresh
+            && let Ok(body) = std::fs::read_to_string(&cache) {
                 return Ok(body);
             }
-        }
     }
     let body = curl_text(url, Some("application/json"))?;
     if let Some(parent) = cache.parent() {

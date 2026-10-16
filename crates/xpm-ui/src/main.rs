@@ -1,19 +1,15 @@
 
 use quick_xml::events::Event;
-use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
 use slint::{Model, ModelRc, SharedString, VecModel, Timer, TimerMode};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::BufReader;
 use std::path::Path;
 use serde_json::Value;
 use std::rc::Rc;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::sync::{mpsc, Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -24,11 +20,16 @@ use xpm_flatpak::FlatpakBackend;
 use xpm_flatpak::permissions as fperm;
 use xpm_appimage::{AppImageBackend, AppImageEntry, CatalogEntry};
 
-slint::include_modules!();
+mod appstream;
+mod flathub;
+mod icons;
+mod progress;
+mod xml;
+use appstream::CachedRemoteApp;
+use progress::{Mode, OpReporter};
+use xml::XmlEvents;
 
-/// Embedded AUR malware scanner (no external script dependency). Run via
-/// `bash -c AUR_CHECK_SCRIPT xpm-aur-check --full --log-file=<path>`.
-const AUR_CHECK_SCRIPT: &str = include_str!("aur_check.sh");
+slint::include_modules!();
 
 fn instance_lock_path() -> String {
     let uid = unsafe { libc::getuid() };
@@ -85,6 +86,28 @@ fn listen_for_instance_signals(window: slint::Weak<MainWindow>) {
 }
 
 
+struct FlatpakDetail {
+    app_id: String,
+    name: String,
+    summary: String,
+    description: String,
+    developer: String,
+    version: String,
+    version_date: String,
+    license: String,
+    url_homepage: String,
+    url_bugtracker: String,
+    url_translate: String,
+    url_vcs: String,
+    url_donation: String,
+    url_help: String,
+    categories: Vec<String>,
+    releases: Vec<(String, String, String)>,
+    captions: Vec<String>,
+}
+
+type ConflictCtx = Arc<Mutex<Option<(String, Vec<String>, i32)>>>;
+
 enum UiMessage {
     PackagesLoaded {
         installed: Vec<PackageData>,
@@ -107,31 +130,19 @@ enum UiMessage {
     ProgressPrompt(String),
     ProgressHidePrompt,
     ProgressPromptButtons,
-    ProgressLogLine(String, u8),
     ProgressErrorSummary(String),
     ProgressAutoExpand,
-    ProgressShowInput,
+    ProgressMode { cancellable: bool },
+    ProgressStage(String),
     OperationDone(bool),
     ActivityLoaded(Vec<ActivityItem>),
     SysInfoLoaded(SysInfo),
     ShowConflict { summary: String, can_force: bool },
     FlatpakRemotesLoaded(Vec<String>),
     RemoteAppsFiltered { serial: u64, apps: Vec<PackageData>, total_matches: usize },
-    FlatpakDetailReady {
-        name: String,
-        summary: String,
-        description: String,
-        developer: String,
-        version: String,
-        version_date: String,
-        changelog: String,
-        url_homepage: String,
-        url_bugtracker: String,
-        url_translate: String,
-        url_vcs: String,
-        categories: Vec<String>,
-    },
-    FlatpakScreenshotReady(String),
+    FlatpakDetailReady(Box<FlatpakDetail>),
+    FlatpakScreenshotReady { app_id: String, index: usize, path: String },
+    FlatpakExtrasReady { app_id: String, extras: flathub::Extras },
     FlatpakIconReady(String),
     FlatpakAddonsReady(Vec<PackageData>),
     PacmanReposLoaded(Vec<String>),
@@ -142,7 +153,6 @@ enum UiMessage {
     ArchNewsLoaded(Vec<ArchNewsItem>),
     ArchNewsLoading,
     ShowWarning { message: String, chaotic_aur: bool },
-    ProgressShowClose,
     RepoListLoaded(Vec<(String, bool, String)>),
     PacmanOptsLoaded(PacmanOpts),
     UpdateCacheSize(String),
@@ -153,7 +163,10 @@ enum UiMessage {
     AppImageCatalogReady,
     AppImageCatalogLoading(bool),
     AppImageIconReady { github: String, path: String },
+    AppImageIconPixels { github: String, pixels: icons::Pixels },
     AppImageCardsRefresh,
+    IconIndexReady(HashMap<String, std::path::PathBuf>),
+    IconDecoded { name: String, pixels: Option<icons::Pixels> },
 }
 
 #[derive(Clone)]
@@ -191,24 +204,6 @@ done
 exit 1
 "#;
 
-const PACMAN_USER_PROMPT_PATTERNS: &[&str] = &[
-    "Proceed with installation? [Y/n]",
-    "Proceed with download? [Y/n]",
-    ":: Proceed with installation? [Y/n]",
-    ":: Proceed with download? [Y/n]",
-    "Do you want to remove these packages? [y/N]",
-    ":: Do you want to remove these packages? [y/N]",
-    ":: Replace",
-    ":: Import",
-    "Enter a number",
-    "Enter number to select",
-    "Enter a selection",
-    "Terminate batch job",
-    "Which do you want to install",
-    "Which do you want to use",
-    "(0 to abort)",
-    "Choose identity to authenticate",
-];
 
 fn parse_pacman_repos(content: &str) -> Vec<(String, bool, String)> {
     let mut repos: Vec<(String, bool, String)> = Vec::new();
@@ -219,19 +214,18 @@ fn parse_pacman_repos(content: &str) -> Vec<(String, bool, String)> {
         let uncommented = trimmed.trim_start_matches('#').trim();
 
         if uncommented.starts_with('[') && uncommented.ends_with(']') {
-            if let Some(r) = current.take() {
-                if r.0 != "options" {
+            if let Some(r) = current.take()
+                && r.0 != "options" {
                     repos.push(r);
                 }
-            }
             let name = uncommented[1..uncommented.len() - 1].to_string();
             let enabled = !trimmed.starts_with('#');
             current = Some((name, enabled, String::new()));
             continue;
         }
 
-        if let Some(ref mut cur) = current {
-            if cur.0 != "options" && cur.2.is_empty() {
+        if let Some(ref mut cur) = current
+            && cur.0 != "options" && cur.2.is_empty() {
                 let effective = if trimmed.starts_with('#') {
                     trimmed.trim_start_matches('#').trim()
                 } else {
@@ -241,13 +235,11 @@ fn parse_pacman_repos(content: &str) -> Vec<(String, bool, String)> {
                     cur.2 = effective.to_string();
                 }
             }
-        }
     }
-    if let Some(r) = current {
-        if r.0 != "options" {
+    if let Some(r) = current
+        && r.0 != "options" {
             repos.push(r);
         }
-    }
     repos
 }
 
@@ -551,13 +543,11 @@ fn config_path() -> std::path::PathBuf {
 
 fn load_config() -> AppConfig {
     let path = config_path();
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
+    if path.exists()
+        && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
                 return config;
             }
-        }
-    }
     AppConfig::default()
 }
 
@@ -814,16 +804,25 @@ fn icon_cache_path(github: &str, icon_url: &str) -> std::path::PathBuf {
 }
 
 /// Map of installed catalog apps: github repo (lowercase) -> manifest id.
-fn installed_github_map() -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    if let Ok(backend) = AppImageBackend::new() {
-        for e in backend.list_entries() {
-            if let Some(gh) = &e.github {
-                map.insert(gh.to_lowercase(), e.name.clone());
-            }
+fn installed_github_map(entries: &[AppImageEntry]) -> std::collections::HashMap<String, String> {
+    entries
+        .iter()
+        .filter_map(|e| e.github.as_ref().map(|gh| (gh.to_lowercase(), e.name.clone())))
+        .collect()
+}
+
+fn set_appimage_card_icon(window: &MainWindow, github: &str, icon: slint::Image) {
+    let model = window.get_catalog_appimages();
+    for idx in 0..model.row_count() {
+        if let Some(mut card) = model.row_data(idx)
+            && card.github == github
+        {
+            card.icon = icon;
+            card.has_icon = true;
+            model.set_row_data(idx, card);
+            break;
         }
     }
-    map
 }
 
 fn catalog_entry_to_card(
@@ -959,14 +958,13 @@ fn pick_appimage_file() -> Option<String> {
     let out = std::process::Command::new("kdialog")
         .args(["--getopenfilename", ".", "AppImage (*.AppImage *.appimage)"])
         .output();
-    if let Ok(o) = out {
-        if o.status.success() {
+    if let Ok(o) = out
+        && o.status.success() {
             let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if !p.is_empty() {
                 return Some(p);
             }
         }
-    }
     let out = std::process::Command::new("zenity")
         .args([
             "--file-selection",
@@ -974,14 +972,13 @@ fn pick_appimage_file() -> Option<String> {
             "--file-filter=AppImage | *.AppImage *.appimage",
         ])
         .output();
-    if let Ok(o) = out {
-        if o.status.success() {
+    if let Ok(o) = out
+        && o.status.success() {
             let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if !p.is_empty() {
                 return Some(p);
             }
         }
-    }
     None
 }
 
@@ -991,25 +988,23 @@ fn pick_directory() -> Option<String> {
     let out = std::process::Command::new("kdialog")
         .args(["--getexistingdirectory", &home])
         .output();
-    if let Ok(o) = out {
-        if o.status.success() {
+    if let Ok(o) = out
+        && o.status.success() {
             let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if !p.is_empty() {
                 return Some(p);
             }
         }
-    }
     let out = std::process::Command::new("zenity")
         .args(["--file-selection", "--directory", "--title=Select AppImage folder"])
         .output();
-    if let Ok(o) = out {
-        if o.status.success() {
+    if let Ok(o) = out
+        && o.status.success() {
             let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if !p.is_empty() {
                 return Some(p);
             }
         }
-    }
     None
 }
 
@@ -1024,202 +1019,36 @@ fn run_appimage_op<F>(
 ) where
     F: FnOnce(&AppImageBackend, &dyn Fn(&str)) -> xpm_core::error::Result<()>,
 {
-    let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
-    let _ = tx.send(UiMessage::ProgressAutoExpand);
-    let _ = tx.send(UiMessage::ProgressShowClose);
+    let reporter = OpReporter::start(tx, title, Mode { cancellable: false }, 1);
+    let feeder = reporter.feeder();
 
     let backend = match AppImageBackend::with_dir(dir.map(std::path::PathBuf::from)) {
         Ok(b) => b,
         Err(e) => {
-            let _ = tx.send(UiMessage::ProgressOutput(format!("Error: {}\n", e)));
-            let _ = tx.send(UiMessage::OperationDone(false));
+            feeder.line(&format!("Error: {e}"));
+            reporter.finish(false);
             return;
         }
     };
 
-    let buf = std::rc::Rc::new(RefCell::new(String::new()));
-    let log_tx = tx.clone();
-    let log_buf = buf.clone();
-    let log = move |line: &str| {
-        log_buf.borrow_mut().push_str(line);
-        let _ = log_tx.send(UiMessage::ProgressOutput(log_buf.borrow().clone()));
+    let log = |line: &str| {
+        feeder.feed(line.as_bytes());
     };
-
-    let res = op(&backend, &log);
-    match res {
-        Ok(()) => {
-            if let Some(id) = clear_update {
-                let _ = tx.send(UiMessage::AppImageUpdateCleared(id));
-            }
-            let _ = tx.send(UiMessage::OperationDone(true));
-        }
+    let ok = match op(&backend, &log) {
+        Ok(()) => true,
         Err(e) => {
-            buf.borrow_mut().push_str(&format!("\nError: {}\n", e));
-            let _ = tx.send(UiMessage::ProgressOutput(buf.borrow().clone()));
-            let _ = tx.send(UiMessage::OperationDone(false));
+            feeder.line(&format!("\nError: {e}"));
+            false
         }
+    };
+    if ok && let Some(id) = clear_update {
+        let _ = tx.send(UiMessage::AppImageUpdateCleared(id));
     }
+    reporter.finish(ok);
 
     let _ = tx.send(UiMessage::InstalledAppImagesLoaded(backend.list_entries()));
     let _ = tx.send(UiMessage::AppImageCardsRefresh);
 }
-
-/// Map typographic Unicode (curly quotes, dashes, ellipsis, bidi marks) to plain
-/// ASCII so the monospace terminal popup doesn't render them as '?'.
-fn normalize_typographic(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for c in input.chars() {
-        match c {
-            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => out.push('\''),
-            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => out.push('"'),
-            '\u{2013}' | '\u{2014}' | '\u{2015}' => out.push('-'),
-            '\u{2026}' => out.push_str("..."),
-            '\u{00A0}' | '\u{202F}' => out.push(' '),
-            '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => {}
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-fn strip_ansi(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        if chars[i] == '\x1b' {
-            i += 1;
-            if i >= len { break; }
-            match chars[i] {
-                '[' => {
-                    i += 1;
-                    while i < len && (chars[i] >= '0' && chars[i] <= '?') { i += 1; }
-                    while i < len && (chars[i] >= ' ' && chars[i] <= '/') { i += 1; }
-                    if i < len && (chars[i] >= '@' && chars[i] <= '~') { i += 1; }
-                }
-                ']' => {
-                    i += 1;
-                    while i < len {
-                        if chars[i] == '\x07' { i += 1; break; }
-                        if chars[i] == '\x1b' && i + 1 < len && chars[i + 1] == '\\' {
-                            i += 2; break;
-                        }
-                        i += 1;
-                    }
-                }
-                '(' | ')' | '*' | '+' => {
-                    i += 1;
-                    if i < len { i += 1; }
-                }
-                _ => { i += 1; }
-            }
-        } else {
-            result.push(chars[i]);
-            i += 1;
-        }
-    }
-    result
-}
-
-struct TermStream {
-    lines: Vec<String>,
-    current: String,
-    pending_cr: bool,
-    in_csi: bool,
-    in_osc: bool,
-}
-
-impl TermStream {
-    fn new() -> Self {
-        Self { lines: Vec::new(), current: String::new(), pending_cr: false, in_csi: false, in_osc: false }
-    }
-
-    fn process(&mut self, bytes: &[u8]) {
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-
-            if self.in_csi {
-                if (0x40..=0x7e).contains(&b) { self.in_csi = false; }
-                i += 1;
-                continue;
-            }
-            if self.in_osc {
-                if b == 0x07 || b == 0x1b { self.in_osc = false; }
-                i += 1;
-                continue;
-            }
-
-            if self.pending_cr {
-                self.pending_cr = false;
-                if b == 0x0a {
-                    self.lines.push(std::mem::take(&mut self.current));
-                    i += 1;
-                    continue;
-                }
-                self.current.clear();
-            }
-
-            match b {
-                0x1b => {
-                    i += 1;
-                    if i < bytes.len() {
-                        match bytes[i] {
-                            b'[' => { self.in_csi = true; i += 1; }
-                            b']' => { self.in_osc = true; i += 1; }
-                            b'(' | b')' | b'*' | b'+' => { i += 2; }
-                            _ => { i += 1; }
-                        }
-                    }
-                }
-                0x0d => { self.pending_cr = true; i += 1; }
-                0x0a => { self.lines.push(std::mem::take(&mut self.current)); i += 1; }
-                0x08 => { self.current.pop(); i += 1; }
-                0x00..=0x07 | 0x0b | 0x0c | 0x0e..=0x1a | 0x1c..=0x1f | 0x7f => { i += 1; }
-                _ => {
-                    let char_len = match b {
-                        0x00..=0x7f => 1usize,
-                        0xc0..=0xdf => 2,
-                        0xe0..=0xef => 3,
-                        0xf0..=0xf7 => 4,
-                        _ => 1,
-                    };
-                    let end = (i + char_len).min(bytes.len());
-                    if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
-                        self.current.push_str(s);
-                    }
-                    i += (end - i).max(1);
-                }
-            }
-        }
-    }
-
-    fn render(&self) -> String {
-        let mut parts: Vec<&str> = self.lines.iter().map(String::as_str).collect();
-        if !self.current.is_empty() {
-            parts.push(self.current.as_str());
-        }
-        while parts.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
-            parts.pop();
-        }
-        if parts.is_empty() {
-            return String::new();
-        }
-        let mut out = String::with_capacity(parts.iter().map(|s| s.len() + 1).sum::<usize>() + 1);
-        let mut prev_blank = false;
-        for line in &parts {
-            let is_blank = line.trim().is_empty();
-            if is_blank && prev_blank { continue; }
-            prev_blank = is_blank;
-            out.push_str(line);
-            out.push('\n');
-        }
-        normalize_typographic(&out)
-    }
-}
-
 
 fn clean_dep_name(s: &str) -> String {
     let s = s.trim();
@@ -1250,11 +1079,10 @@ fn resolve_dep_list(raw: Vec<String>) -> Vec<String> {
     let mut result = Vec::with_capacity(raw.len());
     for dep in raw {
         if dep.starts_with('/') {
-            if let Some(pkg) = resolve_file_dep(&dep) {
-                if !result.contains(&pkg) {
+            if let Some(pkg) = resolve_file_dep(&dep)
+                && !result.contains(&pkg) {
                     result.push(pkg);
                 }
-            }
         } else if dep.contains(".so") {
         } else {
             result.push(dep);
@@ -1636,121 +1464,6 @@ fn spawn_in_pty(cmd: &str, args: &[&str]) -> Result<(i32, u32), String> {
 }
 
 
-fn classify_log_level(lower: &str) -> u8 {
-    if lower.contains("error:") { 1 }
-    else if lower.contains("warning:") { 2 }
-    else if (lower.contains("installed") || lower.contains("upgraded") || lower.contains("removed"))
-        && !lower.contains("error:") { 3 }
-    else { 0 }
-}
-
-/// Extract the last `XX%` token from a line (pacman inline progress indicator).
-fn extract_inline_percent(raw: &str) -> Option<i32> {
-    raw.split_whitespace()
-        .filter_map(|t| t.strip_suffix('%')?.parse::<i32>().ok().filter(|&p| (0..=100).contains(&p)))
-        .next_back()
-}
-
-/// Parse `(k/N)` from a pacman progress line and return fractional progress
-/// `(k-1 + inline%/100) / N` in [0.0, 1.0].
-fn parse_kn_fraction(raw: &str) -> Option<f32> {
-    let s = raw.find('(')?;
-    let e = raw[s..].find(')')?;
-    let inner = &raw[s + 1..s + e];
-    let mut parts = inner.split('/');
-    let k: i32 = parts.next()?.trim().parse().ok()?;
-    let n: i32 = parts.next()?.trim().parse().ok()?;
-    if n <= 0 || k < 1 { return None; }
-    let inline = extract_inline_percent(raw).unwrap_or(0) as f32;
-    Some(((k - 1) as f32 + inline / 100.0) / n as f32)
-}
-
-fn detect_phase(lower: &str, raw: &str, _total_packages: usize) -> Option<(&'static str, i32)> {
-
-    let is_install = lower.contains("installing") || lower.contains("upgrading")
-        || lower.contains("reinstalling") || lower.contains("downgrading");
-    let is_remove  = lower.contains("removing");
-    if is_install || is_remove {
-        if let Some(frac) = parse_kn_fraction(raw) {
-            let pct = (10.0 + frac * 85.0) as i32;
-            let label = if is_remove { "Removing packages..." } else { "Installing packages..." };
-            return Some((label, pct.min(95)));
-        }
-    }
-
-    if lower.contains("running pre-transaction hooks") || lower.contains("pre-transaction") {
-        return Some(("Preparing...", 8));
-    }
-
-    if lower.contains("resolving dependencies") { return Some(("Resolving dependencies...", 1)); }
-    if lower.contains("looking for conflicting") { return Some(("Checking for conflicts...", 2)); }
-
-    let has_speed = lower.contains("mib/s") || lower.contains("kib/s")
-        || lower.contains(" b/s") || lower.contains("mb/s") || lower.contains("kb/s");
-    if has_speed {
-        let pct = extract_inline_percent(raw).map(|p| 2 + p * 3 / 100).unwrap_or(2);
-        return Some(("Downloading packages...", pct.min(5)));
-    }
-    if lower.contains("retrieving packages") || lower.contains("downloading") {
-        return Some(("Downloading packages...", 2));
-    }
-
-    let is_verify = lower.contains("checking keyring") || lower.contains("checking keys")
-        || lower.contains("checking integrity") || lower.contains("loading package files")
-        || lower.contains("checking for file conflicts") || lower.contains("checking available disk");
-    if is_verify {
-        let pct = parse_kn_fraction(raw).map(|f| (5.0 + 3.0 * f) as i32).unwrap_or(5);
-        return Some(("Verifying packages...", pct.min(8)));
-    }
-
-    if lower.contains("running post-transaction hooks") {
-        return Some(("Running hooks...", 95));
-    }
-    if lower.contains("mkinitcpio") || lower.contains("updating linux initcpios") {
-        return Some(("Rebuilding initramfs...", 97));
-    }
-    if lower.contains("grub-mkconfig") || lower.contains("grub") {
-        return Some(("Updating bootloader...", 99));
-    }
-    if lower.contains("arming") || lower.contains("ldconfig") || lower.contains("dkms")
-        || lower.contains("systemd") || lower.contains("fontconfig") || lower.contains("update-desktop")
-        || lower.contains("gtk-update") || lower.contains("update-mime") {
-        let pct = parse_kn_fraction(raw).map(|f| (95.0 + 4.0 * f) as i32).unwrap_or(96);
-        return Some(("Running hooks...", pct.min(99)));
-    }
-
-    None
-}
-
-
-/// Detects interactive prompts and sends the appropriate UI messages.
-/// Returns true if the output should be force-flushed to the UI immediately.
-fn handle_pty_prompt(cleaned: &str, always_input: bool, tx: &mpsc::Sender<UiMessage>) -> bool {
-    let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]")
-        || cleaned.contains("[Y|n]") || cleaned.contains("[y|n]");
-    let has_y_n = cleaned.contains("[y/N]") || cleaned.contains("[y|N]");
-    let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_y_n;
-    if needs_user_input || has_yn {
-        let prompt_text = cleaned.lines()
-            .rfind(|l| !l.trim().is_empty())
-            .unwrap_or(cleaned)
-            .trim()
-            .to_string();
-        if (has_yn || has_y_n) && !always_input {
-            let _ = tx.send(UiMessage::ProgressPromptButtons);
-            let _ = tx.send(UiMessage::ProgressPrompt("Proceed with transaction?".to_string()));
-        } else {
-            let _ = tx.send(UiMessage::ProgressPrompt(prompt_text));
-            let _ = tx.send(UiMessage::ProgressAutoExpand);
-        }
-        true
-    } else {
-        false
-    }
-}
-
-
-
 fn run_in_terminal(
     tx: &mpsc::Sender<UiMessage>,
     title: &str,
@@ -1759,194 +1472,127 @@ fn run_in_terminal(
     input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
     pid_holder: &Arc<Mutex<Option<u32>>>,
 ) {
-    run_in_terminal_impl(tx, title, cmd, args, input_sender, pid_holder, false, false);
-}
-
-fn run_in_terminal_expanded(
-    tx: &mpsc::Sender<UiMessage>,
-    title: &str,
-    cmd: &str,
-    args: &[&str],
-    input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
-    pid_holder: &Arc<Mutex<Option<u32>>>,
-) {
-    run_in_terminal_impl(tx, title, cmd, args, input_sender, pid_holder, true, true);
-}
-
-fn run_in_terminal_impl(
-    tx: &mpsc::Sender<UiMessage>,
-    title: &str,
-    cmd: &str,
-    args: &[&str],
-    input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
-    pid_holder: &Arc<Mutex<Option<u32>>>,
-    auto_expand: bool,
-    always_input: bool,
-) {
-    let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
-    if auto_expand {
-        let _ = tx.send(UiMessage::ProgressAutoExpand);
-        let _ = tx.send(UiMessage::ProgressShowClose);
-    }
-    if always_input {
-        let _ = tx.send(UiMessage::ProgressShowInput);
-    }
-
-    let (master_fd, child_pid) = match spawn_in_pty(cmd, args) {
-        Ok(pair) => pair,
+    let reporter = OpReporter::start(tx, title, Mode { cancellable: true }, 1);
+    match progress::run_pty(&reporter.feeder(), cmd, args, input_sender, pid_holder) {
+        Ok(success) => reporter.finish(success),
         Err(e) => {
-            let _ = tx.send(UiMessage::ProgressOutput(format!("Error: {}\n", e)));
-            let _ = tx.send(UiMessage::OperationDone(false));
-            return;
+            reporter.feeder().line(&format!("Error: {e}"));
+            reporter.finish(false);
         }
-    };
+    }
+}
 
-    *pid_holder.lock().unwrap() = Some(child_pid);
+struct UpdatePlan {
+    native: bool,
+    flatpak: bool,
+    appimages: Vec<String>,
+    appimage_dir: String,
+}
 
-    let (in_tx, in_rx) = mpsc::channel::<String>();
-    *input_sender.lock().unwrap() = Some(in_tx);
+// Native + system flatpaks share one pkexec (root); user flatpaks run as the invoking
+// user, since root alone misses user-install apps (e.g. user-added remotes).
+fn update_script(native: bool, flatpak: bool) -> Option<String> {
+    const USER_FLATPAKS: &str = "flatpak update --user";
+    match (native, flatpak) {
+        (true, true) => Some(format!(
+            "pkexec bash -c 'pacman -Syu && echo \"\" && echo \"=== System flatpaks ===\" && flatpak update --system' && echo \"\" && echo \"=== User flatpaks ===\" && {USER_FLATPAKS}"
+        )),
+        (true, false) => Some("pkexec pacman -Syu".to_string()),
+        (false, true) => Some(format!(
+            "echo \"=== User flatpaks ===\" && {USER_FLATPAKS} && echo \"\" && echo \"=== System flatpaks ===\" && pkexec flatpak update --system"
+        )),
+        (false, false) => None,
+    }
+}
 
-    let tx_reader = tx.clone();
-    let master_fd_reader = master_fd;
-    let total_packages: usize = 1;
-    let done_flag = Arc::new(AtomicBool::new(false));
-    let done_flag_reader = done_flag.clone();
+/// One popup, one run: every enabled backend with pending updates, in sequence.
+fn run_update_all(
+    tx: &mpsc::Sender<UiMessage>,
+    input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    pid_holder: &Arc<Mutex<Option<u32>>>,
+    plan: UpdatePlan,
+) {
+    let reporter = OpReporter::start(tx, "Updating Everything", Mode { cancellable: true }, 1);
+    let feeder = reporter.feeder();
+    let has_appimages = !plan.appimages.is_empty();
+    let mut success = true;
 
-    let reader_handle = thread::spawn(move || {
-        use std::io::Read;
-        let mut file = unsafe { std::fs::File::from_raw_fd(master_fd_reader) };
-        let mut buf = [0u8; 4096];
-        let mut current_percent: i32 = 0;
-        let mut output_dirty = false;
-        let mut last_output_flush = std::time::Instant::now() - std::time::Duration::from_millis(100);
-        const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
-        let mut first_error_line: Option<String> = None;
-        let mut stream = TermStream::new();
-
-        loop {
-            let ready = unsafe {
-                let mut pfd = libc::pollfd { fd: master_fd_reader, events: libc::POLLIN, revents: 0 };
-                libc::poll(&mut pfd as *mut libc::pollfd, 1, 20)
-            };
-            if ready < 0 { break; }
-
-            let now = std::time::Instant::now();
-
-            if ready == 0 {
-                if output_dirty && now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
-                    let _ = tx_reader.send(UiMessage::ProgressOutput(stream.render()));
-                    output_dirty = false;
-                    last_output_flush = now;
-                }
-                if done_flag_reader.load(Ordering::Relaxed) { break; }
-                continue;
+    if let Some(script) = update_script(plan.native, plan.flatpak) {
+        if has_appimages {
+            feeder.window(0, 75);
+        }
+        match progress::run_pty(&feeder, "bash", &["-c", &script], input_sender, pid_holder) {
+            Ok(ok) => success = ok,
+            Err(e) => {
+                feeder.line(&format!("Error: {e}"));
+                success = false;
             }
+        }
+    }
 
-            match file.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let text = String::from_utf8_lossy(&buf[..n]);
-                    let cleaned = normalize_typographic(&strip_ansi(&text));
-                    let force_flush = handle_pty_prompt(&cleaned, always_input, &tx_reader);
-
-                    stream.process(&buf[..n]);
-
-                    for line in cleaned.lines() {
-                        let lower = line.to_lowercase();
-                        let level = classify_log_level(&lower);
-                        if level == 1 && first_error_line.is_none() { first_error_line = Some(line.to_string()); }
-                        let _ = tx_reader.send(UiMessage::ProgressLogLine(line.to_string(), level));
-                        if let Some((label, new_pct)) = detect_phase(&lower, line, total_packages) {
-                            if new_pct > current_percent { current_percent = new_pct; }
-                            let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
+    if success && has_appimages && !progress::cancel_requested() {
+        let base = if plan.native || plan.flatpak { 75 } else { 0 };
+        feeder.line("\n=== AppImages ===");
+        match AppImageBackend::with_dir(Some(std::path::PathBuf::from(&plan.appimage_dir))) {
+            Ok(backend) => {
+                let total = plan.appimages.len() as i32;
+                for (i, name) in plan.appimages.iter().enumerate() {
+                    if progress::cancel_requested() {
+                        feeder.line("Cancelled.");
+                        success = false;
+                        break;
+                    }
+                    let i = i as i32;
+                    feeder.window(base + (100 - base) * i / total, base + (100 - base) * (i + 1) / total);
+                    let _ = tx.send(UiMessage::ProgressStage(format!("Updating {name}...")));
+                    feeder.line(&format!("\n- {name} -"));
+                    let log = |line: &str| {
+                        feeder.feed(line.as_bytes());
+                    };
+                    match backend.update_app(name, &log) {
+                        Ok(_) => {
+                            let _ = tx.send(UiMessage::AppImageUpdateCleared(name.clone()));
+                        }
+                        Err(e) => {
+                            feeder.line(&format!("Failed: {e}"));
+                            success = false;
                         }
                     }
-
-                    output_dirty = true;
-
-                    if force_flush || now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
-                        let _ = tx_reader.send(UiMessage::ProgressOutput(stream.render()));
-                        output_dirty = false;
-                        last_output_flush = now;
-                    }
                 }
-                Err(_) => break,
+                let _ = tx.send(UiMessage::InstalledAppImagesLoaded(backend.list_entries()));
+                let _ = tx.send(UiMessage::AppImageCardsRefresh);
+            }
+            Err(e) => {
+                feeder.line(&format!("Error: {e}"));
+                success = false;
             }
         }
-        let _ = tx_reader.send(UiMessage::ProgressOutput(stream.render()));
-        if let Some(err) = first_error_line {
-            let _ = tx_reader.send(UiMessage::ProgressErrorSummary(err));
-        }
-        std::mem::forget(file);
-    });
-
-    let master_fd_writer = master_fd;
-    let writer_handle = thread::spawn(move || {
-        use std::io::Write;
-        let dup_fd = unsafe { libc::dup(master_fd_writer) };
-        if dup_fd < 0 { return; }
-        let mut file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
-        while let Ok(input) = in_rx.recv() {
-            let data = format!("{}\n", input);
-            if file.write_all(data.as_bytes()).is_err() { break; }
-            let _ = file.flush();
-        }
-    });
-
-    let status = unsafe {
-        let mut wstatus: libc::c_int = 0;
-        libc::waitpid(child_pid as libc::pid_t, &mut wstatus, 0);
-        wstatus
-    };
-
-    let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
-
-    *pid_holder.lock().unwrap() = None;
-    *input_sender.lock().unwrap() = None;
-
-    done_flag.store(true, Ordering::Relaxed);
-    unsafe { libc::close(master_fd); }
-
-    let _ = reader_handle.join();
-    let _ = writer_handle.join();
-
-    if !success {
-        let _ = tx.send(UiMessage::ProgressAutoExpand);
     }
-    let _ = tx.send(UiMessage::OperationDone(success));
+
+    reporter.finish(success);
 }
-
-// Full system update: native + system flatpaks under one pkexec (root), then USER
-// flatpaks as the invoking user. Running flatpak only as root misses user-install
-// apps (e.g. user-added remotes like cosmic), so both scopes are updated.
-const FULL_UPDATE_SCRIPT: &str = "pkexec bash -c 'pacman -Syu && echo \"\" && echo \"=== System flatpaks ===\" && flatpak update --system --noninteractive -y' && echo \"\" && echo \"=== User flatpaks ===\" && flatpak update --user --noninteractive -y && echo \"\" && echo \"System fully updated\"";
-
-// Update every flatpak: user-scope as the user, system-scope via pkexec. Updating
-// only one scope misses the other installation's apps (incl. user remotes).
-const FLATPAK_UPDATE_ALL_SCRIPT: &str = "echo \"=== User flatpaks ===\" && flatpak update --user --noninteractive -y && echo \"\" && echo \"=== System flatpaks ===\" && pkexec flatpak update --system --noninteractive -y && echo \"\" && echo \"Flatpaks updated\"";
 
 fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String, Vec<String>) {
     match (action, backend) {
         ("install", 1) | ("bulk-install", 1) => {
             ("flatpak".to_string(), {
-                // --noninteractive uses plain line output instead of the animated
-                // progress bar, whose final spinner frame (| / - \) otherwise leaks
-                // a stray slash/backslash into the captured terminal text.
-                let mut args = vec!["install".to_string(), "--noninteractive".to_string(), "-y".to_string()];
+                // No --noninteractive (live progress bar) and no -y (flatpak asks first,
+                // like pacman does).
+                let mut args = vec!["install".to_string()];
                 args.extend(names.iter().cloned());
                 args
             })
         }
         ("remove", 1) | ("bulk-remove", 1) => {
             ("flatpak".to_string(), {
-                let mut args = vec!["uninstall".to_string(), "--noninteractive".to_string(), "-y".to_string()];
+                let mut args = vec!["uninstall".to_string()];
                 args.extend(names.iter().cloned());
                 args
             })
         }
         ("update", 1) => {
             ("flatpak".to_string(), {
-                let mut args = vec!["update".to_string(), "--noninteractive".to_string(), "-y".to_string()];
+                let mut args = vec!["update".to_string()];
                 args.extend(names.iter().cloned());
                 args
             })
@@ -1959,7 +1605,7 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
             })
         }
         ("update-all", 1) => {
-            ("flatpak".to_string(), vec!["update".to_string(), "--noninteractive".to_string(), "-y".to_string()])
+            ("flatpak".to_string(), vec!["update".to_string()])
         }
         ("update-all", _) => {
             ("pkexec".to_string(), vec!["pacman".to_string(), "-Syu".to_string()])
@@ -1988,6 +1634,7 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_managed_operation(
     tx: &mpsc::Sender<UiMessage>,
     title: &str,
@@ -1996,171 +1643,34 @@ fn run_managed_operation(
     backend: i32,
     input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
     pid_holder: &Arc<Mutex<Option<u32>>>,
-    conflict_ctx: &Arc<Mutex<Option<(String, Vec<String>, i32)>>>,
+    conflict_ctx: &ConflictCtx,
 ) {
     *conflict_ctx.lock().unwrap() = Some((action.to_string(), names.to_vec(), backend));
 
     let (cmd, args) = build_pacman_command(action, names, backend);
-
-    let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
-    let _ = tx.send(UiMessage::ProgressAutoExpand);
-    let _ = tx.send(UiMessage::ProgressShowInput);
-    let _ = tx.send(UiMessage::ProgressShowClose);
-
     let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    let (master_fd, child_pid) = match spawn_in_pty(&cmd, &args_str) {
-        Ok(pair) => pair,
+    let mut reporter =
+        OpReporter::start(tx, title, Mode { cancellable: true }, names.len());
+    match progress::run_pty(&reporter.feeder(), &cmd, &args_str, input_sender, pid_holder) {
         Err(e) => {
-            let _ = tx.send(UiMessage::OperationProgress(0, format!("Error: {}", e)));
-            let _ = tx.send(UiMessage::OperationDone(false));
-            return;
+            reporter.feeder().line(&format!("Error: {e}"));
+            reporter.finish(false);
         }
-    };
-
-    *pid_holder.lock().unwrap() = Some(child_pid);
-
-    let (in_tx, in_rx) = mpsc::channel::<String>();
-    *input_sender.lock().unwrap() = Some(in_tx);
-
-    let escalated = Arc::new(Mutex::new(false));
-    let output_buffer = Arc::new(Mutex::new(String::new()));
-
-    let tx_reader = tx.clone();
-    let master_fd_reader = master_fd;
-    let escalated_r = escalated.clone();
-    let output_buffer_r = output_buffer.clone();
-    let total_packages = names.len().max(1);
-    let done_flag = Arc::new(AtomicBool::new(false));
-    let done_flag_reader = done_flag.clone();
-
-    let reader_handle = thread::spawn(move || {
-        use std::io::Read;
-        let mut file = unsafe { std::fs::File::from_raw_fd(master_fd_reader) };
-        let mut buf = [0u8; 4096];
-        let mut current_percent: i32 = 0;
-        let mut output_dirty = false;
-        let mut last_output_flush = std::time::Instant::now() - std::time::Duration::from_millis(100);
-        const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
-        let mut first_error_line: Option<String> = None;
-        let mut stream = TermStream::new();
-
-        loop {
-            let ready = unsafe {
-                let mut pfd = libc::pollfd { fd: master_fd_reader, events: libc::POLLIN, revents: 0 };
-                libc::poll(&mut pfd as *mut libc::pollfd, 1, 20)
-            };
-            if ready < 0 { break; }
-
-            let now = std::time::Instant::now();
-
-            if ready == 0 {
-                if output_dirty && now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
-                    let _ = tx_reader.send(UiMessage::ProgressOutput(stream.render()));
-                    output_dirty = false;
-                    last_output_flush = now;
-                }
-                if done_flag_reader.load(Ordering::Relaxed) { break; }
-                continue;
-            }
-
-            match file.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let text = String::from_utf8_lossy(&buf[..n]);
-                    let cleaned = normalize_typographic(&strip_ansi(&text));
-
-                    {
-                        let mut ob = output_buffer_r.lock().unwrap();
-                        if ob.len() < 65536 { ob.push_str(&cleaned); }
-                    }
-
-                    let lower_raw = cleaned.to_lowercase();
-                    if CONFLICT_PATTERNS.iter().any(|p| lower_raw.contains(&p.to_lowercase())) {
-                        *escalated_r.lock().unwrap() = true;
-                    }
-
-                    let force_flush = handle_pty_prompt(&cleaned, true, &tx_reader);
-
-                    stream.process(&buf[..n]);
-
-                    for line in cleaned.lines() {
-                        let lower = line.to_lowercase();
-                        let level = classify_log_level(&lower);
-                        if level == 1 && first_error_line.is_none() { first_error_line = Some(line.to_string()); }
-                        let _ = tx_reader.send(UiMessage::ProgressLogLine(line.to_string(), level));
-                        if let Some((label, new_pct)) = detect_phase(&lower, line, total_packages) {
-                            if new_pct > current_percent { current_percent = new_pct; }
-                            let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, label.to_string()));
-                        }
-                    }
-
-                    output_dirty = true;
-
-                    if force_flush || now.duration_since(last_output_flush) >= OUTPUT_FLUSH_INTERVAL {
-                        let _ = tx_reader.send(UiMessage::ProgressOutput(stream.render()));
-                        output_dirty = false;
-                        last_output_flush = now;
-                    }
-                }
-                Err(_) => break,
+        Ok(true) => reporter.finish(true),
+        Ok(false) => {
+            reporter.settle();
+            let output = reporter.captured();
+            let lower = output.to_lowercase();
+            if CONFLICT_PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase())) {
+                let (summary, can_force) = parse_conflict_summary(&output);
+                let _ = tx.send(UiMessage::ShowConflict { summary, can_force });
+            } else {
+                reporter.finish(false);
             }
         }
-        let _ = tx_reader.send(UiMessage::ProgressOutput(stream.render()));
-        if let Some(err) = first_error_line {
-            let _ = tx_reader.send(UiMessage::ProgressErrorSummary(err));
-        }
-        std::mem::forget(file);
-    });
-
-    let master_fd_writer = master_fd;
-    let writer_handle = thread::spawn(move || {
-        use std::io::Write;
-        let dup_fd = unsafe { libc::dup(master_fd_writer) };
-        if dup_fd < 0 {
-            return;
-        }
-        let mut file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
-        while let Ok(input) = in_rx.recv() {
-            let data = format!("{}\n", input);
-            if file.write_all(data.as_bytes()).is_err() {
-                break;
-            }
-            let _ = file.flush();
-        }
-    });
-
-    let status = unsafe {
-        let mut wstatus: libc::c_int = 0;
-        libc::waitpid(child_pid as libc::pid_t, &mut wstatus, 0);
-        wstatus
-    };
-
-    let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
-
-    *pid_holder.lock().unwrap() = None;
-    *input_sender.lock().unwrap() = None;
-
-    done_flag.store(true, Ordering::Relaxed);
-    unsafe { libc::close(master_fd); }
-
-    let _ = reader_handle.join();
-    let _ = writer_handle.join();
-
-    let was_escalated = *escalated.lock().unwrap();
-    if was_escalated && !success {
-        let output = output_buffer.lock().unwrap().clone();
-        let (summary, can_force) = parse_conflict_summary(&output);
-        let _ = tx.send(UiMessage::ShowConflict { summary, can_force });
-    } else {
-        if !success {
-            let _ = tx.send(UiMessage::ProgressAutoExpand);
-        }
-        let _ = tx.send(UiMessage::OperationDone(success));
     }
 }
-
-
 
 /// Flip `installed` on matching rows without rebuilding the full model.
 fn flip_installed_in_model(
@@ -2223,7 +1733,7 @@ fn update_to_ui(update: &xpm_core::package::UpdateInfo) -> PackageData {
         name: SharedString::from(update.name.as_str()),
         display_name: SharedString::from(update.name.as_str()),
         version: SharedString::from(version_str.as_str()),
-        description: SharedString::from(version_str.as_str()),
+        description: SharedString::from(update.repository.as_str()),
         repository: SharedString::from(update.repository.as_str()),
         backend,
         installed: true,
@@ -2242,13 +1752,12 @@ fn update_selection_in_model(model: &ModelRc<PackageData>, name: &str, backend: 
     let model = model.as_any().downcast_ref::<VecModel<PackageData>>();
     if let Some(vec_model) = model {
         for i in 0..vec_model.row_count() {
-            if let Some(mut row) = vec_model.row_data(i) {
-                if row.name.as_str() == name && row.backend == backend {
+            if let Some(mut row) = vec_model.row_data(i)
+                && row.name.as_str() == name && row.backend == backend {
                     row.selected = selected;
                     vec_model.set_row_data(i, row);
                     break;
                 }
-            }
         }
     }
 }
@@ -2264,11 +1773,10 @@ fn find_package_installed(window: &MainWindow, name: &str, backend: i32) -> bool
     for model in &models {
         if let Some(vec_model) = model.as_any().downcast_ref::<VecModel<PackageData>>() {
             for i in 0..vec_model.row_count() {
-                if let Some(row) = vec_model.row_data(i) {
-                    if row.name.as_str() == name && row.backend == backend {
+                if let Some(row) = vec_model.row_data(i)
+                    && row.name.as_str() == name && row.backend == backend {
                         return row.installed;
                     }
-                }
             }
         }
     }
@@ -2358,10 +1866,9 @@ fn load_recent_activity() -> Vec<ActivityItem> {
                 ("installed", s)
             } else if let Some(s) = rest.strip_prefix("removed ") {
                 ("removed", s)
-            } else if let Some(s) = rest.strip_prefix("upgraded ") {
-                ("upgraded", s)
             } else {
-                return None;
+                let s = rest.strip_prefix("upgraded ")?;
+                ("upgraded", s)
             };
             let pkg = pkg_part.split_whitespace().next().unwrap_or("").to_string();
             if pkg.is_empty() { return None; }
@@ -2459,12 +1966,11 @@ fn load_sys_info() -> SysInfo {
                     else { "GPU" };
                 let dev = device.trim().to_string();
                 let uevent = entry.path().join("device/uevent");
-                if let Ok(ue) = std::fs::read_to_string(uevent) {
-                    if let Some(line) = ue.lines().find(|l| l.starts_with("PCI_ID=")) {
+                if let Ok(ue) = std::fs::read_to_string(uevent)
+                    && let Some(line) = ue.lines().find(|l| l.starts_with("PCI_ID=")) {
                         let pci_id = line.trim_start_matches("PCI_ID=");
                         return Some(format!("{} ({})", prefix, pci_id));
                     }
-                }
                 return Some(format!("{} {}", prefix, dev));
             }
         }
@@ -2684,8 +2190,7 @@ fn fetch_arch_news() -> Vec<ArchNewsItem> {
 }
 
 fn parse_arch_rss(xml: &str) -> Vec<ArchNewsItem> {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    let mut events = XmlEvents::new(xml.as_bytes());
 
     let mut items: Vec<ArchNewsItem> = Vec::new();
     let mut in_item = false;
@@ -2696,18 +2201,18 @@ fn parse_arch_rss(xml: &str) -> Vec<ArchNewsItem> {
     let mut description = String::new();
 
     loop {
-        match reader.read_event() {
-            Ok(Event::Start(e)) => {
-                let tag = std::str::from_utf8(e.name().as_ref()).unwrap_or("").to_string();
+        match events.next() {
+            Event::Start(e) => {
+                let tag = e.name().as_ref().to_string();
                 if tag == "item" {
                     in_item = true;
                     title.clear(); date.clear(); link.clear(); description.clear();
                 }
                 cur_tag = tag;
             }
-            Ok(Event::Text(e)) => {
+            Event::Text(e) => {
                 if !in_item { continue; }
-                let text = e.unescape().unwrap_or_default().to_string();
+                let text = e.xml_content(quick_xml::XmlVersion::Implicit1_0).into_owned();
                 match cur_tag.as_str() {
                     "title" => title = text,
                     "pubDate" => {
@@ -2723,14 +2228,9 @@ fn parse_arch_rss(xml: &str) -> Vec<ArchNewsItem> {
                     _ => {}
                 }
             }
-            Ok(Event::CData(e)) => {
-                if !in_item { continue; }
-                let text = String::from_utf8_lossy(e.as_ref()).to_string();
-                if cur_tag.as_str() == "description" { description = strip_html(&text) }
-            }
-            Ok(Event::End(e)) => {
+            Event::End(e) => {
                 let name_bytes = e.name();
-                let tag = std::str::from_utf8(name_bytes.as_ref()).unwrap_or("");
+                let tag = name_bytes.as_ref();
                 if tag == "item" && in_item {
                     in_item = false;
                     let summary = if description.chars().count() > 400 {
@@ -2748,8 +2248,7 @@ fn parse_arch_rss(xml: &str) -> Vec<ArchNewsItem> {
                 }
                 cur_tag.clear();
             }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
+            Event::Eof => break,
             _ => {}
         }
     }
@@ -3110,115 +2609,26 @@ fn load_history(weak: slint::Weak<MainWindow>, store: Arc<Mutex<Vec<alpmhist::Tr
     });
 }
 
-/// Failed systemd units (system + user scope). Read-only, no privilege.
-fn failed_services() -> Vec<HealthSvc> {
-    let mut out = Vec::new();
-    let scopes: [(&str, &[&str]); 2] = [
-        ("system", &["--failed", "--no-legend", "--plain"]),
-        ("user", &["--user", "--failed", "--no-legend", "--plain"]),
-    ];
-    for (scope, args) in scopes {
-        let Ok(o) = std::process::Command::new("systemctl").args(args).output() else { continue };
-        if !o.status.success() { continue; }
-        for line in String::from_utf8_lossy(&o.stdout).lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            let Some(name) = parts.first() else { continue };
-            if !name.contains('.') { continue; }
-            let desc = if parts.len() > 4 { parts[4..].join(" ") } else { String::new() };
-            out.push(HealthSvc { name: (*name).into(), description: desc.into(), scope: scope.into() });
-        }
-    }
-    out
-}
-
-/// Priority-error journal lines for the current boot (newest first).
-fn journal_errors() -> Vec<HealthErr> {
-    let Ok(o) = std::process::Command::new("journalctl")
-        .args(["-p", "3", "-b", "--no-pager", "-o", "short-iso", "-n", "80"])
-        .output() else { return Vec::new() };
-    if !o.status.success() { return Vec::new(); }
-    let mut out = Vec::new();
-    for line in String::from_utf8_lossy(&o.stdout).lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("-- ") { continue; }
-        let Some((ts, rest)) = line.split_once(' ') else { continue };
-        let when = ts.split('T').nth(1)
-            .map(|t| t.split(|c| c == '+' || c == '-').next().unwrap_or(t).to_string())
-            .unwrap_or_default();
-        let (unit, message) = match rest.split_once(": ") {
-            Some((head, msg)) => {
-                let u = head.split_whitespace().last().unwrap_or("")
-                    .split('[').next().unwrap_or("").to_string();
-                (u, msg.to_string())
-            }
-            None => (String::new(), rest.to_string()),
-        };
-        let unit = if unit.is_empty() { "system".to_string() } else { unit };
-        out.push(HealthErr { when: when.into(), unit: unit.into(), message: message.into() });
-    }
-    out.reverse();
-    out
-}
-
-/// Verify installed files against the package DB (pacman -Qkk). Slow; on-demand.
-fn check_package_integrity() -> Vec<HealthFile> {
-    let Ok(o) = std::process::Command::new("pacman").args(["-Qkk"]).output() else { return Vec::new() };
-    let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&o.stderr));
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix("warning: ") else { continue };
-        let (pkg, issue) = rest.split_once(": ").unwrap_or(("", rest));
-        out.push(HealthFile { pkg: pkg.into(), issue: issue.trim().into() });
-        if out.len() >= 200 { break; }
-    }
-    out
-}
-
-/// Open the System Health modal and load services + journal errors in the background.
-fn load_health(weak: slint::Weak<MainWindow>) {
-    if let Some(w) = weak.upgrade() {
-        w.set_health_loading(true);
-        w.set_health_files(ModelRc::new(VecModel::from(Vec::<HealthFile>::new())));
-        w.set_health_files_checked(false);
-        w.set_show_health_modal(true);
-    }
-    thread::spawn(move || {
-        let services = failed_services();
-        let errors = journal_errors();
-        let failed = services.len() as i32;
-        let errc = errors.len() as i32;
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(w) = weak.upgrade() {
-                w.set_health_services(ModelRc::new(VecModel::from(services)));
-                w.set_health_errors(ModelRc::new(VecModel::from(errors)));
-                w.set_health_failed_count(failed);
-                w.set_health_error_count(errc);
-                w.set_health_checked(true);
-                w.set_health_loading(false);
-            }
-        });
-    });
-}
-
 fn main() {
-    if std::env::var_os("SLINT_BACKEND").is_none() {
-        std::env::set_var("SLINT_BACKEND", "qt");
-    }
+    // SAFETY: runs first in main, before any thread is spawned.
+    unsafe {
+        if std::env::var_os("SLINT_BACKEND").is_none() {
+            std::env::set_var("SLINT_BACKEND", "qt");
+        }
 
+        if std::env::var("QT_PLUGIN_PATH").map(|p| p.is_empty()).unwrap_or(true) {
+            std::env::set_var("QT_PLUGIN_PATH", "/usr/lib/qt6/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins");
+        }
 
-    if std::env::var("QT_PLUGIN_PATH").map(|p| p.is_empty()).unwrap_or(true) {
-        std::env::set_var("QT_PLUGIN_PATH", "/usr/lib/qt6/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins");
-    }
-
-    let current_path = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
-    if !current_path.contains("/usr/lib/qt6") {
-        let new_path = if current_path.is_empty() {
-            "/usr/lib/qt6:/usr/lib/x86_64-linux-gnu/qt6".to_string()
-        } else {
-            format!("{}:/usr/lib/qt6:/usr/lib/x86_64-linux-gnu/qt6", current_path)
-        };
-        std::env::set_var("LD_LIBRARY_PATH", new_path);
+        let current_path = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+        if !current_path.contains("/usr/lib/qt6") {
+            let new_path = if current_path.is_empty() {
+                "/usr/lib/qt6:/usr/lib/x86_64-linux-gnu/qt6".to_string()
+            } else {
+                format!("{}:/usr/lib/qt6:/usr/lib/x86_64-linux-gnu/qt6", current_path)
+            };
+            std::env::set_var("LD_LIBRARY_PATH", new_path);
+        }
     }
 
     let subscriber = FmtSubscriber::builder()
@@ -3263,23 +2673,92 @@ fn main() {
     let (tx, rx) = mpsc::channel::<UiMessage>();
     let rx = Rc::new(RefCell::new(rx));
 
+    let appimage_entries: Rc<RefCell<Vec<AppImageEntry>>> = Rc::new(RefCell::new(Vec::new()));
+    let flatpak_app_store: Arc<Mutex<Vec<CachedRemoteApp>>> = Arc::new(Mutex::new(Vec::new()));
+    let flatpak_loaded_remote: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+
+    let icon_index: Rc<RefCell<HashMap<String, std::path::PathBuf>>> = Rc::new(RefCell::new(HashMap::new()));
+    let icon_cache: Rc<RefCell<HashMap<String, slint::Image>>> = Rc::new(RefCell::new(HashMap::new()));
+    let icon_pending: Rc<RefCell<std::collections::HashSet<String>>> = Rc::new(RefCell::new(std::collections::HashSet::new()));
+    {
+        let (jobs, job_rx) = mpsc::channel::<(String, std::path::PathBuf)>();
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        for _ in 0..3 {
+            let (rx, tx_done) = (job_rx.clone(), tx.clone());
+            thread::spawn(move || {
+                while let Ok((name, path)) = { rx.lock().unwrap().recv() } {
+                    let _ = tx_done.send(UiMessage::IconDecoded { name, pixels: icons::decode_file(&path) });
+                }
+            });
+        }
+
+        let (index, cache, pending) = (icon_index.clone(), icon_cache.clone(), icon_pending.clone());
+        let (store, remote) = (flatpak_app_store.clone(), flatpak_loaded_remote.clone());
+        let appimages = appimage_entries.clone();
+        window.global::<IconStore>().on_lookup(move |name, _epoch| {
+            if name.is_empty() {
+                return slint::Image::default();
+            }
+            if let Some(img) = cache.borrow().get(name.as_str()) {
+                return img.clone();
+            }
+            let path = if let Some(id) = name.strip_prefix("flatpak:") {
+                icons::flatpak_icon(&store.lock().unwrap(), &remote.lock().unwrap(), id)
+            } else if let Some(id) = name.strip_prefix("appimage:") {
+                appimages
+                    .borrow()
+                    .iter()
+                    .find(|e| e.name == id)
+                    .and_then(|e| e.icon_path.as_ref())
+                    .map(std::path::PathBuf::from)
+                    .filter(|p| p.is_file())
+            } else {
+                index.borrow().get(name.as_str()).cloned()
+            };
+            // Flatpak stores and AppImage entries load late; only native misses are final.
+            let final_miss = !name.contains(':');
+            let Some(path) = path else {
+                if final_miss {
+                    cache.borrow_mut().insert(name.to_string(), slint::Image::default());
+                }
+                return slint::Image::default();
+            };
+            if icons::is_svg(&path) {
+                let img = slint::Image::load_from_path(&path).unwrap_or_default();
+                cache.borrow_mut().insert(name.to_string(), img.clone());
+                return img;
+            }
+            if pending.borrow_mut().insert(name.to_string()) {
+                let _ = jobs.send((name.to_string(), path));
+            }
+            slint::Image::default()
+        });
+        let tx_icons = tx.clone();
+        thread::spawn(move || {
+            let root = Path::new("/");
+            let cache = icons::catalog_cache_dir();
+            let extra = icons::cached_catalogs(&cache);
+            let _ = tx_icons.send(UiMessage::IconIndexReady(icons::build_index(root, &extra)));
+            if icons::ensure_catalog_cache(root, &cache) {
+                let _ = tx_icons.send(UiMessage::IconIndexReady(icons::build_index(root, &extra)));
+            }
+        });
+    }
+
     let appimage_catalog: Arc<Mutex<Vec<CatalogEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let appimage_dir_state: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let appimage_sources_state: Arc<Mutex<Vec<AppImageFeed>>> = Arc::new(Mutex::new(Vec::new()));
     let appimage_updates: Rc<RefCell<std::collections::HashSet<String>>> =
         Rc::new(RefCell::new(std::collections::HashSet::new()));
-    let appimage_entries: Rc<RefCell<Vec<AppImageEntry>>> = Rc::new(RefCell::new(Vec::new()));
     let appimage_enabled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     listen_for_instance_signals(window.as_weak());
 
     let terminal_input_sender: Arc<Mutex<Option<mpsc::Sender<String>>>> = Arc::new(Mutex::new(None));
     let terminal_child_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
-    let conflict_context: Arc<Mutex<Option<(String, Vec<String>, i32)>>> = Arc::new(Mutex::new(None));
-    let flatpak_app_store: Arc<Mutex<Vec<CachedRemoteApp>>> = Arc::new(Mutex::new(Vec::new()));
+    let conflict_context: ConflictCtx = Arc::new(Mutex::new(None));
     // Which remote the in-memory store currently holds, so switching remotes in
     // the browse dropdown reloads instead of reusing the wrong remote's apps.
-    let flatpak_loaded_remote: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let flatpak_installed_ids: Arc<Mutex<std::collections::HashSet<String>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let flatpak_filter_serial: Arc<std::sync::atomic::AtomicU64> =
         Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -3319,7 +2798,6 @@ fn main() {
     let tx_load = tx.clone();
     let tx_search = tx.clone();
 
-    let log_model: Rc<RefCell<Option<Rc<VecModel<LogLine>>>>> = Rc::new(RefCell::new(None));
 
     let timer = Timer::default();
     let window_weak = window.as_weak();
@@ -3333,10 +2811,12 @@ fn main() {
     let conflict_ctx_timer = conflict_context.clone();
     let flatpak_ids_timer = flatpak_installed_ids.clone();
     let flatpak_store_timer = flatpak_app_store.clone();
-    let log_model_timer = log_model.clone();
     let notified_updates = Rc::new(std::cell::Cell::new(false));
     let cat_dispatch = appimage_catalog.clone();
     let updates_dispatch = appimage_updates.clone();
+    let icon_index_dispatch = icon_index.clone();
+    let icon_cache_dispatch = icon_cache.clone();
+    let icon_pending_dispatch = icon_pending.clone();
     let ai_entries_dispatch = appimage_entries.clone();
 
     timer.start(TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
@@ -3409,24 +2889,38 @@ fn main() {
                     UiMessage::ShowProgressPopup(title) => {
                         window.set_progress_popup_title(SharedString::from(&title));
                         window.set_progress_popup_percent(0);
-                        window.set_progress_popup_output(SharedString::from(""));
                         window.set_progress_popup_stage(SharedString::from("Starting..."));
                         window.set_progress_popup_output(SharedString::from(""));
                         window.set_progress_popup_show_input(false);
+                        window.set_progress_popup_show_buttons(false);
                         window.set_progress_popup_prompt(SharedString::from(""));
                         window.set_progress_popup_done(false);
                         window.set_progress_popup_success(false);
-                        window.set_show_progress_logs(false);
                         window.set_progress_show_details(false);
-                        window.set_progress_popup_show_buttons(false);
                         window.set_progress_error_summary(SharedString::from(""));
-                        window.set_progress_popup_show_close(false);
                         window.set_progress_input_focus_pending(false);
-                        let new_log = Rc::new(VecModel::<LogLine>::default());
-                        window.set_progress_log_lines(ModelRc::new(new_log.clone()));
-                        *log_model_timer.borrow_mut() = Some(new_log);
-                        window.set_progress_popup_external(false);
+                        window.set_progress_popup_cancellable(false);
                         window.set_show_progress_popup(true);
+                    }
+                    UiMessage::ProgressMode { cancellable } => {
+                        window.set_progress_popup_cancellable(cancellable);
+                    }
+                    UiMessage::IconDecoded { name, pixels } => {
+                        icon_pending_dispatch.borrow_mut().remove(&name);
+                        let img = pixels.map(icons::Pixels::into_image).unwrap_or_default();
+                        icon_cache_dispatch.borrow_mut().insert(name, img);
+                        let store = window.global::<IconStore>();
+                        store.set_epoch(store.get_epoch() + 1);
+                    }
+                    UiMessage::IconIndexReady(index) => {
+                        *icon_index_dispatch.borrow_mut() = index;
+                        icon_cache_dispatch.borrow_mut().clear();
+                        icon_pending_dispatch.borrow_mut().clear();
+                        let store = window.global::<IconStore>();
+                        store.set_epoch(store.get_epoch() + 1);
+                    }
+                    UiMessage::ProgressStage(stage) => {
+                        window.set_progress_popup_stage(SharedString::from(&stage));
                     }
                     UiMessage::ProgressOutput(text) => {
                         window.set_progress_popup_output(SharedString::from(&text));
@@ -3434,9 +2928,7 @@ fn main() {
                     UiMessage::ProgressPrompt(prompt) => {
                         window.set_progress_popup_prompt(SharedString::from(&prompt));
                         window.set_progress_popup_show_input(true);
-                        if !window.get_progress_popup_show_buttons() {
-                            window.set_progress_input_focus_pending(true);
-                        }
+                        window.set_progress_input_focus_pending(true);
                     }
                     UiMessage::ProgressHidePrompt => {
                         window.set_progress_popup_show_input(false);
@@ -3447,30 +2939,17 @@ fn main() {
                         window.set_progress_popup_show_buttons(true);
                         window.set_progress_popup_show_input(true);
                     }
-                    UiMessage::ProgressLogLine(text, level) => {
-                        let model_opt = log_model_timer.borrow();
-                        if let Some(model) = model_opt.as_ref() {
-                            model.push(LogLine {
-                                text: SharedString::from(text.as_str()),
-                                level: level as i32,
-                            });
-                        }
-                    }
                     UiMessage::ProgressErrorSummary(s) => {
                         window.set_progress_error_summary(SharedString::from(&s));
                     }
                     UiMessage::ProgressAutoExpand => {
                         window.set_progress_show_details(true);
                     }
-                    UiMessage::ProgressShowInput => {
-                        // Show the terminal input field by default (parity with the
-                        // updates flow) even before any interactive prompt arrives.
-                        window.set_progress_popup_show_input(true);
-                        window.set_progress_input_focus_pending(true);
-                    }
                     UiMessage::OperationProgress(percent, stage) => {
                         window.set_progress_popup_percent(percent);
-                        window.set_progress_popup_stage(SharedString::from(&stage));
+                        if !stage.is_empty() {
+                            window.set_progress_popup_stage(SharedString::from(&stage));
+                        }
                     }
                     UiMessage::OperationDone(success) => {
                         window.set_progress_popup_percent(100);
@@ -3579,13 +3058,11 @@ fn main() {
                                 }
                             }
                             window.set_selected_count(0);
-                        } else {
-                            window.set_show_progress_logs(true);
                         }
                         if success {
-                            if window.get_setting_auto_clean_cache() {
-                                if let Some((ref action, _, _)) = *conflict_ctx_timer.lock().unwrap() {
-                                    if action == "update-all" || action == "force-update-all" {
+                            if window.get_setting_auto_clean_cache()
+                                && let Some((ref action, _, _)) = *conflict_ctx_timer.lock().unwrap()
+                                    && (action == "update-all" || action == "force-update-all") {
                                         let keep = window.get_setting_clean_keep_versions();
                                         thread::spawn(move || {
                                             let _ = std::process::Command::new("pkexec")
@@ -3593,8 +3070,6 @@ fn main() {
                                                 .status();
                                         });
                                     }
-                                }
-                            }
                         let tx = tx_timer.clone();
                             let search_query = window.get_search_text().to_string();
                             let ids_ref = flatpak_ids_timer.clone();
@@ -3629,32 +3104,53 @@ fn main() {
                         window.set_conflict_can_force(can_force);
                         window.set_show_conflict_dialog(true);
                     }
-                    UiMessage::FlatpakDetailReady { name, summary, description, developer, version, version_date, changelog, url_homepage, url_bugtracker, url_translate, url_vcs, categories } => {
+                    UiMessage::FlatpakDetailReady(detail) => {
+                        let FlatpakDetail { app_id, name, summary, description, developer, version, version_date, license, url_homepage, url_bugtracker, url_translate, url_vcs, url_donation, url_help, categories, releases, captions } = *detail;
+                        if window.get_current_flatpak_id() != app_id.as_str() {
+                            continue;
+                        }
                         window.set_flatpak_detail_name(SharedString::from(&name));
                         window.set_flatpak_detail_summary(SharedString::from(&summary));
-                        let fmt_desc = if description.contains('\n') {
-                            description.replace("\n\n", "\n").replace('\n', "\n\n")
-                        } else {
-                            description.clone()
-                        };
-                        window.set_flatpak_detail_description(SharedString::from(&fmt_desc));
+                        window.set_flatpak_detail_description(SharedString::from(&description));
                         window.set_flatpak_detail_developer(SharedString::from(&developer));
                         window.set_flatpak_detail_version(SharedString::from(&version));
                         window.set_flatpak_detail_version_date(SharedString::from(&version_date));
-                        let fmt_changelog = if changelog.contains('\n') {
-                            changelog.replace("\n\n", "\n").replace('\n', "\n\n")
-                        } else {
-                            changelog.clone()
-                        };
-                        window.set_flatpak_detail_changelog(SharedString::from(&fmt_changelog));
+                        window.set_flatpak_detail_license(SharedString::from(&license));
                         window.set_flatpak_detail_url_homepage(SharedString::from(&url_homepage));
                         window.set_flatpak_detail_url_bug(SharedString::from(&url_bugtracker));
                         window.set_flatpak_detail_url_translate(SharedString::from(&url_translate));
                         window.set_flatpak_detail_url_vcs(SharedString::from(&url_vcs));
+                        window.set_flatpak_detail_url_donate(SharedString::from(&url_donation));
+                        window.set_flatpak_detail_url_help(SharedString::from(&url_help));
                         window.set_flatpak_detail_tags(ModelRc::new(VecModel::from(
                             categories.iter().map(|c| SharedString::from(c.as_str())).collect::<Vec<_>>()
                         )));
+                        window.set_flatpak_releases(ModelRc::new(VecModel::from(
+                            releases.into_iter().map(|(version, date, notes)| ReleaseItem {
+                                version: version.into(),
+                                date: date.into(),
+                                notes: notes.into(),
+                            }).collect::<Vec<_>>()
+                        )));
+                        window.set_flatpak_shots(ModelRc::new(VecModel::from(
+                            captions.into_iter().map(|caption| ShotItem {
+                                image: slint::Image::default(),
+                                caption: caption.into(),
+                            }).collect::<Vec<_>>()
+                        )));
+                        window.set_flatpak_shot_index(0);
                         window.set_show_flatpak_detail(true);
+                    }
+                    UiMessage::FlatpakExtrasReady { app_id, extras } => {
+                        if window.get_current_flatpak_id() == app_id.as_str() {
+                            let size = |bytes: u64| if bytes > 0 { format_size(bytes) } else { String::new() };
+                            window.set_flatpak_detail_download_size(SharedString::from(size(extras.download_size)));
+                            window.set_flatpak_detail_installed_size(SharedString::from(size(extras.installed_size)));
+                            window.set_flatpak_detail_installs(SharedString::from(
+                                if extras.installs > 0 { flathub::format_count(extras.installs) } else { String::new() },
+                            ));
+                            window.set_flatpak_detail_verified(extras.verified);
+                        }
                     }
                     UiMessage::ActivityLoaded(items) => {
                         window.set_activity_items(ModelRc::new(VecModel::from(items)));
@@ -3689,9 +3185,15 @@ fn main() {
                             window.set_flatpak_store_ready(true);
                         }
                     }
-                    UiMessage::FlatpakScreenshotReady(path) => {
-                        if let Ok(img) = slint::Image::load_from_path(std::path::Path::new(&path)) {
-                            window.set_flatpak_screenshot(img);
+                    UiMessage::FlatpakScreenshotReady { app_id, index, path } => {
+                        if window.get_current_flatpak_id() == app_id.as_str()
+                            && let Ok(img) = slint::Image::load_from_path(std::path::Path::new(&path))
+                        {
+                            let shots = window.get_flatpak_shots();
+                            if let Some(mut shot) = shots.row_data(index) {
+                                shot.image = img;
+                                shots.set_row_data(index, shot);
+                            }
                         }
                     }
                     UiMessage::FlatpakIconReady(path) => {
@@ -3739,7 +3241,6 @@ fn main() {
                                 entries.iter().map(|e| e.name.as_str()).collect();
                             let mut up = updates_dispatch.borrow_mut();
                             up.retain(|n| live.contains(n.as_str()));
-                            window.set_appimage_update_count(up.len() as i32);
                         }
                         let updates = updates_dispatch.borrow();
                         let cards: Vec<AppImageInstalled> = entries
@@ -3756,7 +3257,6 @@ fn main() {
                     UiMessage::AppImageUpdateCleared(id) => {
                         let mut up = updates_dispatch.borrow_mut();
                         up.remove(&id);
-                        window.set_appimage_update_count(up.len() as i32);
                         drop(up);
                         let updates = updates_dispatch.borrow();
                         window.set_appimage_update_packages(ModelRc::new(VecModel::from(
@@ -3764,8 +3264,6 @@ fn main() {
                         )));
                     }
                     UiMessage::AppImageUpdatesChecked(names) => {
-                        window.set_appimage_checking_updates(false);
-                        window.set_appimage_update_count(names.len() as i32);
                         *updates_dispatch.borrow_mut() = names.into_iter().collect();
                         let updates = updates_dispatch.borrow();
                         let model = window.get_installed_appimages();
@@ -3787,7 +3285,7 @@ fn main() {
                             &cat_dispatch.lock().unwrap(),
                             window.get_appimage_search().as_str(),
                             window.get_selected_appimage_source().as_str(),
-                            &installed_github_map(),
+                            &installed_github_map(&ai_entries_dispatch.borrow()),
                             page,
                         );
                         window.set_appimage_catalog_loading(false);
@@ -3801,7 +3299,7 @@ fn main() {
                             &cat_dispatch.lock().unwrap(),
                             window.get_appimage_search().as_str(),
                             window.get_selected_appimage_source().as_str(),
-                            &installed_github_map(),
+                            &installed_github_map(&ai_entries_dispatch.borrow()),
                             page,
                         );
                         window.set_appimage_catalog_total(total as i32);
@@ -3813,18 +3311,11 @@ fn main() {
                     }
                     UiMessage::AppImageIconReady { github, path } => {
                         if let Ok(img) = slint::Image::load_from_path(std::path::Path::new(&path)) {
-                            let model = window.get_catalog_appimages();
-                            for idx in 0..model.row_count() {
-                                if let Some(mut card) = model.row_data(idx) {
-                                    if card.github == github {
-                                        card.icon = img;
-                                        card.has_icon = true;
-                                        model.set_row_data(idx, card);
-                                        break;
-                                    }
-                                }
-                            }
+                            set_appimage_card_icon(&window, &github, img);
                         }
+                    }
+                    UiMessage::AppImageIconPixels { github, pixels } => {
+                        set_appimage_card_icon(&window, &github, pixels.into_image());
                     }
                     UiMessage::DepTreeLoaded { deps, reqby, root_version } => {
                         window.set_dep_tree_loading(false);
@@ -3838,9 +3329,6 @@ fn main() {
                     UiMessage::ArchNewsLoaded(items) => {
                         window.set_arch_news_loading(false);
                         window.set_arch_news_items(ModelRc::new(VecModel::from(items)));
-                    }
-                    UiMessage::ProgressShowClose => {
-                        window.set_progress_popup_show_close(true);
                     }
                     UiMessage::ShowWarning { message, chaotic_aur } => {
                         window.set_warning_popup_message(SharedString::from(&message));
@@ -3946,14 +3434,13 @@ fn main() {
         });
     }
 
-    if let Some(ref path) = local_package_path {
-        if let Some(pkg_info) = get_local_package_info(path) {
+    if let Some(ref path) = local_package_path
+        && let Some(pkg_info) = get_local_package_info(path) {
             window.set_local_package(pkg_info);
             window.set_local_package_path(SharedString::from(path.as_str()));
             window.set_show_local_install(true);
             window.set_view(4);
         }
-    }
 
     window.on_refresh(move || {
         info!("Refresh requested");
@@ -4531,31 +4018,6 @@ fn main() {
     });
 
 
-    {
-        let weak = window.as_weak();
-        window.on_open_system_health(move || {
-            load_health(weak.clone());
-        });
-    }
-
-    {
-        let weak = window.as_weak();
-        window.on_check_package_integrity(move || {
-            if let Some(w) = weak.upgrade() { w.set_health_files_loading(true); }
-            let weak = weak.clone();
-            thread::spawn(move || {
-                let files = check_package_integrity();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(w) = weak.upgrade() {
-                        w.set_health_files(ModelRc::new(VecModel::from(files)));
-                        w.set_health_files_loading(false);
-                        w.set_health_files_checked(true);
-                    }
-                });
-            });
-        });
-    }
-
     let tx_install = tx.clone();
     let install_input = terminal_input_sender.clone();
     let install_pid = terminal_child_pid.clone();
@@ -4610,89 +4072,35 @@ fn main() {
     let tx_update = tx.clone();
     let update_all_input = terminal_input_sender.clone();
     let update_all_pid = terminal_child_pid.clone();
-    let update_all_ctx = conflict_context.clone();
+    let update_all_appimage_dir = appimage_dir_state.clone();
+    let update_all_appimage_pending = appimage_updates.clone();
     let window_weak_ua = window.as_weak();
     window.on_update_all(move || {
-        info!("Update all packages (native + flatpak)");
-        let needs_reboot = window_weak_ua.upgrade()
-            .map(|w| native_updates_need_reboot(&w))
-            .unwrap_or(false);
+        let Some(w) = window_weak_ua.upgrade() else { return };
+        let native = w.get_update_packages().row_count() > 0;
+        let flatpak = w.get_setting_flatpak_enabled() && w.get_flatpak_update_packages().row_count() > 0;
+        let appimages: Vec<String> = if w.get_setting_appimage_enabled() {
+            update_all_appimage_pending.borrow().iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        if !native && !flatpak && appimages.is_empty() {
+            return;
+        }
+        info!("Update all: native={native} flatpak={flatpak} appimages={}", appimages.len());
+        let needs_reboot = native_updates_need_reboot(&w);
+        let plan = UpdatePlan {
+            native,
+            flatpak,
+            appimages,
+            appimage_dir: update_all_appimage_dir.lock().unwrap().clone(),
+        };
         let tx = tx_update.clone();
         let input = update_all_input.clone();
         let pid = update_all_pid.clone();
-        let _ctx = update_all_ctx.clone();
         thread::spawn(move || {
             let _ = tx.send(UiMessage::SetTerminalIsUpgrade(needs_reboot));
-            run_in_terminal_expanded(
-                &tx,
-                "Full System Update",
-                "bash",
-                &["-c", FULL_UPDATE_SCRIPT],
-                &input,
-                &pid,
-            );
-        });
-    });
-
-    let tx_native = tx.clone();
-    let native_input = terminal_input_sender.clone();
-    let native_pid = terminal_child_pid.clone();
-    let native_ctx = conflict_context.clone();
-    let window_weak_no = window.as_weak();
-    window.on_update_native_only(move || {
-        info!("Update native packages only");
-        let needs_reboot = window_weak_no.upgrade()
-            .map(|w| native_updates_need_reboot(&w))
-            .unwrap_or(false);
-        let tx = tx_native.clone();
-        let input = native_input.clone();
-        let pid = native_pid.clone();
-        let ctx = native_ctx.clone();
-        thread::spawn(move || {
-            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(needs_reboot));
-            run_managed_operation(&tx, "Native Update", "update-all", &[], 0, &input, &pid, &ctx);
-        });
-    });
-
-    let tx_upd_flt = tx.clone();
-    let upd_flt_input = terminal_input_sender.clone();
-    let upd_flt_pid = terminal_child_pid.clone();
-    let upd_flt_ctx = conflict_context.clone();
-    window.on_update_all_flatpaks(move || {
-        info!("Update all flatpaks");
-        let tx = tx_upd_flt.clone();
-        let input = upd_flt_input.clone();
-        let pid = upd_flt_pid.clone();
-        let ctx = upd_flt_ctx.clone();
-        let _ = ctx;
-        thread::spawn(move || {
-            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(false));
-            run_in_terminal_expanded(&tx, "Flatpak Update", "bash", &["-c", FLATPAK_UPDATE_ALL_SCRIPT], &input, &pid);
-        });
-    });
-
-    let tx_sys_full = tx.clone();
-    let sys_full_input = terminal_input_sender.clone();
-    let sys_full_pid = terminal_child_pid.clone();
-    let window_weak_sf = window.as_weak();
-    window.on_update_system_full(move || {
-        info!("Full system update (native + flatpak)");
-        let needs_reboot = window_weak_sf.upgrade()
-            .map(|w| native_updates_need_reboot(&w))
-            .unwrap_or(false);
-        let tx = tx_sys_full.clone();
-        let input = sys_full_input.clone();
-        let pid = sys_full_pid.clone();
-        thread::spawn(move || {
-            let _ = tx.send(UiMessage::SetTerminalIsUpgrade(needs_reboot));
-            run_in_terminal_expanded(
-                &tx,
-                "Full System Update",
-                "bash",
-                &["-c", FULL_UPDATE_SCRIPT],
-                &input,
-                &pid,
-            );
+            run_update_all(&tx, &input, &pid, plan);
         });
     });
 
@@ -4767,7 +4175,7 @@ fn main() {
         thread::spawn(move || {
             *ctx.lock().unwrap() = Some(("remove".to_string(), vec![id.clone()], 1));
             let title = format!("Removing {}", id);
-            let mut args = vec!["uninstall", "--noninteractive", "--assumeyes", &id];
+            let mut args = vec!["uninstall", "--assumeyes", &id];
             if also_delete_data { args.push("--delete-data"); }
             run_in_terminal(&tx, &title, "flatpak", &args, &input, &pid);
         });
@@ -4791,20 +4199,9 @@ fn main() {
 
 
     let window_weak_cp = window.as_weak();
-    let cp_pid = terminal_child_pid.clone();
-    let cp_input = terminal_input_sender.clone();
-    let tx_cp = tx.clone();
     window.on_close_progress_popup(move || {
         if let Some(window) = window_weak_cp.upgrade() {
-            if !window.get_progress_popup_done() {
-                if let Some(pid) = *cp_pid.lock().unwrap() {
-                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
-                }
-                *cp_input.lock().unwrap() = None;
-                let _ = tx_cp.send(UiMessage::OperationDone(false));
-            }
             window.set_show_progress_popup(false);
-            window.set_show_progress_logs(false);
         }
     });
 
@@ -4813,11 +4210,12 @@ fn main() {
     let tx_cancel = tx.clone();
     window.on_cancel_operation(move || {
         info!("Operation cancelled by user");
+        progress::request_cancel();
+        let _ = tx_cancel.send(UiMessage::ProgressStage("Cancelling...".to_string()));
         if let Some(pid) = *cancel_pid.lock().unwrap() {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
         }
         *cancel_input.lock().unwrap() = None;
-        let _ = tx_cancel.send(UiMessage::OperationDone(false));
     });
 
     let progress_input = terminal_input_sender.clone();
@@ -4957,8 +4355,15 @@ fn main() {
     window.on_clean_app_cache(move || {
         info!("Clean app cache and restart");
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let cache_dir = format!("{}/.local/share/xpm", home);
-        let _ = std::fs::remove_dir_all(&cache_dir);
+        // The AppImage store (installed apps + manifest) lives in the same directory: only drop caches.
+        if let Ok(entries) = std::fs::read_dir(format!("{}/.local/share/xpm", home)) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name == "pkg_cache.json" || (name.starts_with("remote_") && name.ends_with(".json")) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
         if let Ok(exe) = std::env::current_exe() {
             let _ = std::process::Command::new(exe).spawn();
         }
@@ -5108,7 +4513,7 @@ fn main() {
         let pkgs: Vec<PackageData> = w.get_orphan_list().iter().collect();
         let checked: Vec<bool> = w.get_orphan_checked().iter().collect();
         let selected: Vec<String> = pkgs.iter().zip(checked.iter())
-            .filter(|(_, &c)| c)
+            .filter(|&(_, &c)| c)
             .map(|(p, _)| p.name.to_string())
             .collect();
         if selected.is_empty() { return; }
@@ -5327,59 +4732,6 @@ fn main() {
         });
     });
 
-    let tx_ai_check = tx.clone();
-    let win_ai_check = window.as_weak();
-    window.on_check_appimage_updates(move || {
-        if let Some(w) = win_ai_check.upgrade() {
-            if w.get_appimage_checking_updates() {
-                return;
-            }
-            w.set_appimage_checking_updates(true);
-        }
-        let tx = tx_ai_check.clone();
-        thread::spawn(move || {
-            let names = AppImageBackend::new()
-                .map(|b| b.check_all_updates())
-                .unwrap_or_default();
-            let _ = tx.send(UiMessage::AppImageUpdatesChecked(names));
-        });
-    });
-
-    let tx_ai_updateall = tx.clone();
-    let dir_ai_updateall = appimage_dir_state.clone();
-    let updates_for_all = appimage_updates.clone();
-    window.on_update_all_appimages(move || {
-        let tx = tx_ai_updateall.clone();
-        let dir = dir_ai_updateall.lock().unwrap().clone();
-        let pending: Vec<String> = updates_for_all.borrow().iter().cloned().collect();
-        let tx_clear = tx.clone();
-        thread::spawn(move || {
-            run_appimage_op(&tx, "Updating all AppImages", Some(dir), None, move |backend, log| {
-                let targets = if pending.is_empty() {
-                    log("Checking for updates…\n");
-                    backend.check_all_updates()
-                } else {
-                    pending
-                };
-                if targets.is_empty() {
-                    log("All AppImages are up to date.\n");
-                    return Ok(());
-                }
-                log(&format!("Updating {} AppImage(s)…\n", targets.len()));
-                for name in &targets {
-                    log(&format!("\n- {} -\n", name));
-                    match backend.update_app(name, log) {
-                        Ok(_) => {
-                            let _ = tx_clear.send(UiMessage::AppImageUpdateCleared(name.clone()));
-                        }
-                        Err(e) => log(&format!("Failed: {}\n", e)),
-                    }
-                }
-                Ok(())
-            });
-        });
-    });
-
     let tx_ai_reinstall = tx.clone();
     let dir_ai_reinstall = appimage_dir_state.clone();
     window.on_reinstall_appimage(move |name| {
@@ -5432,6 +4784,7 @@ fn main() {
     });
 
     let cat_filter = appimage_catalog.clone();
+    let entries_filter = appimage_entries.clone();
     let win_ai_filter = window.as_weak();
     window.on_filter_appimage_catalog(move |query, page| {
         if let Some(w) = win_ai_filter.upgrade() {
@@ -5440,7 +4793,7 @@ fn main() {
                 &cat_filter.lock().unwrap(),
                 query.as_str(),
                 w.get_selected_appimage_source().as_str(),
-                &installed_github_map(),
+                &installed_github_map(&entries_filter.borrow()),
                 page,
             );
             w.set_appimage_catalog_total(total as i32);
@@ -5451,6 +4804,7 @@ fn main() {
 
     // Switch which AppImage source the catalog shows (mirrors flatpak remotes).
     let cat_src = appimage_catalog.clone();
+    let entries_src = appimage_entries.clone();
     let win_ai_src = window.as_weak();
     window.on_browse_appimage_source(move |source| {
         if let Some(w) = win_ai_src.upgrade() {
@@ -5460,7 +4814,7 @@ fn main() {
                 &cat_src.lock().unwrap(),
                 w.get_appimage_search().as_str(),
                 source.as_str(),
-                &installed_github_map(),
+                &installed_github_map(&entries_src.borrow()),
                 0,
             );
             w.set_appimage_catalog_total(total as i32);
@@ -5568,40 +4922,51 @@ fn main() {
         }
     });
 
+    let icon_inflight: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
     let icon_jobs: mpsc::Sender<(String, String, std::path::PathBuf)> = {
         let (job_tx, job_rx) = mpsc::channel::<(String, String, std::path::PathBuf)>();
         let job_rx = Arc::new(Mutex::new(job_rx));
         for _ in 0..6 {
             let rx = job_rx.clone();
             let tx_done = tx.clone();
+            let inflight = icon_inflight.clone();
             thread::spawn(move || loop {
                 let job = { rx.lock().unwrap().recv() };
                 let Ok((github, url, path)) = job else { break };
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                let thumb = icons::thumb_path(&path);
+                let mut pixels = icons::read_thumb(&thumb);
+                if pixels.is_none() {
+                    if !path.exists() {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::process::Command::new("curl")
+                            .args(["-fsSL", "--max-time", "20", "-o"])
+                            .arg(&path)
+                            .arg(&url)
+                            .status();
+                    }
+                    pixels = path.exists().then(|| icons::make_thumb(&path, &thumb)).flatten();
                 }
-                let ok = std::process::Command::new("curl")
-                    .args(["-fsSL", "--max-time", "20", "-o"])
-                    .arg(&path)
-                    .arg(&url)
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if ok && path.exists() {
-                    let _ = tx_done.send(UiMessage::AppImageIconReady {
-                        github,
-                        path: path.to_string_lossy().to_string(),
-                    });
+                let message = match pixels {
+                    Some(pixels) => Some(UiMessage::AppImageIconPixels { github: github.clone(), pixels }),
+                    None if path.exists() => Some(UiMessage::AppImageIconReady {
+                        github: github.clone(),
+                        path: path.to_string_lossy().into_owned(),
+                    }),
+                    None => None,
+                };
+                inflight.lock().unwrap().remove(&github);
+                if let Some(message) = message {
+                    let _ = tx_done.send(message);
                 }
             });
         }
         job_tx
     };
 
-    let icon_inflight: Arc<Mutex<std::collections::HashSet<String>>> =
-        Arc::new(Mutex::new(std::collections::HashSet::new()));
     let cat_icon = appimage_catalog.clone();
-    let tx_icon_imm = tx.clone();
     window.on_load_appimage_icon(move |github| {
         let github = github.to_string();
         let url = {
@@ -5609,21 +4974,10 @@ fn main() {
             cat.iter().find(|e| e.github == github).and_then(|e| e.icon_url.clone())
         };
         let Some(url) = url else { return };
-        let path = icon_cache_path(&github, &url);
-        if path.exists() {
-            let _ = tx_icon_imm.send(UiMessage::AppImageIconReady {
-                github,
-                path: path.to_string_lossy().to_string(),
-            });
-            return;
+        if icon_inflight.lock().unwrap().insert(github.clone()) {
+            let path = icon_cache_path(&github, &url);
+            let _ = icon_jobs.send((github, url, path));
         }
-        {
-            let mut set = icon_inflight.lock().unwrap();
-            if !set.insert(github.clone()) {
-                return;
-            }
-        }
-        let _ = icon_jobs.send((github, url, path));
     });
 
     let tx_export = tx.clone();
@@ -5741,30 +5095,6 @@ fn main() {
         let pid = initrd_pid.clone();
         thread::spawn(move || {
             run_in_terminal(&tx, "Rebuild InitRamFS", "pkexec", &["mkinitcpio", "-P"], &input, &pid);
-        });
-    });
-
-    let tx_aur = tx.clone();
-    let aur_input = terminal_input_sender.clone();
-    let aur_pid = terminal_child_pid.clone();
-    window.on_check_aur_malware(move || {
-        info!("Troubleshoot: Check for AUR Malware");
-        let tx = tx_aur.clone();
-        let input = aur_input.clone();
-        let pid = aur_pid.clone();
-        thread::spawn(move || {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let log_dir = format!("{}/.cache/xpm", home);
-            let _ = std::fs::create_dir_all(&log_dir);
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let log_arg = format!("--log-file={}/aur-check-{}.log", log_dir, stamp);
-            let args = [
-                "-c", AUR_CHECK_SCRIPT, "xpm-aur-check", "--full", &log_arg,
-            ];
-            run_in_terminal_expanded(&tx, "Check for AUR Malware", "bash", &args, &input, &pid);
         });
     });
 
@@ -5946,7 +5276,7 @@ fn main() {
             let pid = bfi_pid.clone();
             let title = format!("Installing {} Flatpak(s)", ids.len());
             thread::spawn(move || {
-                let mut args = vec!["install", "-y", "flathub"];
+                let mut args = vec!["install", "flathub"];
                 let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
                 args.extend(id_refs.iter().copied());
                 run_in_terminal(&tx, &title, "flatpak", &args, &input, &pid);
@@ -5974,7 +5304,7 @@ fn main() {
             let pid = bfr_pid.clone();
             let title = format!("Removing {} Flatpak(s)", ids.len());
             thread::spawn(move || {
-                let mut args = vec!["uninstall", "-y"];
+                let mut args = vec!["uninstall"];
                 let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
                 args.extend(id_refs.iter().copied());
                 run_in_terminal(&tx, &title, "flatpak", &args, &input, &pid);
@@ -5985,64 +5315,79 @@ fn main() {
     let tx_detail = tx.clone();
     let store_detail = flatpak_app_store.clone();
     let ids_detail = flatpak_installed_ids.clone();
+    let remote_detail = flatpak_loaded_remote.clone();
     window.on_load_flatpak_detail(move |app_id| {
         let id = app_id.to_string();
         let store = store_detail.lock().unwrap();
         let installed = ids_detail.lock().unwrap();
-        if let Some(app) = store.iter().find(|a| a.app_id == id) {
-            let _ = tx_detail.send(UiMessage::FlatpakDetailReady {
-                name: if app.name.is_empty() { app.app_id.clone() } else { app.name.clone() },
-                summary: app.summary.clone(),
-                description: app.description.clone(),
-                developer: app.developer.clone(),
-                version: app.version.clone(),
-                version_date: app.version_date.clone(),
-                changelog: app.changelog.clone(),
-                url_homepage: app.url_homepage.clone(),
-                url_bugtracker: app.url_bugtracker.clone(),
-                url_translate: app.url_translate.clone(),
-                url_vcs: app.url_vcs.clone(),
-                categories: app.categories.clone(),
-            });
-            let mut seen_addon = std::collections::HashSet::new();
-            let addons: Vec<PackageData> = store.iter()
-                .filter(|a| a.extends == id)
-                .filter(|a| seen_addon.insert(a.app_id.clone()))
-                .map(|a| PackageData {
-                    name: SharedString::from(a.app_id.as_str()),
-                    display_name: SharedString::from(if a.name.is_empty() { &a.app_id } else { &a.name }),
-                    version: SharedString::from(""),
-                    description: SharedString::from(a.summary.as_str()),
-                    repository: SharedString::from(""),
-                    backend: 1,
-                    installed: installed.contains(&a.app_id),
-                    has_update: false,
-                    installed_size: SharedString::from(""),
-                    licenses: SharedString::from(""),
-                    url: SharedString::from(""),
-                    dependencies: SharedString::from(""),
-                    required_by: SharedString::from(""),
-                    selected: false,
-                    explicit: false,
-                })
-                .collect();
-            let _ = tx_detail.send(UiMessage::FlatpakAddonsReady(addons));
-            let ss_url = app.screenshot_url.clone();
-            let ss_id = id.clone();
-            let tx_ss = tx_detail.clone();
-            if !ss_url.is_empty() {
-                thread::spawn(move || {
-                    let tmp = format!("/tmp/xpm_ss_{}.jpg", ss_id.replace(['/', '.'], "_"));
-                    let ok = std::process::Command::new("curl")
-                        .args(["-s", "--max-time", "20", "-L", "-o", &tmp, &ss_url])
-                        .status()
-                        .map(|s| s.success())
-                        .unwrap_or(false);
-                    if ok && std::path::Path::new(&tmp).exists() {
-                        let _ = tx_ss.send(UiMessage::FlatpakScreenshotReady(tmp));
+        let Some(app) = store.iter().find(|a| a.app_id == id) else { return };
+        let _ = tx_detail.send(UiMessage::FlatpakDetailReady(Box::new(FlatpakDetail {
+            app_id: id.clone(),
+            name: if app.name.is_empty() { app.app_id.clone() } else { app.name.clone() },
+            summary: app.summary.clone(),
+            description: app.description.clone(),
+            developer: app.developer.clone(),
+            version: app.version.clone(),
+            version_date: app.version_date.clone(),
+            license: app.license.clone(),
+            url_homepage: app.url_homepage.clone(),
+            url_bugtracker: app.url_bugtracker.clone(),
+            url_translate: app.url_translate.clone(),
+            url_vcs: app.url_vcs.clone(),
+            url_donation: app.url_donation.clone(),
+            url_help: app.url_help.clone(),
+            categories: app.categories.clone(),
+            releases: app.releases.iter().map(|r| (r.version.clone(), r.date.clone(), r.notes.clone())).collect(),
+            captions: app.screenshots.iter().map(|s| s.caption.clone()).collect(),
+        })));
+        let mut seen_addon = std::collections::HashSet::new();
+        let addons: Vec<PackageData> = store.iter()
+            .filter(|a| a.extends == id)
+            .filter(|a| seen_addon.insert(a.app_id.clone()))
+            .map(|a| PackageData {
+                name: SharedString::from(a.app_id.as_str()),
+                display_name: SharedString::from(if a.name.is_empty() { &a.app_id } else { &a.name }),
+                version: SharedString::from(""),
+                description: SharedString::from(a.summary.as_str()),
+                repository: SharedString::from(""),
+                backend: 1,
+                installed: installed.contains(&a.app_id),
+                has_update: false,
+                installed_size: SharedString::from(""),
+                licenses: SharedString::from(""),
+                url: SharedString::from(""),
+                dependencies: SharedString::from(""),
+                required_by: SharedString::from(""),
+                selected: false,
+                explicit: false,
+            })
+            .collect();
+        let _ = tx_detail.send(UiMessage::FlatpakAddonsReady(addons));
+
+        let shots: Vec<String> = app.screenshots.iter().map(|s| s.url.clone()).collect();
+        if !shots.is_empty() {
+            let (tx_ss, ss_id) = (tx_detail.clone(), id.clone());
+            thread::spawn(move || {
+                for (index, url) in shots.iter().enumerate() {
+                    let dest = flathub::screenshot_path(&ss_id, index, url);
+                    if flathub::download_screenshot(url, &dest) {
+                        let _ = tx_ss.send(UiMessage::FlatpakScreenshotReady {
+                            app_id: ss_id.clone(),
+                            index,
+                            path: dest.to_string_lossy().into_owned(),
+                        });
                     }
-                });
-            }
+                }
+            });
+        }
+
+        if *remote_detail.lock().unwrap() == "flathub" {
+            let tx_extras = tx_detail.clone();
+            thread::spawn(move || {
+                if let Some(extras) = flathub::fetch_extras(&id) {
+                    let _ = tx_extras.send(UiMessage::FlatpakExtrasReady { app_id: id, extras });
+                }
+            });
         }
     });
 
@@ -6139,7 +5484,7 @@ fn main() {
                 Ok(o) if o.status.success() && !o.stdout.is_empty() => {
                     String::from_utf8_lossy(&o.stdout)
                         .lines()
-                        .filter_map(|l| l.splitn(2, ' ').nth(1))
+                        .filter_map(|l| l.split_once(' ').map(|x| x.1))
                         .collect::<Vec<_>>()
                         .join("\n")
                 }
@@ -6296,23 +5641,21 @@ fn main() {
                 let mut header_has_match = false;
                 for item in data.iter() {
                     if item.backend == -1 {
-                        if let Some(h) = current_header.take() {
-                            if header_has_match {
+                        if let Some(h) = current_header.take()
+                            && header_has_match {
                                 result.push(h);
                             }
-                        }
                         current_header = Some(item.clone());
                         header_has_match = false;
                     } else {
                         let matches = item.name.to_lowercase().contains(&q)
                             || item.display_name.to_lowercase().contains(&q);
                         if matches {
-                            if let Some(ref h) = current_header {
-                                if !header_has_match {
+                            if let Some(ref h) = current_header
+                                && !header_has_match {
                                     result.push(h.clone());
                                     header_has_match = true;
                                 }
-                            }
                             result.push(item.clone());
                         }
                     }
@@ -6337,31 +5680,28 @@ fn main() {
                 let mut header_has_match = false;
                 for item in data.iter() {
                     if item.backend == -1 {
-                        if let Some(h) = current_header.take() {
-                            if header_has_match {
+                        if let Some(h) = current_header.take()
+                            && header_has_match {
                                 result.push(h);
                             }
-                        }
                         current_header = Some(item.clone());
                         header_has_match = false;
                     } else {
                         let matches = item.explicit == want_explicit;
                         if matches {
-                            if let Some(ref h) = current_header {
-                                if !header_has_match {
+                            if let Some(ref h) = current_header
+                                && !header_has_match {
                                     result.push(h.clone());
                                     header_has_match = true;
                                 }
-                            }
                             result.push(item.clone());
                         }
                     }
                 }
-                if let Some(h) = current_header {
-                    if header_has_match {
+                if let Some(h) = current_header
+                    && header_has_match {
                         result.push(h);
                     }
-                }
                 result
             };
             w.set_installed_grouped(ModelRc::new(VecModel::from(filtered)));
@@ -6435,7 +5775,7 @@ fn main() {
                 dg = dg_bin.display(),
                 name = name,
             );
-            run_in_terminal_expanded(
+            run_in_terminal(
                 &tx,
                 &format!("Downgrade {}", name),
                 "pkexec",
@@ -6863,7 +6203,7 @@ fn main() {
                      && echo 'Do NOT run a full update until you have identified/fixed the cause or taken a Timeshift / Btrfs snapshot.' \
                      && echo 'If the newer version still breaks things, just roll back again.'",
                 );
-                run_in_terminal_expanded(&tx, "Rolling back update", "pkexec", &["bash", "-c", &script], &input, &pid);
+                run_in_terminal(&tx, "Rolling back update", "pkexec", &["bash", "-c", &script], &input, &pid);
             });
         });
     }
@@ -7010,18 +6350,6 @@ fn main() {
     } else {
         info!("AppImage startup preload skipped (feature disabled in config)");
     }
-    {
-        let weak = window.as_weak();
-        thread::spawn(move || {
-            let failed = failed_services().len() as i32;
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(w) = weak.upgrade() {
-                    w.set_health_failed_count(failed);
-                    w.set_health_checked(true);
-                }
-            });
-        });
-    }
     window.set_setting_notify_on_updates(config.notify_on_updates);
     window.set_setting_auto_clean_cache(config.auto_clean_cache);
     let pacman_parallel = read_pacman_parallel_downloads().unwrap_or(config.parallel_downloads);
@@ -7137,8 +6465,8 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
     }).await.unwrap_or(0);
 
     let mut updates: Vec<xpm_core::package::UpdateInfo> = Vec::new();
-    if let Some(Ok(Ok(result))) = checkupdates_res {
-        if result.status.success() {
+    if let Some(Ok(Ok(result))) = checkupdates_res
+        && result.status.success() {
             let stdout = String::from_utf8_lossy(&result.stdout);
             for line in stdout.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
@@ -7163,7 +6491,6 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
                 }
             }
         }
-    }
 
     let update_names: std::collections::HashSet<String> =
     updates.iter().map(|u| u.name.clone()).collect();
@@ -7377,11 +6704,10 @@ fn fetch_store_versions() -> Vec<(String, String)> {
     if let Ok(output) = std::process::Command::new("curl")
         .args(["-s", "--max-time", "15", url])
         .output()
-        {
-            if output.status.success() {
+            && output.status.success() {
                 let response = String::from_utf8_lossy(&output.stdout);
-                if let Ok(json) = serde_json::from_str::<Value>(&response) {
-                    if let Some(data) = json.get("ocs").and_then(|o| o.get("data")).and_then(|d| d.as_array()) {
+                if let Ok(json) = serde_json::from_str::<Value>(&response)
+                    && let Some(data) = json.get("ocs").and_then(|o| o.get("data")).and_then(|d| d.as_array()) {
                         for item in data {
                             let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let version = item.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -7390,9 +6716,7 @@ fn fetch_store_versions() -> Vec<(String, String)> {
                             }
                         }
                     }
-                }
             }
-        }
 
         versions
 }
@@ -7427,9 +6751,9 @@ struct PlasmoidInfo {
 }
 
 fn parse_plasmoid_json(path: &std::path::Path) -> PlasmoidInfo {
-    if let Ok(content) = std::fs::read_to_string(path) {
-        if let Ok(json) = serde_json::from_str::<Value>(&content) {
-            if let Some(kplugin) = json.get("KPlugin") {
+    if let Ok(content) = std::fs::read_to_string(path)
+        && let Ok(json) = serde_json::from_str::<Value>(&content)
+            && let Some(kplugin) = json.get("KPlugin") {
                 let id = kplugin.get("Id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -7448,8 +6772,6 @@ fn parse_plasmoid_json(path: &std::path::Path) -> PlasmoidInfo {
                 .to_string();
                 return PlasmoidInfo { id, name, version, description: desc };
             }
-        }
-    }
     PlasmoidInfo {
         id: String::new(),
         name: "Unknown".to_string(),
@@ -7700,49 +7022,20 @@ fn load_package_cache() -> Option<PackageCache> {
 
 fn remote_cache_path(remote: &str) -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(format!("{}/.local/share/xpm/remote_{}.json", home, remote))
+    std::path::PathBuf::from(format!("{}/.local/share/xpm/remote_{}.v2.json", home, remote))
 }
 
 fn remote_cache_valid(path: &std::path::Path) -> bool {
-    if let Ok(meta) = std::fs::metadata(path) {
-        if let Ok(modified) = meta.modified() {
+    if let Ok(meta) = std::fs::metadata(path)
+        && let Ok(modified) = meta.modified() {
             let age = std::time::SystemTime::now()
                 .duration_since(modified)
                 .unwrap_or(std::time::Duration::MAX);
             return age.as_secs() < 86400;
         }
-    }
     false
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct CachedRemoteApp {
-    app_id: String,
-    name: String,
-    summary: String,
-    description: String,
-    categories: Vec<String>,
-    developer: String,
-    screenshot_url: String,
-    #[serde(default)]
-    icon_name: String,
-    #[serde(default)]
-    extends: String,
-    #[serde(default)]
-    url_homepage: String,
-    #[serde(default)]
-    url_bugtracker: String,
-    #[serde(default)]
-    url_translate: String,
-    #[serde(default)]
-    url_vcs: String,
-    #[serde(default)]
-    version: String,
-    #[serde(default)]
-    version_date: String,
-    #[serde(default)]
-    changelog: String,
-}
 
 fn fetch_flatpak_remotes() -> Vec<String> {
     let Ok(out) = std::process::Command::new("flatpak")
@@ -7767,36 +7060,6 @@ fn get_flatpak_installed_ids() -> std::collections::HashSet<String> {
             .collect(),
         Err(_) => std::collections::HashSet::new(),
     }
-}
-
-/// Strip residual HTML tags (e.g. &lt;em&gt; unescaped to <em>) from description text.
-fn strip_inline_tags(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_tag = false;
-    for c in text.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    let mut result = String::new();
-    let mut blank_run = 0usize;
-    for line in out.split('\n') {
-        let t = line.trim();
-        if t.is_empty() {
-            blank_run += 1;
-            if blank_run == 1 {
-                result.push('\n');
-            }
-        } else {
-            blank_run = 0;
-            result.push_str(t);
-            result.push('\n');
-        }
-    }
-    result.trim().to_string()
 }
 
 /// Active appstream directory for a remote, preferring the user installation
@@ -7853,387 +7116,16 @@ fn parse_appstream_xml(remote: &str) -> Vec<CachedRemoteApp> {
         return Vec::new();
     };
 
-    struct State {
-        app_id: String,
-        name: String,
-        summary: String,
-        description: String,
-        categories: Vec<String>,
-        developer: String,
-        screenshot_url: String,
-        screenshot_source_url: String,
-        icon_name: String,
-        extends: String,
-        url_homepage: String,
-        url_bugtracker: String,
-        url_translate: String,
-        url_vcs: String,
-        version: String,
-        version_date: String,
-        changelog: String,
-    }
-
-    let mut current: Option<State> = None;
-    let mut apps: Vec<CachedRemoteApp> = Vec::new();
-
-    let mut in_component = false;
-    let mut in_id = false;
-    let mut in_name = false;
-    let mut in_summary = false;
-    let mut in_description = false;
-    let mut desc_depth: i32 = 0;
-    let mut in_developer = false;
-    let mut in_developer_name = false;
-    let mut in_categories = false;
-    let mut in_category = false;
-    let mut in_screenshots = false;
-    let mut in_screenshot = false;
-    let mut cur_image_type = String::new();
-    let mut in_image = false;
-    let mut in_extends = false;
-    let mut in_icon = false;
-    let mut in_url = false;
-    let mut cur_url_type = String::new();
-    let mut in_releases = false;
-    let mut in_release = false;
-    let mut got_first_release = false;
-    let mut in_release_desc = false;
-    let mut release_desc_depth: i32 = 0;
-
-    let mut reader = Reader::from_reader(BufReader::new(xml_bytes.as_slice()));
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                let tag = e.name();
-                match tag.as_ref() {
-                    b"component" => {
-                        in_component = true;
-                        current = Some(State {
-                            app_id: String::new(),
-                            name: String::new(),
-                            summary: String::new(),
-                            description: String::new(),
-                            categories: Vec::new(),
-                            developer: String::new(),
-                            screenshot_url: String::new(),
-                            screenshot_source_url: String::new(),
-                            icon_name: String::new(),
-                            extends: String::new(),
-                            url_homepage: String::new(),
-                            url_bugtracker: String::new(),
-                            url_translate: String::new(),
-                            url_vcs: String::new(),
-                            version: String::new(),
-                            version_date: String::new(),
-                            changelog: String::new(),
-                        });
-                    }
-                    b"id" if in_component && !in_developer && !in_description && !in_categories && !in_screenshots => {
-                        in_id = true;
-                    }
-                    b"name" if in_component && !in_developer && !in_description && !in_categories => {
-                        let has_lang = e.attributes().flatten()
-                            .any(|a| a.key.as_ref() == b"xml:lang");
-                        if !has_lang { in_name = true; }
-                    }
-                    b"summary" if in_component && !in_developer && !in_description => {
-                        let has_lang = e.attributes().flatten()
-                            .any(|a| a.key.as_ref() == b"xml:lang");
-                        if !has_lang { in_summary = true; }
-                    }
-                    b"description" if in_component && !in_screenshots && !in_releases => {
-                        in_description = true;
-                        desc_depth = 1;
-                    }
-                    b"url" if in_component && !in_description && !in_screenshots && !in_releases => {
-                        cur_url_type.clear();
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"type" {
-                                cur_url_type = String::from_utf8_lossy(&attr.value).to_string();
-                            }
-                        }
-                        in_url = true;
-                    }
-                    b"releases" if in_component => { in_releases = true; }
-                    b"release" if in_releases && !got_first_release => {
-                        if let Some(ref mut state) = current {
-                            for attr in e.attributes().flatten() {
-                                match attr.key.as_ref() {
-                                    b"version" => { state.version = String::from_utf8_lossy(&attr.value).to_string(); }
-                                    b"date" => { state.version_date = String::from_utf8_lossy(&attr.value).to_string(); }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        in_release = true;
-                    }
-                    b"description" if in_release && !in_release_desc => {
-                        in_release_desc = true;
-                        release_desc_depth = 1;
-                    }
-                    b"li" if in_release_desc => {
-                        if let Some(ref mut state) = current {
-                            if !state.changelog.is_empty() && !state.changelog.ends_with('\n') {
-                                state.changelog.push('\n');
-                            }
-                            state.changelog.push_str("• ");
-                        }
-                        release_desc_depth += 1;
-                    }
-                    _ if in_release_desc => { release_desc_depth += 1; }
-                    b"developer" if in_component => {
-                        in_developer = true;
-                    }
-                    b"name" if in_developer => {
-                        in_developer_name = true;
-                    }
-                    b"categories" if in_component => {
-                        in_categories = true;
-                    }
-                    b"category" if in_categories => {
-                        in_category = true;
-                    }
-                    b"extends" if in_component && !in_description => {
-                        in_extends = true;
-                    }
-                    b"screenshots" if in_component => {
-                        in_screenshots = true;
-                    }
-                    b"screenshot" if in_screenshots => {
-                        in_screenshot = true;
-                    }
-                    b"image" if in_screenshot => {
-                        in_image = true;
-                        cur_image_type.clear();
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"type" {
-                                cur_image_type = String::from_utf8_lossy(&attr.value).to_string();
-                            }
-                        }
-                    }
-                    b"icon" if in_component && !in_screenshots && !in_description => {
-                        let mut is_cached = false;
-                        let mut is_128 = false;
-                        for attr in e.attributes().flatten() {
-                            match attr.key.as_ref() {
-                                b"type" => { is_cached = attr.value.as_ref() == b"cached"; }
-                                b"width" => { is_128 = attr.value.as_ref() == b"128"; }
-                                _ => {}
-                            }
-                        }
-                        if is_cached && is_128 {
-                            if let Some(ref mut s) = current {
-                                let _ = s;
-                            }
-                            in_icon = true;
-                        }
-                    }
-                    b"li" if in_description => {
-                        if let Some(ref mut state) = current {
-                            if !state.description.is_empty() && !state.description.ends_with('\n') {
-                                state.description.push('\n');
-                            }
-                            state.description.push_str("• ");
-                        }
-                        desc_depth += 1;
-                    }
-                    _ if in_description => {
-                        desc_depth += 1;
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Event::End(e)) => {
-                let tag = e.name();
-                match tag.as_ref() {
-                    b"component" => {
-                        in_component = false;
-                        if let Some(state) = current.take() {
-                            if !state.app_id.is_empty() {
-                                let ss_url = if !state.screenshot_url.is_empty() {
-                                    state.screenshot_url
-                                } else {
-                                    state.screenshot_source_url
-                                };
-                                apps.push(CachedRemoteApp {
-                                    app_id: state.app_id,
-                                    name: state.name,
-                                    summary: state.summary,
-                                    description: strip_inline_tags(&state.description),
-                                    categories: state.categories,
-                                    developer: state.developer,
-                                    screenshot_url: ss_url,
-                                    icon_name: state.icon_name,
-                                    extends: state.extends,
-                                    url_homepage: state.url_homepage,
-                                    url_bugtracker: state.url_bugtracker,
-                                    url_translate: state.url_translate,
-                                    url_vcs: state.url_vcs,
-                                    version: state.version,
-                                    version_date: state.version_date,
-                                    changelog: strip_inline_tags(&state.changelog),
-                                });
-                            }
-                        }
-                    }
-                    b"id" => { in_id = false; }
-                    b"extends" => { in_extends = false; }
-                    b"name" if in_developer => { in_developer_name = false; }
-                    b"name" if !in_developer => { in_name = false; }
-                    b"summary" => { in_summary = false; }
-                    b"description" if desc_depth == 1 => { in_description = false; desc_depth = 0; }
-                    b"developer" => { in_developer = false; in_developer_name = false; }
-                    b"categories" => { in_categories = false; }
-                    b"category" => { in_category = false; }
-                    b"screenshots" => { in_screenshots = false; }
-                    b"screenshot" => { in_screenshot = false; }
-                    b"image" => { in_image = false; }
-                    b"icon" => { in_icon = false; }
-                    b"url" => { in_url = false; cur_url_type.clear(); }
-                    b"releases" => { in_releases = false; }
-                    b"release" if in_release => {
-                        got_first_release = true;
-                        in_release = false;
-                    }
-                    b"description" if in_release_desc && release_desc_depth == 1 => {
-                        in_release_desc = false;
-                        release_desc_depth = 0;
-                    }
-                    b"p" if in_release_desc => {
-                        if let Some(ref mut state) = current {
-                            if !state.changelog.is_empty() {
-                                if !state.changelog.ends_with('\n') { state.changelog.push('\n'); }
-                                state.changelog.push('\n');
-                            }
-                        }
-                        release_desc_depth -= 1;
-                    }
-                    b"li" if in_release_desc => {
-                        if let Some(ref mut state) = current {
-                            if !state.changelog.ends_with('\n') { state.changelog.push('\n'); }
-                        }
-                        release_desc_depth -= 1;
-                    }
-                    b"ul" | b"ol" if in_release_desc => { release_desc_depth -= 1; }
-                    _ if in_release_desc => { release_desc_depth -= 1; }
-                    b"p" if in_description => {
-                        if let Some(ref mut state) = current {
-                            if !state.description.is_empty() {
-                                if !state.description.ends_with('\n') {
-                                    state.description.push('\n');
-                                }
-                                state.description.push('\n');
-                            }
-                        }
-                        desc_depth -= 1;
-                    }
-                    b"li" if in_description => {
-                        if let Some(ref mut state) = current {
-                            if !state.description.ends_with('\n') {
-                                state.description.push('\n');
-                            }
-                        }
-                        desc_depth -= 1;
-                    }
-                    b"ul" | b"ol" if in_description => {
-                        if let Some(ref mut state) = current {
-                            if !state.description.ends_with("\n\n") {
-                                if !state.description.ends_with('\n') {
-                                    state.description.push('\n');
-                                }
-                                state.description.push('\n');
-                            }
-                        }
-                        desc_depth -= 1;
-                    }
-                    _ if in_description => { desc_depth -= 1; }
-                    _ => {}
-                }
-            }
-            Ok(Event::Text(e)) => {
-                let text = match e.unescape() {
-                    Ok(t) => t.to_string(),
-                    Err(_) => continue,
-                };
-                if let Some(ref mut state) = current {
-                    if in_id && state.app_id.is_empty() { state.app_id = text.trim().to_string(); }
-                    else if in_extends && state.extends.is_empty() { state.extends = text.trim().to_string(); }
-                    else if in_name && state.name.is_empty() { state.name = text.trim().to_string(); }
-                    else if in_summary && state.summary.is_empty() { state.summary = text.trim().to_string(); }
-                    else if in_description {
-                        let t = text.trim();
-                        if !t.is_empty() {
-                            if !state.description.is_empty()
-                                && !state.description.ends_with('\n')
-                                && !state.description.ends_with(' ')
-                            {
-                                state.description.push(' ');
-                            }
-                            state.description.push_str(t);
-                        }
-                    } else if in_url {
-                        let url_text = text.trim().to_string();
-                        match cur_url_type.as_str() {
-                            "homepage" if state.url_homepage.is_empty() => { state.url_homepage = url_text; }
-                            "bugtracker" if state.url_bugtracker.is_empty() => { state.url_bugtracker = url_text; }
-                            "translate" if state.url_translate.is_empty() => { state.url_translate = url_text; }
-                            "vcs-browser" if state.url_vcs.is_empty() => { state.url_vcs = url_text; }
-                            _ => {}
-                        }
-                    } else if in_release_desc {
-                        let t = text.trim();
-                        if !t.is_empty() {
-                            if !state.changelog.is_empty()
-                                && !state.changelog.ends_with('\n')
-                                && !state.changelog.ends_with(' ')
-                            {
-                                state.changelog.push(' ');
-                            }
-                            state.changelog.push_str(t);
-                        }
-                    } else if in_developer_name && state.developer.is_empty() {
-                        state.developer = text.trim().to_string();
-                    } else if in_category {
-                        state.categories.push(text.trim().to_string());
-                    } else if in_icon && state.icon_name.is_empty() {
-                        state.icon_name = text.trim().to_string();
-                    } else if in_image && in_screenshot {
-                        let url = text.trim().to_string();
-                        if cur_image_type == "thumbnail"
-                            && state.screenshot_url.is_empty()
-                            && url.contains("624x351")
-                        {
-                            state.screenshot_url = url;
-                        } else if cur_image_type == "source"
-                            && state.screenshot_source_url.is_empty()
-                        {
-                            state.screenshot_source_url = url;
-                        }
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    apps
+    crate::appstream::parse(&xml_bytes)
 }
 
 fn fetch_remote_apps_cached(remote: &str) -> Vec<CachedRemoteApp> {
     let path = remote_cache_path(remote);
-    if remote_cache_valid(&path) {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(apps) = serde_json::from_str::<Vec<CachedRemoteApp>>(&content) {
+    if remote_cache_valid(&path)
+        && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(apps) = serde_json::from_str::<Vec<CachedRemoteApp>>(&content) {
                 return apps;
             }
-        }
-    }
 
     let apps = parse_appstream_xml(remote);
 
@@ -8242,6 +7134,7 @@ fn fetch_remote_apps_cached(remote: &str) -> Vec<CachedRemoteApp> {
         if let Ok(json) = serde_json::to_string(&apps) {
             let _ = std::fs::write(&path, json);
         }
+        let _ = std::fs::remove_file(path.with_file_name(format!("remote_{remote}.json")));
     }
 
     apps
@@ -8342,8 +7235,8 @@ fn load_repo_descriptions(repo: &str) -> std::collections::HashMap<String, Strin
     let out = std::process::Command::new("expac")
         .args(["-S", "%r\t%n\t%d"])
         .output();
-    if let Ok(o) = out {
-        if o.status.success() {
+    if let Ok(o) = out
+        && o.status.success() {
             return String::from_utf8_lossy(&o.stdout)
                 .lines()
                 .filter_map(|line| {
@@ -8359,7 +7252,6 @@ fn load_repo_descriptions(repo: &str) -> std::collections::HashMap<String, Strin
                 })
                 .collect();
         }
-    }
     std::collections::HashMap::new()
 }
 
@@ -8435,5 +7327,45 @@ mod search_tests {
     #[test]
     fn no_match_is_none() {
         assert_eq!(search_rank("xyzzy", "gimp", "org.gimp.GIMP", "image editor"), None);
+    }
+}
+
+#[cfg(test)]
+mod news_tests {
+    use super::*;
+
+    #[test]
+    fn parses_items_with_entities_and_cdata() {
+        let xml = r#"<?xml version="1.0"?><rss><channel><title>feed</title>
+<item><title>Tom &amp; Jerry update</title>
+<link>https://archlinux.org/news/a/</link>
+<pubDate>Mon, 05 Jan 2026 10:00:00 +0000</pubDate>
+<description>&lt;p&gt;Manual &amp;amp; intervention&lt;/p&gt;</description></item>
+<item><title>Second</title><link>https://archlinux.org/news/b/</link>
+<pubDate>Tue, 06 Jan 2026 10:00:00 +0000</pubDate>
+<description><![CDATA[<p>Plain</p>]]></description></item>
+</channel></rss>"#;
+        let items = parse_arch_rss(xml);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "Tom & Jerry update");
+        assert_eq!(items[0].date, "05 Jan 2026");
+        assert_eq!(items[1].summary, "Plain");
+    }
+}
+
+#[cfg(test)]
+mod update_plan_tests {
+    use super::update_script;
+
+    #[test]
+    fn script_matches_enabled_backends() {
+        assert_eq!(update_script(false, false), None);
+        assert_eq!(update_script(true, false).as_deref(), Some("pkexec pacman -Syu"));
+        let both = update_script(true, true).unwrap();
+        assert!(both.starts_with("pkexec bash -c 'pacman -Syu"));
+        assert!(both.contains("flatpak update --user"));
+        let flatpak_only = update_script(false, true).unwrap();
+        assert!(!flatpak_only.contains("pacman"));
+        assert!(flatpak_only.contains("pkexec flatpak update --system"));
     }
 }

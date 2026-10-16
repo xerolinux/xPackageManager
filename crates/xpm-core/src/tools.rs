@@ -17,14 +17,13 @@ pub fn resolve_tool(name: &str) -> Option<PathBuf> {
 }
 
 fn resolve_tool_in(name: &str, path_var: Option<OsString>, bundled_dir: &Path) -> Option<PathBuf> {
-    if let Some(paths) = path_var {
-        if let Some(hit) = std::env::split_paths(&paths)
+    if let Some(paths) = path_var
+        && let Some(hit) = std::env::split_paths(&paths)
             .map(|dir| dir.join(name))
             .find(|p| p.is_file())
         {
             return Some(hit);
         }
-    }
     let bundled = bundled_dir.join(name);
     bundled.is_file().then_some(bundled)
 }

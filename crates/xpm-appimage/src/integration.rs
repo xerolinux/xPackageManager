@@ -42,8 +42,8 @@ pub fn integrate(appimage_path: &Path, name: &str, fallback_display: &str) -> In
 
     let mut icon_name: Option<String> = None;
     let mut categories = "Utility;".to_string();
-    if let Some(desktop_src) = find_desktop(&root) {
-        if let Ok(content) = std::fs::read_to_string(&desktop_src) {
+    if let Some(desktop_src) = find_desktop(&root)
+        && let Ok(content) = std::fs::read_to_string(&desktop_src) {
             if let Some(n) = desktop_value(&content, "Name").filter(|s| !s.is_empty()) {
                 result.display_name = n;
             }
@@ -55,7 +55,6 @@ pub fn integrate(appimage_path: &Path, name: &str, fallback_display: &str) -> In
                 categories = c;
             }
         }
-    }
 
     if let Some(icon_dest) = copy_icon(&root, name, icon_name.as_deref()) {
         result.icon_path = Some(icon_dest);
@@ -154,11 +153,10 @@ fn copy_icon(root: &Path, name: &str, icon_name: Option<&str>) -> Option<String>
 
 fn find_icon_source(root: &Path, icon_name: Option<&str>) -> Option<PathBuf> {
     let diricon = root.join(".DirIcon");
-    if let Ok(real) = std::fs::canonicalize(&diricon) {
-        if real.is_file() {
+    if let Ok(real) = std::fs::canonicalize(&diricon)
+        && real.is_file() {
             return Some(real);
         }
-    }
 
     let mut files = Vec::new();
     collect_files(&root.join("usr/share/icons"), &mut files, 0);

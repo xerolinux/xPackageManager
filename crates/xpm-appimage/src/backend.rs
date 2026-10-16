@@ -191,8 +191,8 @@ impl AppImageBackend {
             }
         }
 
-        if !done && entry.update_info.is_some() {
-          if let Some(tool) = xpm_core::resolve_tool("appimageupdatetool") {
+        if !done && entry.update_info.is_some()
+          && let Some(tool) = xpm_core::resolve_tool("appimageupdatetool") {
             log("Updating via appimageupdatetool…\n");
             match Command::new(&tool)
                 .arg("--overwrite")
@@ -210,16 +210,14 @@ impl AppImageBackend {
                 )),
             }
           }
-        }
 
-        if !done {
-            if let Some(url) = entry.source_url.as_deref().filter(|u| Self::is_url(u)) {
+        if !done
+            && let Some(url) = entry.source_url.as_deref().filter(|u| Self::is_url(u)) {
                 log("Re-downloading from source URL…\n");
                 download(url, &path, log)?;
                 chmod_exec(&path)?;
                 done = true;
             }
-        }
 
         if !done {
             return Err(Error::Other(

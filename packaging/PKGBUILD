@@ -5,8 +5,8 @@
 # PKGBUILDs under deps/ (real, separately-removable packages with their OWN
 # versions - never the AUR), then builds this. Clean with: ./build.sh --clean
 pkgname=xpm-gui
-pkgver=0.6.3
-pkgrel=6
+pkgver=0.7.0
+pkgrel=1
 pkgdesc="A modern package manager for Arch Linux supporting pacman, Flatpak and AppImage"
 arch=('x86_64')
 url="https://github.com/xerolinux/xPackageManager"
@@ -29,6 +29,8 @@ depends=(
 )
 makedepends=('rust' 'cargo' 'qt6-base')
 optdepends=(
+    'archlinux-appstream-data: application icons for repo packages that are not installed'
+    'noto-fonts: Noto Sans, the UI font (falls back to the system sans-serif)'
     'sccache: faster incremental Rust builds'
     'mold: faster linker (cuts link time significantly)'
     'kdialog: native file picker for AppImage install (KDE)'

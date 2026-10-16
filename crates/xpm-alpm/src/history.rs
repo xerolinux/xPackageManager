@@ -119,23 +119,20 @@ pub fn parse_log(text: &str) -> Vec<Transaction> {
         if msg == "transaction started" {
             cur = Some(Transaction { when: ts, command: last_command.clone(), actions: Vec::new() });
         } else if msg == "transaction completed" {
-            if let Some(t) = cur.take() {
-                if !t.actions.is_empty() {
+            if let Some(t) = cur.take()
+                && !t.actions.is_empty() {
                     txns.push(t);
                 }
-            }
-        } else if let Some(t) = cur.as_mut() {
-            if let Some(a) = parse_action(&msg) {
+        } else if let Some(t) = cur.as_mut()
+            && let Some(a) = parse_action(&msg) {
                 t.actions.push(a);
             }
-        }
     }
     // Flush a transaction missing its "completed" line (interrupted run).
-    if let Some(t) = cur {
-        if !t.actions.is_empty() {
+    if let Some(t) = cur
+        && !t.actions.is_empty() {
             txns.push(t);
         }
-    }
     txns.reverse(); // newest first
     txns
 }
