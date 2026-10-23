@@ -244,6 +244,36 @@ pub struct SearchResult {
     pub installed_version: Option<Version>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpdateKind {
+    #[default]
+    Package,
+    Runtime,
+    Plugin,
+    Theme,
+    Drivers,
+    Codec,
+    Locale,
+    Extension,
+    Dependency,
+}
+
+impl UpdateKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Package => "flatpak",
+            Self::Runtime => "Runtime",
+            Self::Plugin => "Plugin",
+            Self::Theme => "Theme",
+            Self::Drivers => "Drivers",
+            Self::Codec => "Codec",
+            Self::Locale => "Locale",
+            Self::Extension => "Extension",
+            Self::Dependency => "Dependency",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateInfo {
     pub name: String,
@@ -252,6 +282,8 @@ pub struct UpdateInfo {
     pub backend: PackageBackend,
     pub repository: String,
     pub download_size: u64,
+    #[serde(default)]
+    pub kind: UpdateKind,
 }
 
 #[cfg(test)]

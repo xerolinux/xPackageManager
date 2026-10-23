@@ -65,15 +65,6 @@ impl Operation {
         }
     }
 
-    pub fn system_upgrade(backend: PackageBackend) -> Self {
-        Self {
-            kind: OperationKind::SystemUpgrade,
-            packages: Vec::new(),
-            backend,
-            options: OperationOptions::default(),
-        }
-    }
-
     pub fn sync_databases(backend: PackageBackend) -> Self {
         Self {
             kind: OperationKind::SyncDatabases,
@@ -83,10 +74,6 @@ impl Operation {
         }
     }
 
-    pub fn with_options(mut self, options: OperationOptions) -> Self {
-        self.options = options;
-        self
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -145,14 +132,6 @@ impl OperationResult {
         }
     }
 
-    pub fn is_success(&self) -> bool {
-        self.status == OperationStatus::Completed
-    }
-
-    pub fn with_warning(mut self, warning: impl Into<String>) -> Self {
-        self.warnings.push(warning.into());
-        self
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,17 +158,4 @@ impl OperationProgress {
         }
     }
 
-    pub fn download_percent(&self) -> u8 {
-        if self.total_bytes == 0 {
-            return 100;
-        }
-        ((self.downloaded_bytes as f64 / self.total_bytes as f64) * 100.0) as u8
-    }
-
-    pub fn package_percent(&self) -> u8 {
-        if self.total_packages == 0 {
-            return 100;
-        }
-        ((self.completed_packages as f64 / self.total_packages as f64) * 100.0) as u8
-    }
 }

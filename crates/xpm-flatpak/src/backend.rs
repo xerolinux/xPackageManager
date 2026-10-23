@@ -5,28 +5,38 @@ use tracing::{info, warn};
 use xpm_core::{
     error::{Error, Result},
     operation::{Operation, OperationKind, OperationResult},
-    package::{Package, PackageBackend, PackageInfo, PackageStatus, SearchResult, UpdateInfo, Version},
+    package::{
+        Package, PackageBackend, PackageInfo, PackageStatus, SearchResult, UpdateInfo, UpdateKind,
+        Version,
+    },
     source::{PackageSource, ProgressCallback},
 };
 
-/// Returns true for invisible platform runtimes/themes that users don't install directly.
-/// Excludes: freedesktop/gnome/kde platform runtimes, gtk themes, kde styles, wine internals.
-fn is_platform_runtime(name: &str) -> bool {
-    const PLATFORM_PREFIXES: &[&str] = &[
-        "org.freedesktop.Platform",
-        "org.gnome.Platform",
-        "org.kde.Platform",
-        "org.gtk.Gtk3theme.",
-        "org.gtk.Gtk4theme.",
-        "org.kde.KStyle.",
-        "org.winehq.Wine.gecko",
-        "org.winehq.Wine.mono",
-        "com.valvesoftware.Steam.CompatibilityTool.",
-        "org.freedesktop.Sdk",
-        "org.gnome.Sdk",
-        "org.kde.Sdk",
-    ];
-    PLATFORM_PREFIXES.iter().any(|p| name.starts_with(p) || name == *p)
+fn update_kind(kind: RefKind, name: &str) -> UpdateKind {
+    if kind != RefKind::Runtime {
+        return UpdateKind::Package;
+    }
+    let segs: Vec<&str> = name.split('.').collect();
+    let has = |s: &str| segs.contains(&s);
+    let last = segs.last().copied().unwrap_or_default();
+    let lower = name.to_ascii_lowercase();
+    if has("Plugin") {
+        UpdateKind::Plugin
+    } else if matches!(last, "Platform" | "Sdk") {
+        UpdateKind::Runtime
+    } else if has("Locale") {
+        UpdateKind::Locale
+    } else if has("Gtk3theme") || has("Gtk4theme") || has("KStyle") || has("IconTheme") {
+        UpdateKind::Theme
+    } else if segs.iter().any(|s| matches!(*s, "GL" | "GL32" | "VAAPI" | "Vulkan")) {
+        UpdateKind::Drivers
+    } else if lower.contains("codecs") || lower.contains("ffmpeg") || lower.contains("openh264") {
+        UpdateKind::Codec
+    } else if has("Extension") || has("VulkanLayer") {
+        UpdateKind::Extension
+    } else {
+        UpdateKind::Dependency
+    }
 }
 
 pub struct FlatpakBackend {
@@ -53,95 +63,6 @@ impl FlatpakBackend {
             .map_err(|e| Error::BackendUnavailable(format!("System installation: {}", e)))
     }
 
-    pub async fn list_available(&self) -> Result<Vec<Package>> {
-        tokio::task::spawn_blocking(|| {
-            let mut packages = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-
-            let installations: Vec<Installation> = [
-                Self::get_user_installation().ok(),
-                Self::get_system_installation().ok(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-
-            let mut installed_names = std::collections::HashSet::new();
-            for installation in &installations {
-                if let Ok(refs) = installation.list_installed_refs(gio::Cancellable::NONE) {
-                    for iref in refs {
-                        if let Some(name) = iref.name() {
-                            installed_names.insert(name.to_string());
-                        }
-                    }
-                }
-            }
-
-            for installation in &installations {
-                let remotes = match installation.list_remotes(gio::Cancellable::NONE) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-
-                for remote in remotes {
-                    let remote_name = match remote.name() {
-                        Some(n) => n.to_string(),
-                        None => continue,
-                    };
-
-                    let refs = match installation.list_remote_refs_sync(&remote_name, gio::Cancellable::NONE) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            warn!("Failed to list refs from {}: {}", remote_name, e);
-                            continue;
-                        }
-                    };
-
-                    for rref in refs {
-                        if rref.kind() != RefKind::App {
-                            continue;
-                        }
-
-                        let name = match rref.name() {
-                            Some(n) => n.to_string(),
-                            None => continue,
-                        };
-
-                        if seen.contains(&name) {
-                            continue;
-                        }
-                        seen.insert(name.clone());
-
-                        let branch = rref.branch().map(|s| s.to_string()).unwrap_or_else(|| "stable".to_string());
-                        let is_installed = installed_names.contains(&name);
-
-                        let display_name = name.split('.').next_back().unwrap_or(&name).to_string();
-
-                        let status = if is_installed {
-                            PackageStatus::Installed
-                        } else {
-                            PackageStatus::Available
-                        };
-
-                        packages.push(Package::new(
-                            name,
-                            Version::new(&branch),
-                            display_name,
-                            PackageBackend::Flatpak,
-                            status,
-                            remote_name.clone(),
-                        ));
-                    }
-                }
-            }
-
-            packages.sort_by_key(|a| a.description.to_lowercase());
-
-            Ok(packages)
-        })
-        .await
-        .map_err(|e| Error::Other(e.to_string()))?
-    }
 }
 
 #[async_trait]
@@ -328,9 +249,10 @@ impl PackageSource for FlatpakBackend {
 
                 for iref in refs {
                     let name = iref.name().map(|s| s.to_string()).unwrap_or_default();
-                    if name.is_empty() || is_platform_runtime(&name) {
+                    if name.is_empty() {
                         continue;
                     }
+                    let kind = update_kind(iref.kind(), &name);
                     let current = iref
                         .appdata_version()
                         .or_else(|| iref.branch())
@@ -345,6 +267,7 @@ impl PackageSource for FlatpakBackend {
                         backend: PackageBackend::Flatpak,
                         repository: origin,
                         download_size: iref.installed_size(),
+                        kind,
                     });
                 }
             }
@@ -510,5 +433,36 @@ impl PackageSource for FlatpakBackend {
 
     async fn list_orphans(&self) -> Result<Vec<Package>> {
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rt(name: &str) -> UpdateKind {
+        update_kind(RefKind::Runtime, name)
+    }
+
+    #[test]
+    fn classifies_update_kinds() {
+        assert_eq!(update_kind(RefKind::App, "org.gimp.GIMP"), UpdateKind::Package);
+        assert_eq!(rt("org.gnome.Platform"), UpdateKind::Runtime);
+        assert_eq!(rt("org.freedesktop.Sdk"), UpdateKind::Runtime);
+        assert_eq!(rt("com.obsproject.Studio.Plugin.ColorMonitor"), UpdateKind::Plugin);
+        assert_eq!(rt("org.gimp.GIMP.Plugin.GMic"), UpdateKind::Plugin);
+        assert_eq!(rt("org.gtk.Gtk3theme.Breeze"), UpdateKind::Theme);
+        assert_eq!(rt("org.kde.KStyle.Adwaita"), UpdateKind::Theme);
+        assert_eq!(rt("org.freedesktop.Platform.GL.default"), UpdateKind::Drivers);
+        assert_eq!(rt("org.freedesktop.Platform.GL32.nvidia-570-144"), UpdateKind::Drivers);
+        assert_eq!(rt("org.freedesktop.Platform.VAAPI.Intel"), UpdateKind::Drivers);
+        assert_eq!(rt("org.gnome.Platform.Locale"), UpdateKind::Locale);
+        assert_eq!(rt("org.freedesktop.Platform.codecs-extra"), UpdateKind::Codec);
+        assert_eq!(rt("org.freedesktop.Platform.ffmpeg-full"), UpdateKind::Codec);
+        assert_eq!(rt("org.freedesktop.Platform.openh264"), UpdateKind::Codec);
+        assert_eq!(rt("org.freedesktop.Platform.VulkanLayer.MangoHud"), UpdateKind::Extension);
+        assert_eq!(rt("org.freedesktop.Sdk.Extension.rust-stable"), UpdateKind::Extension);
+        assert_eq!(rt("org.freedesktop.Platform.Compat.i386"), UpdateKind::Dependency);
+        assert_eq!(rt("org.winehq.Wine.mono"), UpdateKind::Dependency);
     }
 }

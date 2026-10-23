@@ -104,3 +104,53 @@ pub fn sanitize_name(raw: &str) -> String {
     let slug = slug.trim_matches('-').to_string();
     if slug.is_empty() { "appimage".to_string() } else { slug }
 }
+
+/// Tokens that mark where the version / platform suffix of a release file name starts.
+const SUFFIX_TOKENS: &[&str] = &[
+    "linux", "x86_64", "x86", "x64", "amd64", "aarch64", "arm64", "armhf", "armv7l", "i386", "i686",
+    "appimage", "universal", "portable", "gnu",
+];
+
+fn looks_like_version(token: &str) -> bool {
+    let t = token.trim_start_matches(['v', 'V']);
+    t.starts_with(|c: char| c.is_ascii_digit())
+        && (t.contains('.') || t.len() < token.len())
+        && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '~'))
+}
+
+/// Stable, version-free id for an app: `photocraft-0.7.0-linux-x86_64.AppImage` -> `photocraft`.
+/// The first token is always kept, so names like `7zip` survive.
+pub fn app_slug(raw: &str) -> String {
+    let slug = sanitize_name(raw);
+    let mut offset = 0;
+    for (i, token) in slug.split(['-', '_']).enumerate() {
+        if i > 0 && (SUFFIX_TOKENS.contains(&token.to_ascii_lowercase().as_str()) || looks_like_version(token)) {
+            return slug[..offset].trim_end_matches(['-', '_', '.']).to_string();
+        }
+        offset += token.len() + 1;
+    }
+    slug
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_version_and_platform_suffixes() {
+        assert_eq!(app_slug("photocraft-0.7.0-linux-x86_64.appimage"), "photocraft");
+        assert_eq!(app_slug("Bitwarden-2024.1.0-x86_64.AppImage"), "Bitwarden");
+        assert_eq!(app_slug("cool-retro-term-2.0"), "cool-retro-term");
+        assert_eq!(app_slug("nrwl-angular-console-v1.2.3"), "nrwl-angular-console");
+        assert_eq!(app_slug("MyApp_1.4_amd64.AppImage"), "MyApp");
+    }
+
+    #[test]
+    fn keeps_names_without_version_suffix() {
+        assert_eq!(app_slug("NFSMW-Launcher.AppImage"), "NFSMW-Launcher");
+        assert_eq!(app_slug("7zip-gui"), "7zip-gui");
+        assert_eq!(app_slug("2048"), "2048");
+        assert_eq!(app_slug("mkv-extractor-gui"), "mkv-extractor-gui");
+        assert_eq!(app_slug("---"), "appimage");
+    }
+}

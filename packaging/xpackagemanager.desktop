@@ -9,5 +9,5 @@ Type=Application
 StartupWMClass=xpackagemanager
 Categories=System;PackageManager;
 Keywords=package;manager;pacman;flatpak;install;update;
-MimeType=application/x-alpm-package;application/zstd;
+MimeType=application/x-alpm-package;application/zstd;application/vnd.flatpak;application/vnd.flatpak.ref;application/vnd.flatpak.repo;
 StartupNotify=true

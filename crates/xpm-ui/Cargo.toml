@@ -16,6 +16,7 @@ xpm-alpm.workspace = true
 xpm-flatpak.workspace = true
 xpm-appimage.workspace = true
 slint.workspace = true
+i-slint-core = "=1.18.1"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

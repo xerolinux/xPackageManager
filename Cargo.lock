@@ -5917,6 +5917,7 @@ name = "xpm-ui"
 version = "0.7.0"
 dependencies = [
  "flate2",
+ "i-slint-core",
  "image",
  "jxl-oxide",
  "libc",

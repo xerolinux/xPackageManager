@@ -31,14 +31,35 @@ use xml::XmlEvents;
 
 slint::include_modules!();
 
-fn instance_lock_path() -> String {
+fn instance_path(ext: &str) -> String {
     let uid = unsafe { libc::getuid() };
-    format!("/tmp/xpackagemanager-{}.lock", uid)
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    format!("{dir}/xpackagemanager-{uid}.{ext}")
+}
+
+fn instance_lock_path() -> String {
+    instance_path("lock")
 }
 
 fn instance_socket_path() -> String {
-    let uid = unsafe { libc::getuid() };
-    format!("/tmp/xpackagemanager-{}.sock", uid)
+    instance_path("sock")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlatpakFile {
+    Install,
+    Repo,
+}
+
+fn flatpak_file_kind(path: &str) -> Option<FlatpakFile> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".flatpak") || lower.ends_with(".flatpakref") {
+        Some(FlatpakFile::Install)
+    } else if lower.ends_with(".flatpakrepo") {
+        Some(FlatpakFile::Repo)
+    } else {
+        None
+    }
 }
 
 fn is_chaotic_aur_enabled() -> bool {
@@ -59,27 +80,58 @@ fn acquire_instance_lock() -> Option<std::fs::File> {
     if ret == 0 { Some(file) } else { None }
 }
 
-fn signal_existing_instance() {
+fn signal_existing_instance(file: Option<&str>) {
     use std::io::Write;
     if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(instance_socket_path()) {
-        let _ = stream.write_all(b"show");
+        let _ = write!(stream, "show\n{}", file.unwrap_or(""));
+    }
+}
+
+fn notify_updates_once(window: &MainWindow, notified: &std::cell::Cell<bool>) {
+    let total = window.get_total_update_count();
+    if notified.get() || total <= 0 || !window.get_setting_notify_on_updates() {
+        return;
+    }
+    notified.set(true);
+    thread::spawn(move || {
+        let msg = format!("{} update{} available", total, if total == 1 { "" } else { "s" });
+        let _ = std::process::Command::new("notify-send")
+            .args(["--app-name=xpm", "--icon=system-software-update", "xPackageManager", &msg])
+            .status();
+    });
+}
+
+fn activate_window(window: &MainWindow) {
+    use i_slint_core::window::WindowInner;
+    let adapter = WindowInner::from_pub(window.window()).window_adapter();
+    if let Some(internal) = adapter.internal(i_slint_core::InternalToken) {
+        let _ = internal.bring_to_front();
     }
 }
 
 fn listen_for_instance_signals(window: slint::Weak<MainWindow>) {
+    use std::io::Read;
     let path = instance_socket_path();
     let _ = std::fs::remove_file(&path);
     if let Ok(listener) = std::os::unix::net::UnixListener::bind(&path) {
         thread::spawn(move || {
-            for stream in listener.incoming() {
-                if stream.is_ok() {
-                    let win = window.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(w) = win.upgrade() {
-                            w.show().ok();
+            for mut stream in listener.incoming().flatten() {
+                let mut msg = String::new();
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let _ = (&mut stream).take(4096).read_to_string(&mut msg);
+                let file = msg.lines().nth(1).map(str::to_string)
+                    .filter(|p| Path::new(p).is_absolute() && flatpak_file_kind(p).is_some() && Path::new(p).is_file());
+                let win = window.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(w) = win.upgrade() {
+                        w.window().set_minimized(false);
+                        w.show().ok();
+                        activate_window(&w);
+                        if let Some(path) = file {
+                            w.invoke_open_flatpak_file(SharedString::from(path.as_str()));
                         }
-                    }).ok();
-                }
+                    }
+                }).ok();
             }
         });
     }
@@ -115,7 +167,6 @@ enum UiMessage {
         flatpak_updates: Vec<PackageData>,
         flatpak: Vec<PackageData>,
         stats: StatsData,
-        flatpak_update_count: i32,
     },
     SearchResults(Vec<PackageData>),
     SetLoading(bool),
@@ -953,10 +1004,10 @@ fn filter_catalog(
     (cards, total)
 }
 
-/// Open a native file chooser for an AppImage. Tries kdialog, falls back to zenity.
-fn pick_appimage_file() -> Option<String> {
+/// Open a native file chooser. Tries kdialog, falls back to zenity.
+fn pick_file(title: &str, kdialog_filter: &str, zenity_filter: &str) -> Option<String> {
     let out = std::process::Command::new("kdialog")
-        .args(["--getopenfilename", ".", "AppImage (*.AppImage *.appimage)"])
+        .args(["--getopenfilename", ".", kdialog_filter])
         .output();
     if let Ok(o) = out
         && o.status.success() {
@@ -968,8 +1019,8 @@ fn pick_appimage_file() -> Option<String> {
     let out = std::process::Command::new("zenity")
         .args([
             "--file-selection",
-            "--title=Select AppImage",
-            "--file-filter=AppImage | *.AppImage *.appimage",
+            &format!("--title={title}"),
+            &format!("--file-filter={zenity_filter}"),
         ])
         .output();
     if let Ok(o) = out
@@ -980,6 +1031,22 @@ fn pick_appimage_file() -> Option<String> {
             }
         }
     None
+}
+
+fn pick_appimage_file() -> Option<String> {
+    pick_file(
+        "Select AppImage",
+        "AppImage (*.AppImage *.appimage)",
+        "AppImage | *.AppImage *.appimage",
+    )
+}
+
+fn pick_flatpak_file() -> Option<String> {
+    pick_file(
+        "Select Flatpak file",
+        "Flatpak (*.flatpak *.flatpakref *.flatpakrepo)",
+        "Flatpak | *.flatpak *.flatpakref *.flatpakrepo",
+    )
 }
 
 /// Open a native folder chooser. Tries kdialog, falls back to zenity.
@@ -1572,6 +1639,77 @@ fn run_update_all(
     reporter.finish(success);
 }
 
+struct RepoFile {
+    name: String,
+    title: String,
+    url: String,
+}
+
+fn parse_flatpakrepo(path: &str) -> Option<RepoFile> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let field = |key: &str| {
+        text.lines().find_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            (k.trim() == key).then(|| v.trim().to_string())
+        })
+    };
+    let url = field("Url")?;
+    let stem = Path::new(path).file_stem()?.to_string_lossy();
+    let name: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' })
+        .collect();
+    if name.is_empty() {
+        return None;
+    }
+    let title = field("Title").unwrap_or_else(|| name.clone());
+    Some(RepoFile { name, title, url })
+}
+
+fn run_flatpak_file(
+    window: &slint::Weak<MainWindow>,
+    tx: &mpsc::Sender<UiMessage>,
+    path: &str,
+    input: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    pid: &Arc<Mutex<Option<u32>>>,
+    ctx: &ConflictCtx,
+) {
+    let file_name = Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match flatpak_file_kind(path) {
+        Some(FlatpakFile::Install) => {
+            let title = format!("Installing {file_name}");
+            run_managed_operation(tx, &title, "install-file", &[path.to_string()], 1, input, pid, ctx);
+            let weak = window.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = weak.upgrade() {
+                    w.invoke_refresh();
+                }
+            });
+        }
+        Some(FlatpakFile::Repo) => {
+            let Some(repo) = parse_flatpakrepo(path) else {
+                let reporter = OpReporter::start(tx, &format!("Adding {file_name}"), Mode { cancellable: false }, 1);
+                reporter.feeder().line("Error: not a valid .flatpakrepo file (missing Url)");
+                reporter.finish(false);
+                return;
+            };
+            let title = format!("Adding remote {}", repo.title);
+            let names = [repo.name.clone(), path.to_string(), repo.url.clone()];
+            run_managed_operation(tx, &title, "add-remote-file", &names, 1, input, pid, ctx);
+            let _ = tx.send(UiMessage::FlatpakRemotesLoaded(fetch_flatpak_remotes()));
+            save_xpm_remotes();
+            let _ = std::fs::remove_file(remote_cache_path(&repo.name));
+            let weak = window.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = weak.upgrade() {
+                    w.invoke_load_flatpak_remotes();
+                }
+            });
+        }
+        None => {}
+    }
+}
+
 fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String, Vec<String>) {
     match (action, backend) {
         ("install", 1) | ("bulk-install", 1) => {
@@ -1582,6 +1720,16 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
                 args.extend(names.iter().cloned());
                 args
             })
+        }
+        ("install-file", 1) => {
+            ("flatpak".to_string(), vec!["install".to_string(), names[0].clone()])
+        }
+        ("add-remote-file", 1) => {
+            const ADD_REMOTE: &str = r#"printf 'Add Flatpak remote "%s" (%s)? [Y/n] ' "$1" "$3"; read -r a; case "$a" in ""|y|Y|yes|Yes) flatpak remote-add --user --if-not-exists "$1" "$2" ;; *) echo Cancelled; exit 1 ;; esac"#;
+            ("sh".to_string(), vec![
+                "-c".to_string(), ADD_REMOTE.to_string(), "sh".to_string(),
+                names[0].clone(), names[1].clone(), names[2].clone(),
+            ])
         }
         ("remove", 1) | ("bulk-remove", 1) => {
             ("flatpak".to_string(), {
@@ -2642,6 +2790,11 @@ fn main() {
     let local_package_path = args.iter().skip(1)
         .find(|arg| is_arch_package(arg.as_str()))
         .cloned();
+    let flatpak_file_arg = args.iter().skip(1)
+        .find(|arg| flatpak_file_kind(arg.as_str()).is_some())
+        .and_then(|arg| std::fs::canonicalize(arg).ok())
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned());
 
     if let Some(ref path) = local_package_path {
         info!("Opening local package: {}", path);
@@ -2651,7 +2804,7 @@ fn main() {
         Some(f) => f,
         None => {
             info!("Another instance is already running - bringing it to foreground");
-            signal_existing_instance();
+            signal_existing_instance(flatpak_file_arg.as_deref());
             return;
         }
     };
@@ -2767,13 +2920,13 @@ fn main() {
 
     if let Some(cache) = load_package_cache() {
         let installed: Vec<PackageData> = cache.installed.iter().map(cached_to_pkg).collect();
-        let updates: Vec<PackageData> = cache.updates.iter().map(cached_to_pkg).collect();
+        let (flatpak_updates, updates): (Vec<PackageData>, Vec<PackageData>) =
+            cache.updates.iter().map(cached_to_pkg).partition(|p| p.backend == 1);
         let flatpak: Vec<PackageData> = cache.flatpak.iter().map(cached_to_pkg).collect();
         let stats = StatsData {
             pacman_count: cache.pacman_count,
             flatpak_count: cache.flatpak_count,
             orphan_count: cache.orphan_count,
-            update_count: cache.update_count,
             cache_size: SharedString::from(cache.cache_size.as_str()),
         };
         let page_size_early = 50usize;
@@ -2782,6 +2935,7 @@ fn main() {
         window.set_installed_packages(ModelRc::new(VecModel::from(page)));
         window.set_total_pages(total);
         window.set_update_packages(ModelRc::new(VecModel::from(updates)));
+        window.set_flatpak_update_packages(ModelRc::new(VecModel::from(flatpak_updates)));
         window.set_flatpak_packages(ModelRc::new(VecModel::from(flatpak)));
         window.set_stats(stats);
     }
@@ -2812,6 +2966,10 @@ fn main() {
     let flatpak_ids_timer = flatpak_installed_ids.clone();
     let flatpak_store_timer = flatpak_app_store.clone();
     let notified_updates = Rc::new(std::cell::Cell::new(false));
+    let awaiting_appimage_check = Rc::new(std::cell::Cell::new(false));
+    let awaiting_appimage_check_dispatch = awaiting_appimage_check.clone();
+    let awaiting_appimage_check_init = awaiting_appimage_check.clone();
+    let notified_updates_dispatch = notified_updates.clone();
     let cat_dispatch = appimage_catalog.clone();
     let updates_dispatch = appimage_updates.clone();
     let icon_index_dispatch = icon_index.clone();
@@ -2825,7 +2983,7 @@ fn main() {
 
             while let Ok(msg) = rx_clone.borrow_mut().try_recv() {
                 match msg {
-                    UiMessage::PackagesLoaded { installed, updates, flatpak_updates, flatpak, stats, flatpak_update_count } => {
+                    UiMessage::PackagesLoaded { installed, updates, flatpak_updates, flatpak, stats } => {
                         *full_installed_timer.borrow_mut() = installed;
                         let ps = page_size as usize;
                         let inst = full_installed_timer.borrow();
@@ -2838,27 +2996,14 @@ fn main() {
                         window.set_update_packages(ModelRc::new(VecModel::from(updates)));
                         window.set_flatpak_update_packages(ModelRc::new(VecModel::from(flatpak_updates)));
                         window.set_flatpak_packages(ModelRc::new(VecModel::from(flatpak)));
-                        window.set_flatpak_update_count(flatpak_update_count);
                         window.set_stats(stats);
                         let full_for_grp: Vec<PackageData> = full_installed_timer.borrow().clone();
                         let grouped = group_installed_by_repo(full_for_grp);
                         *full_installed_grouped_timer.borrow_mut() = grouped.clone();
                         window.set_installed_grouped(ModelRc::new(VecModel::from(grouped)));
                         window.set_loading(false);
-                        let update_count = window.get_stats().update_count;
-                        let fp_count = window.get_flatpak_update_count();
-                        if !notified_updates.get()
-                            && window.get_setting_notify_on_updates()
-                            && (update_count > 0 || fp_count > 0)
-                        {
-                            notified_updates.set(true);
-                            let total = (update_count + fp_count) as u32;
-                            thread::spawn(move || {
-                                let msg = format!("{} update{} available", total, if total == 1 { "" } else { "s" });
-                                let _ = std::process::Command::new("notify-send")
-                                    .args(["--app-name=xpm", "--icon=system-software-update", "xPackageManager", &msg])
-                                    .status();
-                            });
+                        if !awaiting_appimage_check.get() {
+                            notify_updates_once(&window, &notified_updates);
                         }
                     }
                     UiMessage::SearchResults(results) => {
@@ -3264,6 +3409,7 @@ fn main() {
                         )));
                     }
                     UiMessage::AppImageUpdatesChecked(names) => {
+                        let first_check = awaiting_appimage_check_dispatch.replace(false);
                         *updates_dispatch.borrow_mut() = names.into_iter().collect();
                         let updates = updates_dispatch.borrow();
                         let model = window.get_installed_appimages();
@@ -3278,6 +3424,9 @@ fn main() {
                         window.set_appimage_update_packages(ModelRc::new(VecModel::from(
                             build_appimage_update_rows(&ai_entries_dispatch.borrow(), &updates),
                         )));
+                        if first_check && !window.get_loading() {
+                            notify_updates_once(&window, &notified_updates_dispatch);
+                        }
                     }
                     UiMessage::AppImageCatalogReady => {
                         let page = window.get_appimage_page().max(0) as usize;
@@ -3369,6 +3518,7 @@ fn main() {
 
     let config = load_config();
     let check_updates_on_start = config.check_updates_on_start;
+    awaiting_appimage_check_init.set(check_updates_on_start && config.appimage_enabled);
 
     let _ = tx.send(UiMessage::SysInfoLoaded(load_sys_info()));
     let _ = tx.send(UiMessage::ActivityLoaded(load_recent_activity()));
@@ -4676,6 +4826,32 @@ fn main() {
             }
         });
     });
+
+    let (tx_fp_file, input_fp_file, pid_fp_file, ctx_fp_file) =
+        (tx.clone(), terminal_input_sender.clone(), terminal_child_pid.clone(), conflict_context.clone());
+    window.on_install_flatpak_file({
+        let weak = window.as_weak();
+        let (tx, input, pid, ctx) = (tx_fp_file.clone(), input_fp_file.clone(), pid_fp_file.clone(), ctx_fp_file.clone());
+        move || {
+            let (weak, tx, input, pid, ctx) = (weak.clone(), tx.clone(), input.clone(), pid.clone(), ctx.clone());
+            thread::spawn(move || {
+                let Some(path) = pick_flatpak_file() else { return };
+                run_flatpak_file(&weak, &tx, &path, &input, &pid, &ctx);
+            });
+        }
+    });
+    window.on_open_flatpak_file({
+        let weak = window.as_weak();
+        move |path| {
+            let (weak, tx, input, pid, ctx) =
+                (weak.clone(), tx_fp_file.clone(), input_fp_file.clone(), pid_fp_file.clone(), ctx_fp_file.clone());
+            let path = path.to_string();
+            thread::spawn(move || run_flatpak_file(&weak, &tx, &path, &input, &pid, &ctx));
+        }
+    });
+    if let Some(path) = flatpak_file_arg.as_deref() {
+        window.invoke_open_flatpak_file(SharedString::from(path));
+    }
 
     let tx_ai_file = tx.clone();
     let dir_ai_file = appimage_dir_state.clone();
@@ -6328,6 +6504,7 @@ fn main() {
     if config.appimage_enabled {
         let tx_ai_init = tx.clone();
         thread::spawn(move || {
+            xpm_appimage::tidy::tidy_store();
             if let Ok(backend) = AppImageBackend::new() {
                 let entries = backend.list_entries();
                 info!("AppImage startup preload: {} installed", entries.len());
@@ -6393,9 +6570,18 @@ fn main() {
     info!("Running application");
     window.show().expect("Failed to show window");
 
-    // Focus on launch is handled natively: the .desktop sets StartupNotify=true +
-    // StartupWMClass=xpackagemanager, so the compositor hands the xdg-activation
-    // token to our window (no KWin scripting, which triggered window effects).
+    // The .desktop sets StartupNotify=true + StartupWMClass=xpackagemanager so the
+    // compositor hands the xdg-activation token to our window (no KWin scripting,
+    // which triggered window effects). The delayed activate covers launches where
+    // the first activation lands before the surface is configured.
+    let focus_weak = window.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(300), move || {
+        if let Some(w) = focus_weak.upgrade()
+            && !w.window().is_minimized()
+        {
+            activate_window(&w);
+        }
+    });
     slint::run_event_loop_until_quit().expect("Failed to run application");
     std::process::exit(0);
 }
@@ -6478,6 +6664,7 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
                                  backend: xpm_core::package::PackageBackend::Pacman,
                                  repository: String::new(),
                                  download_size: 0,
+                                 kind: xpm_core::package::UpdateKind::Package,
                     });
                 } else if parts.len() >= 2 {
                     updates.push(xpm_core::package::UpdateInfo {
@@ -6487,6 +6674,7 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
                                  backend: xpm_core::package::PackageBackend::Pacman,
                                  repository: String::new(),
                                  download_size: 0,
+                                 kind: xpm_core::package::UpdateKind::Package,
                     });
                 }
             }
@@ -6538,8 +6726,6 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
     })
     .collect();
 
-    let total_updates = updates.len() + flatpak_updates.len() + plasmoid_updates.len();
-    let flatpak_update_count = flatpak_updates.len() as i32;
 
     let flatpak_name_map: std::collections::HashMap<String, String> = flatpak_packages
         .iter()
@@ -6556,20 +6742,28 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
 
     let flatpak_updates_ui: Vec<PackageData> = flatpak_updates.iter()
         .map(|u| {
-            let display_name = flatpak_name_map
-                .get(&u.name)
-                .cloned()
-                .unwrap_or_else(|| {
-                    u.name.split('.').next_back().unwrap_or(&u.name)
-                        .replace(['_', '-'], " ")
-                });
-            let ver_str = format!("{} → {}", u.current_version, u.new_version);
+            let display_name = if u.kind == xpm_core::package::UpdateKind::Package {
+                flatpak_name_map
+                    .get(&u.name)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        u.name.split('.').next_back().unwrap_or(&u.name)
+                            .replace(['_', '-'], " ")
+                    })
+            } else {
+                u.name.clone()
+            };
+            let ver_str = if u.current_version == u.new_version {
+                format!("{} (new build)", u.current_version)
+            } else {
+                format!("{} → {}", u.current_version, u.new_version)
+            };
             PackageData {
                 name: SharedString::from(u.name.as_str()),
                 display_name: SharedString::from(display_name.as_str()),
                 version: SharedString::from(ver_str.as_str()),
-                description: SharedString::from(ver_str.as_str()),
-                repository: SharedString::from("flatpak"),
+                description: SharedString::default(),
+                repository: SharedString::from(u.kind.label()),
                 backend: 1,
                 installed: true,
                 has_update: true,
@@ -6597,7 +6791,6 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
         pacman_count: installed_pacman.len() as i32,
         flatpak_count: flatpak_real_count,
         orphan_count: orphan_count as i32,
-        update_count: total_updates as i32,
         cache_size: SharedString::from(format_size(cache_size)),
     };
 
@@ -6611,7 +6804,6 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>, check_updates: bool) 
         flatpak_updates: flatpak_updates_ui,
         flatpak: flatpak_ui,
         stats,
-        flatpak_update_count,
     });
 }
 
@@ -6939,7 +7131,6 @@ struct PackageCache {
     pacman_count: i32,
     flatpak_count: i32,
     orphan_count: i32,
-    update_count: i32,
     cache_size: String,
 }
 
@@ -6998,7 +7189,6 @@ fn save_package_cache(installed: &[PackageData], updates: &[PackageData], flatpa
         pacman_count: stats.pacman_count,
         flatpak_count: stats.flatpak_count,
         orphan_count: stats.orphan_count,
-        update_count: stats.update_count,
         cache_size: stats.cache_size.to_string(),
     };
     let path = pkg_cache_path();
@@ -7367,5 +7557,33 @@ mod update_plan_tests {
         let flatpak_only = update_script(false, true).unwrap();
         assert!(!flatpak_only.contains("pacman"));
         assert!(flatpak_only.contains("pkexec flatpak update --system"));
+    }
+}
+
+#[cfg(test)]
+mod flatpak_file_tests {
+    use super::*;
+
+    #[test]
+    fn detects_flatpak_file_kinds() {
+        assert!(flatpak_file_kind("/a/b.flatpak") == Some(FlatpakFile::Install));
+        assert!(flatpak_file_kind("/a/b.FlatpakRef") == Some(FlatpakFile::Install));
+        assert!(flatpak_file_kind("/a/b.flatpakrepo") == Some(FlatpakFile::Repo));
+        assert!(flatpak_file_kind("/a/b.AppImage").is_none());
+    }
+
+    #[test]
+    fn parses_flatpakrepo() {
+        let dir = std::env::temp_dir().join(format!("xpm-repo-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("my repo.flatpakrepo");
+        std::fs::write(&path, "[Flatpak Repo]\nTitle=My Repo\nUrl=https://example.org/repo/\n").unwrap();
+        let repo = parse_flatpakrepo(path.to_str().unwrap()).unwrap();
+        assert_eq!(repo.name, "my-repo");
+        assert_eq!(repo.title, "My Repo");
+        assert_eq!(repo.url, "https://example.org/repo/");
+        std::fs::write(&path, "[Flatpak Repo]\nTitle=No Url\n").unwrap();
+        assert!(parse_flatpakrepo(path.to_str().unwrap()).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -53,13 +53,15 @@ impl AppImageBackend {
         let store = self.install_dir.clone();
         std::fs::create_dir_all(&store)?;
 
+        let file_name = if Self::is_url(source) {
+            source.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download.AppImage")
+        } else {
+            Path::new(source).file_name().and_then(|f| f.to_str()).unwrap_or("app.AppImage")
+        };
+        let name = manifest::app_slug(file_name);
+        let dest = store.join(format!("{name}.AppImage"));
+
         let (staged, source_url): (PathBuf, Option<String>) = if Self::is_url(source) {
-            let file_name = source
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("download.AppImage");
-            let dest = store.join(manifest::sanitize_name(file_name)).with_extension("AppImage");
             log(&format!("Downloading {}\n", source));
             download(source, &dest, log)?;
             (dest, Some(source.to_string()))
@@ -68,17 +70,12 @@ impl AppImageBackend {
             if !src.exists() {
                 return Err(Error::Other(format!("File not found: {}", source)));
             }
-            let file_name = src.file_name().and_then(|f| f.to_str()).unwrap_or("app.AppImage");
-            let dest = store.join(file_name);
             log(&format!("Copying {}\n", source));
             std::fs::copy(src, &dest)?;
             (dest, Some(source.to_string()))
         };
 
         chmod_exec(&staged)?;
-
-        let raw_name = staged.file_name().and_then(|f| f.to_str()).unwrap_or("appimage");
-        let name = manifest::sanitize_name(raw_name);
 
         log("Checking update support…\n");
         let update_info = elf::read_upd_info(&staged);
@@ -90,7 +87,7 @@ impl AppImageBackend {
         }
 
         log("Integrating into application menu…\n");
-        let integ = integration::integrate(&staged, &name, raw_name.trim_end_matches(".AppImage"));
+        let integ = integration::integrate(&staged, &name, &name);
 
         let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
         let entry = AppImageEntry {
@@ -145,6 +142,7 @@ impl AppImageBackend {
         if let Err(e) = std::fs::remove_file(&entry.path) {
             warn!("appimage: failed to remove binary {}: {}", entry.path, e);
         }
+        crate::tidy::remove_update_backup(Path::new(&entry.path));
         integration::deintegrate(&entry.icon_path, &entry.desktop_path);
         manifest::save(&entries).map_err(Error::IoError)?;
         log("Removed.\n");
@@ -225,6 +223,7 @@ impl AppImageBackend {
             ));
         }
 
+        crate::tidy::remove_update_backup(&path);
         let integ = integration::integrate(&path, &entry.name, &entry.display_name);
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(entry.size);
         let updated = AppImageEntry {
@@ -496,20 +495,23 @@ fn which(cmd: &str) -> Option<PathBuf> {
 }
 
 /// Download `url` to `dest` using curl, streaming curl's stderr progress to `log`.
+/// Written to a `.part` file first so a failed download never destroys an installed app.
 fn download(url: &str, dest: &Path, log: &LogFn<'_>) -> Result<()> {
     if which("curl").is_none() {
         return Err(Error::Other("curl is required to download AppImages".to_string()));
     }
+    let part = PathBuf::from(format!("{}.part", dest.display()));
     let status = Command::new("curl")
         .args(["-fL", "--retry", "2", "-o"])
-        .arg(dest)
+        .arg(&part)
         .arg(url)
         .status()
         .map_err(|e| Error::NetworkError(e.to_string()))?;
     if !status.success() {
-        let _ = std::fs::remove_file(dest);
+        let _ = std::fs::remove_file(&part);
         return Err(Error::NetworkError(format!("Download failed: {}", url)));
     }
+    std::fs::rename(&part, dest)?;
     log("Download complete.\n");
     Ok(())
 }

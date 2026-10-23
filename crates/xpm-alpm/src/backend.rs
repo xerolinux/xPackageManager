@@ -8,7 +8,7 @@ use xpm_core::{
     operation::{Operation, OperationKind, OperationResult},
     package::{
         InstallReason, Package, PackageBackend, PackageInfo, PackageStatus, SearchResult,
-        UpdateInfo, Version,
+        UpdateInfo, UpdateKind, Version,
     },
     source::{PackageSource, ProgressCallback},
 };
@@ -289,6 +289,7 @@ impl PackageSource for AlpmBackend {
                                 backend: PackageBackend::Pacman,
                                 repository: db.name().to_string(),
                                 download_size: sync_pkg.download_size() as u64,
+                                kind: UpdateKind::Package,
                             });
                             break;
                         }

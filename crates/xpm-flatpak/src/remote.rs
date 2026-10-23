@@ -70,45 +70,6 @@ impl RemoteManager {
         Ok(())
     }
 
-    pub fn set_remote_enabled(
-        &self,
-        installation: &Installation,
-        name: &str,
-        enabled: bool,
-    ) -> Result<()> {
-        let remotes = installation
-            .list_remotes(gio::Cancellable::NONE)
-            .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-        for remote in remotes {
-            let remote_name = remote.name().map(|s| s.to_string());
-            if remote_name.as_deref() == Some(name) {
-                remote.set_disabled(!enabled);
-
-                installation
-                    .modify_remote(&remote, gio::Cancellable::NONE)
-                    .map_err(|e| Error::TransactionError(e.to_string()))?;
-
-                info!(
-                    "Flatpak remote {} {}",
-                    name,
-                    if enabled { "enabled" } else { "disabled" }
-                );
-                return Ok(());
-            }
-        }
-
-        Err(Error::Other(format!("Remote not found: {}", name)))
-    }
-
-    pub fn update_remote(&self, installation: &Installation, name: &str) -> Result<()> {
-        installation
-            .update_remote_sync(name, gio::Cancellable::NONE)
-            .map_err(|e| Error::NetworkError(e.to_string()))?;
-
-        debug!("Updated remote metadata: {}", name);
-        Ok(())
-    }
 }
 
 impl Default for RemoteManager {
