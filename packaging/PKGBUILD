@@ -6,7 +6,7 @@
 # versions - never the AUR), then builds this. Clean with: ./build.sh --clean
 pkgname=xpm-gui
 pkgver=0.7.0
-pkgrel=1
+pkgrel=2
 pkgdesc="A modern package manager for Arch Linux supporting pacman, Flatpak and AppImage"
 arch=('x86_64')
 url="https://github.com/xerolinux/xPackageManager"

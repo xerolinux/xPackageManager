@@ -1,5 +1,5 @@
 use libflatpak::{gio, prelude::*, Installation, Remote};
-use tracing::{debug, info};
+use tracing::info;
 use xpm_core::error::{Error, Result};
 
 #[derive(Debug, Clone)]
