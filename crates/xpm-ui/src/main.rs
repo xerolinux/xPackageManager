@@ -1004,33 +1004,25 @@ fn filter_catalog(
     (cards, total)
 }
 
-/// Open a native file chooser. Tries kdialog, falls back to zenity.
-fn pick_file(title: &str, kdialog_filter: &str, zenity_filter: &str) -> Option<String> {
+/// Run kdialog, or zenity only if kdialog is not installed; a cancelled kdialog must not open a second dialog.
+fn run_picker(kdialog_args: &[&str], zenity_args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("kdialog")
-        .args(["--getopenfilename", ".", kdialog_filter])
-        .output();
-    if let Ok(o) = out
-        && o.status.success() {
-            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(p);
-            }
-        }
-    let out = std::process::Command::new("zenity")
-        .args([
-            "--file-selection",
-            &format!("--title={title}"),
-            &format!("--file-filter={zenity_filter}"),
-        ])
-        .output();
-    if let Ok(o) = out
-        && o.status.success() {
-            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(p);
-            }
-        }
-    None
+        .args(kdialog_args)
+        .output()
+        .or_else(|_| std::process::Command::new("zenity").args(zenity_args).output())
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+fn pick_file(title: &str, kdialog_filter: &str, zenity_filter: &str) -> Option<String> {
+    run_picker(
+        &["--getopenfilename", ".", kdialog_filter],
+        &["--file-selection", &format!("--title={title}"), &format!("--file-filter={zenity_filter}")],
+    )
 }
 
 fn pick_appimage_file() -> Option<String> {
@@ -1052,27 +1044,10 @@ fn pick_flatpak_file() -> Option<String> {
 /// Open a native folder chooser. Tries kdialog, falls back to zenity.
 fn pick_directory() -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let out = std::process::Command::new("kdialog")
-        .args(["--getexistingdirectory", &home])
-        .output();
-    if let Ok(o) = out
-        && o.status.success() {
-            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(p);
-            }
-        }
-    let out = std::process::Command::new("zenity")
-        .args(["--file-selection", "--directory", "--title=Select AppImage folder"])
-        .output();
-    if let Ok(o) = out
-        && o.status.success() {
-            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(p);
-            }
-        }
-    None
+    run_picker(
+        &["--getexistingdirectory", &home],
+        &["--file-selection", "--directory", "--title=Select AppImage folder"],
+    )
 }
 
 /// Run an AppImage operation on the calling (background) thread, streaming log

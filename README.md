@@ -29,6 +29,14 @@ cd packaging && ./build.sh
 
 ## Changelog
 
+### v0.7.1
+
+- Install `.flatpak` and `.flatpakref` files and add `.flatpakrepo` remotes from the Flatpaks page or by opening the file.
+- Flatpak runtime, plugin, theme, driver, codec and locale updates now show with tags.
+- Update notification, sidebar pill and Updates page always agree on the total.
+- Fixed Flatpak updates appearing mid-page and a file picker opening twice.
+- More reliable focus on launch.
+
 ### v0.7.0
 
 - One progress dialog for pacman, Flatpak and AppImage, with Yes/No confirmations.
