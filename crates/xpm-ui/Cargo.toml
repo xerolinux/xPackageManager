@@ -29,6 +29,7 @@ jxl-oxide = { version = "0.12", default-features = false }
 quick-xml = "0.42"
 libc = "0.2"
 sys-locale = "0.3"
+avt = "0.19.0"
 
 [build-dependencies]
 slint-build = "=1.18.1"

@@ -1,10 +1,20 @@
 use crate::UiMessage;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+static TERM_COLS: AtomicUsize = AtomicUsize::new(80);
+
+/// Width of the details log in monospace cells; the PTY and the emulator follow it so no line is cut off.
+pub(crate) fn term_cols() -> usize {
+    TERM_COLS.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_term_cols(cols: usize) {
+    TERM_COLS.store(cols.clamp(20, 400), Ordering::Relaxed);
+}
 
 pub(crate) fn request_cancel() {
     CANCEL_REQUESTED.store(true, Ordering::SeqCst);
@@ -95,110 +105,97 @@ fn strip_ansi(input: &str) -> String {
     result
 }
 
+const TERM_ROWS: usize = 40;
+const TERM_SCROLLBACK: usize = 4_000;
+
+/// Terminal emulator behind the details log: cursor movement, line erasing and carriage
+/// returns are interpreted, so the text matches what a real terminal would show.
 struct TermStream {
-    lines: Vec<String>,
-    current: String,
-    pending_cr: bool,
-    in_csi: bool,
-    in_osc: bool,
-    osc_st: bool,
+    term: avt::Terminal,
 }
 
 impl TermStream {
     fn new() -> Self {
-        Self { lines: Vec::new(), current: String::new(), pending_cr: false, in_csi: false, in_osc: false, osc_st: false }
+        let term = avt::Terminal::with_scrollback(term_cols(), TERM_ROWS, Some(TERM_SCROLLBACK))
+            .expect("terminal size is non-zero");
+        Self { term }
     }
 
     fn process(&mut self, bytes: &[u8]) {
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-
-            if self.in_csi {
-                if (0x40..=0x7e).contains(&b) { self.in_csi = false; }
-                i += 1;
-                continue;
-            }
-            if self.osc_st {
-                self.osc_st = false;
-                if b == b'\\' {
-                    i += 1;
-                    continue;
-                }
-            }
-            if self.in_osc {
-                if b == 0x07 { self.in_osc = false; }
-                if b == 0x1b { self.in_osc = false; self.osc_st = true; }
-                i += 1;
-                continue;
-            }
-
-            if self.pending_cr {
-                self.pending_cr = false;
-                if b == 0x0a {
-                    self.lines.push(std::mem::take(&mut self.current));
-                    i += 1;
-                    continue;
-                }
-                self.current.clear();
-            }
-
-            match b {
-                0x1b => {
-                    i += 1;
-                    if i < bytes.len() {
-                        match bytes[i] {
-                            b'[' => { self.in_csi = true; i += 1; }
-                            b']' => { self.in_osc = true; i += 1; }
-                            b'(' | b')' | b'*' | b'+' => { i += 2; }
-                            _ => { i += 1; }
-                        }
-                    }
-                }
-                0x0d => { self.pending_cr = true; i += 1; }
-                0x0a => { self.lines.push(std::mem::take(&mut self.current)); i += 1; }
-                0x08 => { self.current.pop(); i += 1; }
-                0x00..=0x07 | 0x0b | 0x0c | 0x0e..=0x1a | 0x1c..=0x1f | 0x7f => { i += 1; }
-                _ => {
-                    let char_len = match b {
-                        0x00..=0x7f => 1usize,
-                        0xc0..=0xdf => 2,
-                        0xe0..=0xef => 3,
-                        0xf0..=0xf7 => 4,
-                        _ => 1,
-                    };
-                    let end = (i + char_len).min(bytes.len());
-                    if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
-                        self.current.push_str(s);
-                    }
-                    i += (end - i).max(1);
-                }
-            }
+        let cols = term_cols();
+        if self.term.size().0 != cols {
+            self.term.resize(cols, TERM_ROWS);
         }
+        self.term.feed(String::from_utf8_lossy(bytes).as_ref());
     }
 
-    fn render(&self) -> String {
-        let mut parts: Vec<&str> = self.lines.iter().map(String::as_str).collect();
-        if !self.current.is_empty() {
-            parts.push(self.current.as_str());
+    /// Visible and scrollback rows as styled runs; every row fits the terminal width.
+    fn lines(&self) -> Vec<StyledLine> {
+        let mut rows: Vec<StyledLine> = self.term.screen().all_lines().map(row_to_runs).collect();
+        while rows.last().is_some_and(|r| r.iter().all(|run| run.text.trim().is_empty())) {
+            rows.pop();
         }
-        while parts.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
-            parts.pop();
-        }
-        if parts.is_empty() {
-            return String::new();
-        }
-        let mut out = String::with_capacity(parts.iter().map(|s| s.len() + 1).sum::<usize>() + 1);
-        let mut prev_blank = false;
-        for line in &parts {
-            let is_blank = line.trim().is_empty();
-            if is_blank && prev_blank { continue; }
-            prev_blank = is_blank;
-            out.push_str(line);
-            out.push('\n');
-        }
-        normalize_typographic(&out)
+        rows
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StyledRun {
+    pub text: String,
+    /// ANSI palette index 0..=15, or -1 for the default colour.
+    pub ansi: i32,
+    pub rgb: Option<(u8, u8, u8)>,
+    pub bold: bool,
+    pub faint: bool,
+}
+
+pub(crate) type StyledLine = Vec<StyledRun>;
+
+fn palette_256(i: u8) -> (u8, u8, u8) {
+    const STEP: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    match i {
+        16..=231 => {
+            let n = i - 16;
+            (STEP[(n / 36) as usize], STEP[((n / 6) % 6) as usize], STEP[(n % 6) as usize])
+        }
+        _ => {
+            let v = 8 + (i - 232) * 10;
+            (v, v, v)
+        }
+    }
+}
+
+fn row_to_runs(line: &avt::Line) -> StyledLine {
+    let mut runs: StyledLine = Vec::new();
+    for cell in line.cells() {
+        if cell.width() == 0 {
+            continue;
+        }
+        let pen = cell.pen();
+        let (ansi, rgb) = match pen.foreground() {
+            None => (-1, None),
+            Some(avt::Color::Indexed(i)) if i < 16 => (i as i32, None),
+            Some(avt::Color::Indexed(i)) => (-1, Some(palette_256(i))),
+            Some(avt::Color::RGB(c)) => (-1, Some((c.r, c.g, c.b))),
+        };
+        let (bold, faint) = (pen.is_bold(), pen.is_faint());
+        let ch = cell.char();
+        match runs.last_mut() {
+            Some(r) if r.ansi == ansi && r.rgb == rgb && r.bold == bold && r.faint == faint => r.text.push(ch),
+            _ => runs.push(StyledRun { text: ch.to_string(), ansi, rgb, bold, faint }),
+        }
+    }
+    if let Some(last) = runs.last_mut() {
+        let trimmed = last.text.trim_end().len();
+        last.text.truncate(trimmed);
+    }
+    while runs.last().is_some_and(|r| r.text.is_empty()) {
+        runs.pop();
+    }
+    for r in &mut runs {
+        r.text = normalize_typographic(&r.text);
+    }
+    runs
 }
 
 fn classify_log_level(lower: &str) -> u8 {
@@ -289,6 +286,10 @@ fn detect_phase(lower: &str, raw: &str, _total_packages: usize) -> Option<(&'sta
 
 /// Detects interactive prompts and sends the appropriate UI messages.
 /// Returns true if the output should be force-flushed to the UI immediately.
+fn is_proceed_prompt(cleaned: &str) -> bool {
+    cleaned.contains("Proceed with installation? [Y/n]") || cleaned.contains("Proceed with download? [Y/n]")
+}
+
 fn handle_pty_prompt(cleaned: &str, tx: &mpsc::Sender<UiMessage>) -> bool {
     let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]")
         || cleaned.contains("[Y|n]") || cleaned.contains("[y|n]");
@@ -385,7 +386,407 @@ fn detect_generic_phase(lower: &str, raw: &str) -> Option<(&'static str, i32)> {
     None
 }
 
+pub(crate) const PACMAN_PHASES: [&str; 6] = ["Sync", "Resolve", "Download", "Verify", "Install", "Hooks"];
+
+fn pacman_phase(lower: &str, active: usize) -> Option<usize> {
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    if has(&["post-transaction"]) {
+        Some(5)
+    } else if parse_action(lower.trim()).is_some() {
+        Some(4)
+    } else if has(&["checking keys", "checking keyring", "checking integrity", "checking package integrity", "loading package files", "checking for file conflicts", "checking available disk space", "pre-transaction"]) {
+        Some(3)
+    } else if has(&["retrieving packages", "total download size"]) || (active >= 1 && has(&["mib/s", "kib/s"])) {
+        Some(2)
+    } else if has(&["resolving dependencies", "looking for conflicting"]) {
+        Some(1)
+    } else if has(&["synchronizing package databases"]) {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+/// Moves the pacman stage indicator forward as output lines arrive.
+#[derive(Default)]
+struct PhaseTracker {
+    enabled: bool,
+    line: String,
+    active: usize,
+    saw_sync: bool,
+}
+
+impl PhaseTracker {
+    /// True while pacman is refreshing its databases (their transfer lines are not package downloads).
+    fn syncing(&self) -> bool {
+        self.saw_sync && self.active == 0
+    }
+
+    fn feed(&mut self, text: &str, tx: &mpsc::Sender<UiMessage>) {
+        for ch in text.chars() {
+            match ch {
+                '\n' | '\r' => {
+                    self.check(tx);
+                    self.line.clear();
+                }
+                c => self.line.push(c),
+            }
+        }
+        self.check(tx);
+    }
+
+    fn check(&mut self, tx: &mpsc::Sender<UiMessage>) {
+        let Some(p) = pacman_phase(&self.line.to_lowercase(), self.active) else { return };
+        self.saw_sync |= p == 0;
+        if p > self.active {
+            self.active = p;
+            if self.enabled {
+                let _ = tx.send(UiMessage::ProgressPhase(p));
+            }
+        }
+    }
+}
+
+pub(crate) struct RowInfo {
+    pub name: String,
+    pub tag: &'static str,
+    pub detail: String,
+}
+
+/// Follows pacman output and reports one progress row per package.
+#[derive(Default)]
+struct PacmanRows {
+    /// Text of the current output line, and the part after its latest carriage return.
+    first: String,
+    last: String,
+    seen_cr: bool,
+    scan: Scan,
+    pending: Vec<RowInfo>,
+    /// Absolute row index of the first planned package, and package names in plan order.
+    base: usize,
+    names: Vec<String>,
+    active: Option<usize>,
+    last_pct: i32,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum Scan {
+    #[default]
+    Idle,
+    Table,
+    List,
+}
+
+fn package_name_from_nvr(token: &str) -> String {
+    let mut parts = token.rsplitn(3, '-');
+    let (_rel, _ver, name) = (parts.next(), parts.next(), parts.next());
+    name.unwrap_or(token).to_string()
+}
+
+fn parse_action(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix('(')?;
+    let (counter, rest) = rest.split_once(") ")?;
+    let (k, n) = counter.split_once('/')?;
+    k.parse::<u32>().ok()?;
+    n.parse::<u32>().ok()?;
+    let mut it = rest.split_whitespace();
+    let verb = it.next()?;
+    matches!(verb, "upgrading" | "installing" | "removing" | "reinstalling" | "downgrading").then_some(())?;
+    Some((verb, it.next()?))
+}
+
+impl PacmanRows {
+    fn feed(&mut self, text: &str, rows: &mut RowSink<'_>) {
+        for ch in text.chars() {
+            match ch {
+                '\n' => {
+                    let line = std::mem::take(&mut self.first);
+                    self.last.clear();
+                    self.seen_cr = false;
+                    self.finish_line(&line, rows);
+                }
+                '\r' => {
+                    let line = self.first.clone();
+                    self.track_progress(&line, rows);
+                    self.seen_cr = true;
+                }
+                c => {
+                    if self.seen_cr {
+                        self.seen_cr = false;
+                        self.last.clear();
+                    }
+                    self.first.push(c);
+                    self.last.push(c);
+                }
+            }
+        }
+        let line = self.first.clone();
+        self.track_progress(&line, rows);
+    }
+
+    fn finish_line(&mut self, line: &str, rows: &mut RowSink<'_>) {
+        let trimmed = line.trim();
+        if self.scan != Scan::Idle {
+            if trimmed.is_empty() {
+                if !(self.scan == Scan::Table && self.pending.is_empty()) {
+                    self.flush_plan(rows);
+                }
+            } else if self.scan == Scan::Table {
+                let mut cols = trimmed.split_whitespace();
+                if let Some(first) = cols.next() {
+                    let name = first.rsplit('/').next().unwrap_or(first).to_string();
+                    let vers: Vec<&str> = cols.take(2).collect();
+                    let detail = match vers.as_slice() {
+                        [old, new] if new.chars().any(|c| c.is_ascii_digit()) => format!("{old} \u{2192} {new}"),
+                        [one] => (*one).to_string(),
+                        _ => String::new(),
+                    };
+                    self.pending.push(RowInfo { name, tag: "", detail });
+                }
+            } else {
+                for tok in trimmed.split_whitespace() {
+                    self.pending.push(RowInfo { name: package_name_from_nvr(tok), tag: "", detail: String::new() });
+                }
+            }
+            return;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Packages (").or_else(|| trimmed.strip_prefix("Package (")) {
+            self.pending.clear();
+            if let Some((_, tail)) = rest.split_once(')') {
+                if tail.contains("Old Version") {
+                    self.scan = Scan::Table;
+                } else {
+                    self.scan = Scan::List;
+                    for tok in tail.split_whitespace() {
+                        self.pending.push(RowInfo { name: package_name_from_nvr(tok), tag: "", detail: String::new() });
+                    }
+                }
+            }
+            return;
+        }
+        if let Some((_, name)) = parse_action(trimmed) {
+            self.activate(name, rows);
+        }
+    }
+
+    fn flush_plan(&mut self, rows: &mut RowSink<'_>) {
+        self.scan = Scan::Idle;
+        if self.pending.is_empty() {
+            return;
+        }
+        self.names = self.pending.iter().map(|r| r.name.clone()).collect();
+        self.base = rows.append(std::mem::take(&mut self.pending));
+        self.active = None;
+    }
+
+    fn activate(&mut self, name: &str, rows: &mut RowSink<'_>) {
+        let Some(i) = self.names.iter().position(|n| n == name) else { return };
+        if self.active == Some(i) {
+            return;
+        }
+        if let Some(prev) = self.active {
+            rows.state(self.base + prev, 2, 100);
+        }
+        self.active = Some(i);
+        self.last_pct = 0;
+        rows.state(self.base + i, 1, 0);
+    }
+
+    fn track_progress(&mut self, line: &str, rows: &mut RowSink<'_>) {
+        let Some((_, name)) = parse_action(line.trim()) else { return };
+        self.activate(name, rows);
+        if let Some(i) = self.active
+            && let Some(p) = extract_inline_percent(&self.last)
+            && p != self.last_pct
+        {
+            self.last_pct = p;
+            rows.state(self.base + i, 1, p);
+        }
+    }
+
+    fn complete(&mut self, rows: &mut RowSink<'_>) {
+        for i in 0..self.names.len() {
+            rows.state(self.base + i, 2, 100);
+        }
+    }
+}
+
+/// Where tracked rows go: the UI channel plus a running count so rows from several stages stack.
+struct RowSink<'a> {
+    tx: &'a mpsc::Sender<UiMessage>,
+    len: &'a mut usize,
+}
+
+impl RowSink<'_> {
+    fn append(&mut self, rows: Vec<RowInfo>) -> usize {
+        let first = *self.len;
+        *self.len += rows.len();
+        let _ = self.tx.send(UiMessage::ProgressRowsAppend { first, rows });
+        first
+    }
+
+    fn state(&self, index: usize, state: i32, percent: i32) {
+        let _ = self.tx.send(UiMessage::ProgressRowState { index, state, percent });
+    }
+}
+
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) struct Counts {
+    pub upgraded: i32,
+    pub installed: i32,
+    pub removed: i32,
+}
+
+impl Counts {
+    fn add(&mut self, o: Counts) {
+        self.upgraded += o.upgraded;
+        self.installed += o.installed;
+        self.removed += o.removed;
+    }
+
+    fn total(&self) -> i32 {
+        self.upgraded + self.installed + self.removed
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Format {
+    Flatpak,
+    AppImage,
+}
+
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) struct Summary {
+    pub native: Counts,
+    pub flatpak: Counts,
+    pub appimage: Counts,
+    pub warnings: i32,
+}
+
+/// One result pill: `kind` 0 upgraded, 1 installed, 2 removed, 3 warnings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SummaryTile {
+    pub label: String,
+    pub count: i32,
+    pub kind: i32,
+}
+
+impl Summary {
+    fn add(&mut self, o: Summary) {
+        self.native.add(o.native);
+        self.flatpak.add(o.flatpak);
+        self.appimage.add(o.appimage);
+        self.warnings += o.warnings;
+    }
+
+    fn counts_mut(&mut self, format: Format) -> &mut Counts {
+        match format {
+            Format::Flatpak => &mut self.flatpak,
+            Format::AppImage => &mut self.appimage,
+        }
+    }
+
+    fn changed(&self) -> i32 {
+        self.native.total() + self.flatpak.total() + self.appimage.total()
+    }
+
+    /// One pill per package format and kind of change, plus one for serious warnings.
+    fn tiles(&self) -> Vec<SummaryTile> {
+        let mut tiles = Vec::new();
+        for (name, c) in [("Native", self.native), ("Flatpak", self.flatpak), ("AppImage", self.appimage)] {
+            for (verb, count, kind) in [("upgraded", c.upgraded, 0), ("installed", c.installed, 1), ("removed", c.removed, 2)] {
+                if count > 0 {
+                    tiles.push(SummaryTile { label: format!("{name} {verb}"), count, kind });
+                }
+            }
+        }
+        if self.warnings > 0 {
+            tiles.push(SummaryTile { label: "Warnings".to_string(), count: self.warnings, kind: 3 });
+        }
+        tiles
+    }
+}
+
+/// Warnings worth interrupting the user for; routine ones (.pacnew files, reinstalls) stay in the log.
+fn is_important_warning(line: &str) -> bool {
+    const SERIOUS: [&str; 11] = [
+        "failed", "corrupt", "invalid", "could not", "cannot", "unable", "conflict", "signature", "keyring",
+        "no space", "end-of-life",
+    ];
+    let lower = line.to_lowercase();
+    SERIOUS.iter().any(|w| lower.contains(w))
+}
+
+/// Counts what a finished pacman or flatpak run changed, from its output.
+fn summarize(output: &str) -> Summary {
+    let mut sum = Summary::default();
+    let mut seen = std::collections::HashSet::new();
+    for seg in output.split(['\n', '\r']) {
+        let line = seg.trim();
+        if let Some(rest) = line.strip_prefix('(')
+            && let Some((counter, action)) = rest.split_once(") ")
+            && counter.split_once('/').is_some_and(|(k, n)| k.parse::<u32>().is_ok() && n.parse::<u32>().is_ok())
+        {
+            let verb = action.split_whitespace().next().unwrap_or_default();
+            if seen.insert(format!("{counter} {verb}")) {
+                match verb {
+                    "upgrading" | "downgrading" => sum.native.upgraded += 1,
+                    "installing" | "reinstalling" => sum.native.installed += 1,
+                    "removing" => sum.native.removed += 1,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        let mut cols = line.split_whitespace();
+        if cols.next().is_some_and(|c| c.ends_with('.') && c[..c.len() - 1].parse::<u32>().is_ok()) {
+            let op = line.split_whitespace().nth(3);
+            if seen.insert(format!("flatpak {line}")) {
+                match op {
+                    Some("u") => sum.flatpak.upgraded += 1,
+                    Some("i") => sum.flatpak.installed += 1,
+                    Some("r") => sum.flatpak.removed += 1,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if line.starts_with("warning:") && is_important_warning(line) && seen.insert(line.to_string()) {
+            sum.warnings += 1;
+        }
+    }
+    sum
+}
+
+/// Length of the prefix of `buf` that ends on a character and escape-sequence boundary.
+/// PTY reads can cut a multibyte character or an escape sequence in half.
+fn complete_len(buf: &[u8]) -> usize {
+    let n = buf.len();
+    let mut end = n;
+    for back in 1..=3.min(n) {
+        let b = buf[n - back];
+        if b & 0xc0 == 0x80 { continue; }
+        let need = match b { 0xc0..=0xdf => 2, 0xe0..=0xef => 3, 0xf0..=0xf7 => 4, _ => 1 };
+        if need > back { end = n - back; }
+        break;
+    }
+    const MAX_ESC: usize = 256;
+    if let Some(pos) = buf[..end].iter().rposition(|&b| b == 0x1b).filter(|&p| end - p < MAX_ESC) {
+        let seq = &buf[pos + 1..end];
+        let open = match seq.first() {
+            None => true,
+            Some(b'[') => !seq[1..].iter().any(|b| (0x40..=0x7e).contains(b)),
+            Some(b']') => !(seq.contains(&0x07) || seq.windows(2).any(|w| w == [0x1b, b'\\'])),
+            Some(b'(' | b')' | b'*' | b'+') => seq.len() < 2,
+            Some(_) => false,
+        };
+        if open { end = pos; }
+    }
+    end
+}
+
 struct Inner {
+    carry: Vec<u8>,
     stream: TermStream,
     percent: i32,
     lo: i32,
@@ -393,6 +794,16 @@ struct Inner {
     first_error: Option<String>,
     dirty: bool,
     captured: String,
+    extra: Summary,
+    rows_len: usize,
+    pacman_rows: PacmanRows,
+    /// Row that mirrors the overall percent (single-item backends such as AppImage).
+    single_row: Option<usize>,
+    percent_hook: Option<Arc<dyn Fn(i32) + Send + Sync>>,
+    phases: PhaseTracker,
+    /// Answer pacman's "Proceed with installation?" automatically (the user already said yes globally).
+    auto_yes: bool,
+    input: Option<Arc<Mutex<Option<mpsc::Sender<String>>>>>,
 }
 
 impl Inner {
@@ -416,7 +827,7 @@ pub(crate) struct Feeder {
 
 fn flush(tx: &mpsc::Sender<UiMessage>, inner: &mut Inner) {
     if inner.dirty {
-        let _ = tx.send(UiMessage::ProgressOutput(inner.stream.render()));
+        let _ = tx.send(UiMessage::ProgressLines(inner.stream.lines()));
         inner.dirty = false;
     }
 }
@@ -424,12 +835,32 @@ fn flush(tx: &mpsc::Sender<UiMessage>, inner: &mut Inner) {
 impl Feeder {
     /// Process one chunk of raw output; returns the cleaned text.
     pub(crate) fn feed(&self, bytes: &[u8]) -> String {
+        let mut inner = self.inner.lock().unwrap();
+        let mut data = std::mem::take(&mut inner.carry);
+        data.extend_from_slice(bytes);
+        let end = complete_len(&data);
+        inner.carry = data.split_off(end);
+        let bytes = data.as_slice();
+
         let text = String::from_utf8_lossy(bytes);
         let cleaned = normalize_typographic(&strip_ansi(&text));
-        let force_flush = handle_pty_prompt(&cleaned, &self.tx);
+        let force_flush = if inner.auto_yes && is_proceed_prompt(&cleaned) {
+            if let Some(input) = &inner.input
+                && let Some(sender) = input.lock().unwrap().as_ref()
+            {
+                let _ = sender.send("y".to_string());
+            }
+            false
+        } else {
+            handle_pty_prompt(&cleaned, &self.tx)
+        };
 
-        let mut inner = self.inner.lock().unwrap();
         inner.stream.process(bytes);
+        {
+            let Inner { pacman_rows, rows_len, .. } = &mut *inner;
+            pacman_rows.feed(&cleaned, &mut RowSink { tx: &self.tx, len: rows_len });
+        }
+        inner.phases.feed(&cleaned, &self.tx);
         if inner.captured.len() < CAPTURE_LIMIT {
             inner.captured.push_str(&cleaned);
         }
@@ -441,11 +872,20 @@ impl Feeder {
             let phase = parse_flatpak_progress(line)
                 .or_else(|| detect_phase(&lower, line, self.total_packages))
                 .or_else(|| detect_generic_phase(&lower, line));
-            if let Some((label, pct)) = phase {
+            if let Some((mut label, pct)) = phase {
+                if label == "Downloading packages..." && inner.phases.syncing() {
+                    label = "Synchronizing databases...";
+                }
                 if pct > inner.percent {
                     inner.percent = pct.min(100);
                 }
                 let _ = self.tx.send(UiMessage::OperationProgress(inner.mapped(), label.to_string()));
+                if let Some(hook) = &inner.percent_hook {
+                    hook(inner.mapped());
+                }
+                if let Some(row) = inner.single_row {
+                    let _ = self.tx.send(UiMessage::ProgressRowState { index: row, state: 1, percent: inner.percent });
+                }
             }
         }
         inner.dirty = true;
@@ -455,8 +895,62 @@ impl Feeder {
         cleaned
     }
 
+    /// Appends a line the way a PTY would deliver it (`\r\n`), so the emulator returns to column 0.
     pub(crate) fn line(&self, text: &str) {
-        self.feed(format!("{text}\n").as_bytes());
+        self.feed(format!("{}\r\n", text.replace('\n', "\r\n")).as_bytes());
+    }
+
+    pub(crate) fn report(&self, percent: i32, stage: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.percent = inner.percent.max(percent.clamp(0, 100));
+        let _ = self.tx.send(UiMessage::OperationProgress(inner.mapped(), stage.to_string()));
+    }
+
+    /// Appends progress rows; returns the absolute index of the first one.
+    pub(crate) fn rows_append(&self, rows: Vec<RowInfo>) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        RowSink { tx: &self.tx, len: &mut inner.rows_len }.append(rows)
+    }
+
+    pub(crate) fn set_auto_yes(&self, on: bool) {
+        self.inner.lock().unwrap().auto_yes = on;
+    }
+
+    pub(crate) fn bind_input(&self, input: Arc<Mutex<Option<mpsc::Sender<String>>>>) {
+        self.inner.lock().unwrap().input = Some(input);
+    }
+
+    /// Shows the pacman stage indicator (sync, resolve, download, verify, install, hooks).
+    pub(crate) fn enable_phases(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.phases.enabled = true;
+        inner.phases.active = 0;
+        let _ = self.tx.send(UiMessage::ProgressPhases(PACMAN_PHASES.iter().map(|p| p.to_string()).collect()));
+    }
+
+    /// Calls `hook` with the overall percent whenever it advances.
+    pub(crate) fn on_percent(&self, hook: impl Fn(i32) + Send + Sync + 'static) {
+        self.inner.lock().unwrap().percent_hook = Some(Arc::new(hook));
+    }
+
+    pub(crate) fn lines(&self) -> Vec<StyledLine> {
+        self.inner.lock().unwrap().stream.lines()
+    }
+
+    /// Makes `index` follow the percent parsed from the output until the next call.
+    pub(crate) fn track_single(&self, index: Option<usize>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.single_row = index;
+        inner.percent = 0;
+    }
+
+    pub(crate) fn row_state(&self, index: usize, state: i32, percent: i32) {
+        let _ = self.tx.send(UiMessage::ProgressRowState { index, state, percent });
+    }
+
+    /// Counts from a typed backend, added to whatever is parsed from the output.
+    pub(crate) fn add_summary(&self, format: Format, counts: Counts) {
+        self.inner.lock().unwrap().extra.counts_mut(format).add(counts);
     }
 
     /// Restrict reported percent to `lo..=hi` and restart the raw counter (multi-stage operations).
@@ -486,9 +980,9 @@ impl OpReporter {
         CANCEL_REQUESTED.store(false, Ordering::SeqCst);
         let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
         let _ = tx.send(UiMessage::ProgressMode { cancellable: mode.cancellable });
-        let _ = tx.send(UiMessage::ProgressAutoExpand);
 
         let inner = Arc::new(Mutex::new(Inner {
+            carry: Vec::new(),
             stream: TermStream::new(),
             percent: 0,
             lo: 0,
@@ -496,6 +990,14 @@ impl OpReporter {
             first_error: None,
             dirty: false,
             captured: String::new(),
+            extra: Summary::default(),
+            rows_len: 0,
+            pacman_rows: PacmanRows::default(),
+            single_row: None,
+            percent_hook: None,
+            phases: PhaseTracker::default(),
+            auto_yes: false,
+            input: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let flusher = {
@@ -533,6 +1035,23 @@ impl OpReporter {
 
     pub(crate) fn finish(mut self, success: bool) {
         self.settle();
+        if success {
+            if self.feeder.inner.lock().unwrap().phases.enabled {
+                let _ = self.feeder.tx.send(UiMessage::ProgressPhase(PACMAN_PHASES.len()));
+            }
+            {
+                let mut inner = self.feeder.inner.lock().unwrap();
+                let Inner { pacman_rows, rows_len, .. } = &mut *inner;
+                pacman_rows.complete(&mut RowSink { tx: &self.feeder.tx, len: rows_len });
+            }
+            let inner = self.feeder.inner.lock().unwrap();
+            let mut sum = summarize(&inner.captured);
+            sum.add(inner.extra);
+            drop(inner);
+            if sum.changed() > 0 {
+                let _ = self.feeder.tx.send(UiMessage::ProgressSummary(sum.tiles()));
+            }
+        }
         if !success {
             if let Some(err) = self.feeder.inner.lock().unwrap().first_error.clone() {
                 let _ = self.feeder.tx.send(UiMessage::ProgressErrorSummary(err));
@@ -560,6 +1079,7 @@ pub(crate) fn run_pty(
     use std::io::{Read, Write};
     use std::os::unix::io::FromRawFd;
 
+    feeder.bind_input(input_sender.clone());
     let (master_fd, child_pid) = crate::spawn_in_pty(cmd, args)?;
     *pid_holder.lock().unwrap() = Some(child_pid);
 
@@ -572,7 +1092,13 @@ pub(crate) fn run_pty(
         thread::spawn(move || {
             let mut file = unsafe { std::fs::File::from_raw_fd(master_fd) };
             let mut buf = [0u8; 4096];
+            let mut cols = term_cols();
             loop {
+                if term_cols() != cols {
+                    cols = term_cols();
+                    let ws = libc::winsize { ws_col: cols as u16, ws_row: crate::PTY_ROWS, ws_xpixel: 0, ws_ypixel: 0 };
+                    unsafe { libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws); }
+                }
                 let ready = unsafe {
                     let mut pfd = libc::pollfd { fd: master_fd, events: libc::POLLIN, revents: 0 };
                     libc::poll(&mut pfd as *mut libc::pollfd, 1, 20)
@@ -662,14 +1188,14 @@ mod tests {
     fn osc_progress_sequences_leave_no_stray_characters() {
         let mut stream = TermStream::new();
         stream.process(b"\rInstalling\xe2\x80\xa6  50%\x1b]9;4;1;50\x1b\\\x1b[6n\r\n");
-        assert_eq!(stream.render().trim(), "Installing...  50%");
+        assert_eq!(plain(&stream.lines()).trim(), "Installing...  50%");
     }
 
     #[test]
     fn flatpak_bar_redraws_collapse_to_one_log_line() {
         let mut stream = TermStream::new();
         stream.process("Looking for matches\u{2026}\r\n\rInstalling\u{2026}   10%\rInstalling\u{2026}   55%\r\n".as_bytes());
-        let text = stream.render();
+        let text = plain(&stream.lines());
         assert!(text.contains("55%") && !text.contains("10%"), "{text:?}");
     }
 
@@ -726,6 +1252,192 @@ mod tests {
         assert!(matches!(msgs[0], UiMessage::ProgressPromptButtons));
         assert!(matches!(&msgs[1], UiMessage::ProgressPrompt(t) if t == ":: Replace foo with bar? [Y/n]"));
     }
+
+    fn plain(lines: &[StyledLine]) -> String {
+        lines.iter().map(|l| l.iter().map(|r| r.text.as_str()).collect::<String>() + "\n").collect()
+    }
+
+    fn rendered(chunks: &[&[u8]]) -> String {
+        let (tx, rx) = mpsc::channel();
+        let rep = OpReporter::start(&tx, "t", Mode { cancellable: false }, 1);
+        for c in chunks {
+            rep.feeder().feed(c);
+        }
+        let captured = rep.captured();
+        rep.finish(true);
+        let out = rx
+            .try_iter()
+            .filter_map(|m| match m {
+                UiMessage::ProgressLines(l) => Some(plain(&l)),
+                _ => None,
+            })
+            .last()
+            .unwrap_or_default();
+        assert!(!captured.contains('\u{fffd}'), "captured has replacement chars: {captured:?}");
+        out
+    }
+
+    #[test]
+    fn multibyte_char_split_across_reads_survives() {
+        let bar = "\u{2588}\u{2588}\u{258c}".as_bytes();
+        let out = rendered(&[&bar[..1], &bar[1..4], &bar[4..], b" ok\n"]);
+        assert_eq!(out.trim(), "\u{2588}\u{2588}\u{258c} ok");
+    }
+
+    #[test]
+    fn escape_sequence_split_across_reads_leaves_no_stray_text() {
+        let out = rendered(&[b"\x1b", b"[1;32mgreen\x1b[0", b"m done\n"]);
+        assert_eq!(out.trim(), "green done");
+    }
+
+    #[test]
+    fn osc_split_across_reads_leaves_no_stray_text() {
+        let out = rendered(&[b"a\x1b]9;4;1;5", b"0\x1b", b"\\b\n"]);
+        assert_eq!(out.trim(), "ab");
+    }
+
+    #[test]
+    fn terminal_emulation_handles_cursor_movement_and_erase() {
+        let mut stream = TermStream::new();
+        stream.process(b"\x1b[?25l:: Synchronizing...\r\n core  50%\rcore 100%\x1b[K\r\n");
+        stream.process(b"xerolinux is up to date\r\n:: Starting\r\n");
+        stream.process(b"old line\r\n\x1b[1A\x1b[2Knew line\r\n\x1b[?25h");
+        assert_eq!(
+            plain(&stream.lines()),
+            ":: Synchronizing...\ncore 100%\nxerolinux is up to date\n:: Starting\nnew line\n"
+        );
+    }
+
+    #[test]
+    fn terminal_keeps_scrollback_and_never_exceeds_the_width() {
+        let mut stream = TermStream::new();
+        let long = "x".repeat(200);
+        stream.process(format!("{long}\r\n").as_bytes());
+        for n in 0..100 {
+            stream.process(format!("line {n}\r\n").as_bytes());
+        }
+        let rows = stream.lines();
+        let cols = term_cols();
+        assert!(rows.iter().all(|r| r.iter().map(|run| run.text.chars().count()).sum::<usize>() <= cols));
+        assert_eq!(rows[0][0].text.len(), cols);
+        let text = plain(&rows);
+        assert!(text.contains("line 0\n") && text.ends_with("line 99\n"));
+    }
+
+    #[test]
+    fn colours_and_bold_become_runs() {
+        let mut stream = TermStream::new();
+        stream.process(b"\x1b[1;32mgreen\x1b[0m plain \x1b[38;5;196mred\x1b[0m\r\n");
+        let row = &stream.lines()[0];
+        assert_eq!((row[0].text.as_str(), row[0].ansi, row[0].bold), ("green", 2, true));
+        assert_eq!((row[1].text.as_str(), row[1].ansi), (" plain ", -1));
+        assert_eq!(row[2].rgb, Some((255, 0, 0)));
+    }
+
+    #[test]
+    fn summary_counts_pacman_actions_once_despite_redraws() {
+        let out = "(1/3) upgrading 7zip   [#--]  10%\r(1/3) upgrading 7zip   [###] 100%\n(2/3) installing foo\n(3/3) removing bar\n(1/1) Arming ConditionNeedsUpdate...\nwarning: /etc/x installed as .pacnew\nwarning: failed to run hook\n";
+        let sum = summarize(out);
+        assert_eq!(sum.native, Counts { upgraded: 1, installed: 1, removed: 1 });
+        assert_eq!(sum.warnings, 1, "only the serious warning counts");
+    }
+
+    #[test]
+    fn summary_counts_flatpak_transaction_rows() {
+        let out = " 1. org.gnome.Platform  49  u  flathub  < 300 MB\n 2. org.gimp.GIMP  stable  i  flathub  < 90 MB\n 3. org.old.App  stable  r  flathub\n";
+        assert_eq!(summarize(out).flatpak, Counts { upgraded: 1, installed: 1, removed: 1 });
+    }
+
+    #[test]
+    fn result_pills_are_split_per_package_format() {
+        let mut sum = Summary::default();
+        sum.native.upgraded = 3;
+        sum.flatpak.upgraded = 2;
+        sum.flatpak.installed = 1;
+        sum.appimage.upgraded = 1;
+        let tiles: Vec<(String, i32)> = sum.tiles().into_iter().map(|t| (t.label, t.count)).collect();
+        assert_eq!(
+            tiles,
+            vec![
+                ("Native upgraded".to_string(), 3),
+                ("Flatpak upgraded".to_string(), 2),
+                ("Flatpak installed".to_string(), 1),
+                ("AppImage upgraded".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn proceed_prompts_are_answered_when_the_user_said_yes_globally() {
+        assert!(is_proceed_prompt(":: Proceed with installation? [Y/n]"));
+        assert!(!is_proceed_prompt(":: Replace foo with bar? [Y/n]"));
+    }
+
+    #[test]
+    fn synthetic_lines_start_at_column_zero() {
+        let (tx, rx) = mpsc::channel();
+        let rep = OpReporter::start(&tx, "t", Mode { cancellable: false }, 1);
+        rep.feeder().line("first line");
+        rep.feeder().line("second");
+        rep.finish(true);
+        let last = rx.try_iter().filter_map(|m| match m { UiMessage::ProgressLines(l) => Some(plain(&l)), _ => None }).last().unwrap();
+        assert_eq!(last, "first line\nsecond\n");
+    }
+
+    fn row_messages(chunks: &[&str]) -> Vec<String> {
+        let (tx, rx) = mpsc::channel();
+        let mut rows = PacmanRows::default();
+        let mut len = 0;
+        for c in chunks {
+            rows.feed(c, &mut RowSink { tx: &tx, len: &mut len });
+        }
+        rx.try_iter()
+            .map(|m| match m {
+                UiMessage::ProgressRowsAppend { first, rows } => {
+                    format!("plan {first}: {}", rows.iter().map(|r| format!("{} [{}]", r.name, r.detail)).collect::<Vec<_>>().join(", "))
+                }
+                UiMessage::ProgressRowState { index, state, percent } => format!("row {index} state {state} {percent}%"),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pacman_table_becomes_rows_and_tracks_progress() {
+        let msgs = row_messages(&[
+            "Packages (2)  Old Version  New Version  Net Change\r\n\r\n",
+            "extra/7zip   26.04-1   26.05-1   0.00 MiB\r\ncore/glibc   2.41-2   2.42-1   1.20 MiB\r\n\r\n",
+            "(1/2) upgrading 7zip   [##    ]  40%\r(1/2) upgrading 7zip   [#####] 100%\r\n",
+            "(2/2) upgrading glibc  [#     ]  20%",
+        ]);
+        assert_eq!(msgs[0], "plan 0: 7zip [26.04-1 \u{2192} 26.05-1], glibc [2.41-2 \u{2192} 2.42-1]");
+        assert!(msgs.contains(&"row 0 state 1 40%".to_string()), "{msgs:?}");
+        assert!(msgs.contains(&"row 0 state 2 100%".to_string()), "{msgs:?}");
+        assert!(msgs.contains(&"row 1 state 1 20%".to_string()), "{msgs:?}");
+    }
+
+    #[test]
+    fn pacman_install_list_becomes_rows() {
+        let msgs = row_messages(&["Packages (2) foo-1.2.3-1  bar-baz-4.5-2\r\n\r\n"]);
+        assert_eq!(msgs[0], "plan 0: foo [], bar-baz []");
+    }
+
+    #[test]
+    fn pacman_output_advances_the_stage_indicator() {
+        let (tx, rx) = mpsc::channel();
+        let mut t = PhaseTracker { enabled: true, ..PhaseTracker::default() };
+        t.feed(" core  135.2 KiB  1234 KiB/s 00:00 [###] 100%\r\n", &tx);
+        assert!(rx.try_recv().is_err(), "database transfers are not package downloads");
+        for chunk in [
+            ":: Synchronizing package databases...\r\n",
+            "resolving dependencies...\r\n",
+            "(2/2) checking package integrity\r\n",
+            "(1/2) upgrading 7zip   [##]  10%\r",
+            ":: Running post-transaction hooks...\r\n",
+        ] {
+            t.feed(chunk, &tx);
+        }
+        let seen: Vec<usize> = rx.try_iter().filter_map(|m| match m { UiMessage::ProgressPhase(p) => Some(p), _ => None }).collect();
+        assert_eq!(seen, vec![1, 3, 4, 5]);
+    }
 }
-
-

@@ -12,7 +12,7 @@ use xpm_core::{
     source::{PackageSource, ProgressCallback},
 };
 
-fn update_kind(kind: RefKind, name: &str) -> UpdateKind {
+pub(crate) fn update_kind(kind: RefKind, name: &str) -> UpdateKind {
     if kind != RefKind::Runtime {
         return UpdateKind::Package;
     }

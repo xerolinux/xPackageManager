@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+MimeType=application/vnd.appimage;application/x-iso9660-appimage;
+Actions=OpenWithXpm
+X-KDE-Priority=TopLevel
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+
+[Desktop Action OpenWithXpm]
+Name=Open with xPackage Manager
+Icon=xpackagemanager
+Exec=xpackagemanager %f

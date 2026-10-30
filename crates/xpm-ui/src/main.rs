@@ -2,7 +2,7 @@
 use quick_xml::events::Event;
 use serde::{Deserialize, Serialize};
 use slint::{Model, ModelRc, SharedString, VecModel, Timer, TimerMode};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::Path;
 use serde_json::Value;
@@ -16,6 +16,7 @@ use tracing_subscriber::FmtSubscriber;
 use xpm_alpm::AlpmBackend;
 use xpm_alpm::history as alpmhist;
 use xpm_core::source::PackageSource;
+use xpm_flatpak::tx::{Event as FlatpakEvent, OpKind, Request as FlatpakRequest};
 use xpm_flatpak::FlatpakBackend;
 use xpm_flatpak::permissions as fperm;
 use xpm_appimage::{AppImageBackend, AppImageEntry, CatalogEntry};
@@ -62,6 +63,36 @@ fn flatpak_file_kind(path: &str) -> Option<FlatpakFile> {
     }
 }
 
+fn is_appimage_path(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".appimage")
+}
+
+fn is_local_file(path: &str) -> bool {
+    flatpak_file_kind(path).is_some() || is_appimage_path(path)
+}
+
+/// Make the AppImage executable if needed and start it detached from xpm.
+fn run_appimage_file(path: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    let mut perms = meta.permissions();
+    if perms.mode() & 0o111 == 0 {
+        perms.set_mode(perms.mode() | 0o755);
+        std::fs::set_permissions(path, perms).map_err(|e| format!("Cannot make it executable: {e}"))?;
+    }
+    let mut cmd = std::process::Command::new(path);
+    if let Some(dir) = Path::new(path).parent() {
+        cmd.current_dir(dir);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn is_chaotic_aur_enabled() -> bool {
     std::fs::read_to_string("/etc/pacman.conf")
         .map(|s| s.lines().any(|l| l.trim() == "[chaotic-aur]"))
@@ -101,6 +132,72 @@ fn notify_updates_once(window: &MainWindow, notified: &std::cell::Cell<bool>) {
     });
 }
 
+fn styled_line_to_ui(line: &progress::StyledLine) -> LogLine {
+    let runs: Vec<LogRun> = line
+        .iter()
+        .map(|r| LogRun {
+            text: SharedString::from(r.text.as_str()),
+            ansi: r.ansi,
+            rgb: r.rgb.map(|(r, g, b)| slint::Color::from_rgb_u8(r, g, b)).unwrap_or_default(),
+            use_rgb: r.rgb.is_some(),
+            bold: r.bold,
+            faint: r.faint,
+        })
+        .collect();
+    LogLine { runs: ModelRc::new(VecModel::from(runs)) }
+}
+
+/// Looks a PCI id up in the system hwdata database: `(vendor name, device name)`.
+fn pci_ids_lookup(db: &str, vendor: u16, device: u16) -> (Option<String>, Option<String>) {
+    let vendor_key = format!("{vendor:04x}");
+    let device_key = format!("\t{device:04x}");
+    let mut vendor_name = None;
+    for line in db.lines() {
+        if vendor_name.is_none() {
+            if let Some(rest) = line.strip_prefix(vendor_key.as_str())
+                && rest.starts_with("  ")
+            {
+                vendor_name = Some(rest.trim().to_string());
+            }
+        } else if !line.starts_with('\t') && !line.starts_with('#') && !line.is_empty() {
+            break;
+        } else if let Some(rest) = line.strip_prefix(device_key.as_str())
+            && rest.starts_with("  ")
+        {
+            return (vendor_name, Some(rest.trim().to_string()));
+        }
+    }
+    (vendor_name, None)
+}
+
+fn gpu_label(vendor: u16, vendor_name: Option<&str>, device_name: Option<&str>) -> String {
+    let brand = match vendor {
+        0x10de => "NVIDIA".to_string(),
+        0x1002 => "AMD".to_string(),
+        0x8086 => "Intel".to_string(),
+        _ => vendor_name
+            .map(|n| n.split(['[', ',']).next().unwrap_or(n).trim().trim_end_matches(" Corporation").to_string())
+            .unwrap_or_else(|| "GPU".to_string()),
+    };
+    let Some(device) = device_name else { return brand };
+    match (device.find('['), device.rfind(']')) {
+        (Some(a), Some(b)) if b > a + 1 => format!("{brand} {}", &device[a + 1..b]),
+        _ if vendor == 0x1002 => format!("AMD Radeon Graphics ({device})"),
+        _ => format!("{brand} {device}"),
+    }
+}
+
+fn gpu_display_name(vendor: u16, device: u16) -> String {
+    let db = ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids", "/usr/share/pci.ids"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok());
+    let (vendor_name, device_name) = db.map(|d| pci_ids_lookup(&d, vendor, device)).unwrap_or_default();
+    match device_name {
+        Some(_) => gpu_label(vendor, vendor_name.as_deref(), device_name.as_deref()),
+        None => format!("{} ({vendor:04x}:{device:04x})", gpu_label(vendor, vendor_name.as_deref(), None)),
+    }
+}
+
 fn activate_window(window: &MainWindow) {
     use i_slint_core::window::WindowInner;
     let adapter = WindowInner::from_pub(window.window()).window_adapter();
@@ -120,7 +217,7 @@ fn listen_for_instance_signals(window: slint::Weak<MainWindow>) {
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                 let _ = (&mut stream).take(4096).read_to_string(&mut msg);
                 let file = msg.lines().nth(1).map(str::to_string)
-                    .filter(|p| Path::new(p).is_absolute() && flatpak_file_kind(p).is_some() && Path::new(p).is_file());
+                    .filter(|p| Path::new(p).is_absolute() && is_local_file(p) && Path::new(p).is_file());
                 let win = window.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(w) = win.upgrade() {
@@ -128,7 +225,7 @@ fn listen_for_instance_signals(window: slint::Weak<MainWindow>) {
                         w.show().ok();
                         activate_window(&w);
                         if let Some(path) = file {
-                            w.invoke_open_flatpak_file(SharedString::from(path.as_str()));
+                            w.invoke_open_local_file(SharedString::from(path.as_str()));
                         }
                     }
                 }).ok();
@@ -177,11 +274,19 @@ enum UiMessage {
     SetTerminalIsUpgrade(bool),
     ShowProgressPopup(String),
     OperationProgress(i32, String),
-    ProgressOutput(String),
+    ProgressLines(Vec<progress::StyledLine>),
     ProgressPrompt(String),
     ProgressHidePrompt,
     ProgressPromptButtons,
     ProgressErrorSummary(String),
+    ProgressRowsAppend { first: usize, rows: Vec<progress::RowInfo> },
+    ProgressRowState { index: usize, state: i32, percent: i32 },
+    ProgressPhases(Vec<String>),
+    ProgressPhase(usize),
+    InstallProgress { backend: i32, key: String, state: i32, percent: i32 },
+    InstallLog { backend: i32, key: String, lines: Vec<progress::StyledLine> },
+    ShowInstallLog { backend: i32, key: String },
+    ProgressSummary(Vec<progress::SummaryTile>),
     ProgressAutoExpand,
     ProgressMode { cancellable: bool },
     ProgressStage(String),
@@ -523,8 +628,6 @@ struct AppConfig {
     aur_pill_dismissed: bool,
     #[serde(default)]
     distro_warning_dismissed: bool,
-    #[serde(default = "default_font_scale")]
-    font_scale: f32,
     #[serde(default)]
     notify_on_updates: bool,
     #[serde(default)]
@@ -563,7 +666,6 @@ fn default_appimage_feeds() -> Vec<AppImageFeed> {
 }
 
 fn default_parallel_downloads() -> u32 { 5 }
-fn default_font_scale() -> f32 { 1.0 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -573,7 +675,6 @@ impl Default for AppConfig {
             parallel_downloads: 5,
             aur_pill_dismissed: false,
             distro_warning_dismissed: false,
-            font_scale: 1.0,
             notify_on_updates: false,
             auto_clean_cache: false,
             appimage_enabled: false,
@@ -619,7 +720,6 @@ fn build_config(window: &MainWindow) -> AppConfig {
         parallel_downloads: window.get_setting_parallel_downloads() as u32,
         aur_pill_dismissed: window.get_aur_pill_dismissed(),
         distro_warning_dismissed: window.get_distro_warning_dismissed(),
-        font_scale: window.global::<Cat>().get_font_scale(),
         notify_on_updates: window.get_setting_notify_on_updates(),
         auto_clean_cache: window.get_setting_auto_clean_cache(),
         appimage_enabled: window.get_setting_appimage_enabled(),
@@ -904,6 +1004,8 @@ fn catalog_entry_to_card(
         has_icon: false,
         installed: installed_id.is_some(),
         installed_id: SharedString::from(installed_id.unwrap_or_default().as_str()),
+        op_state: 0,
+        op_percent: 0,
     }
 }
 
@@ -1057,12 +1159,21 @@ fn run_appimage_op<F>(
     title: &str,
     dir: Option<String>,
     clear_update: Option<String>,
+    quiet: Option<String>,
     op: F,
 ) where
     F: FnOnce(&AppImageBackend, &dyn Fn(&str)) -> xpm_core::error::Result<()>,
 {
-    let reporter = OpReporter::start(tx, title, Mode { cancellable: false }, 1);
+    // A quiet run reports through the item's own button; its dialog traffic goes to a closed channel.
+    let (silent_tx, _silent_rx) = mpsc::channel();
+    let reporter = OpReporter::start(if quiet.is_some() { &silent_tx } else { tx }, title, Mode { cancellable: false }, 1);
     let feeder = reporter.feeder();
+    if let Some(key) = quiet.clone() {
+        let tx = tx.clone();
+        feeder.on_percent(move |percent| {
+            let _ = tx.send(UiMessage::InstallProgress { backend: 3, key: key.clone(), state: 1, percent });
+        });
+    }
 
     let backend = match AppImageBackend::with_dir(dir.map(std::path::PathBuf::from)) {
         Ok(b) => b,
@@ -1076,6 +1187,11 @@ fn run_appimage_op<F>(
     let log = |line: &str| {
         feeder.feed(line.as_bytes());
     };
+    let row_name = title.split_once(' ').map_or(title, |(_, rest)| rest);
+    let row_name = row_name.rsplit('/').next().unwrap_or(row_name);
+    let row = feeder.rows_append(vec![progress::RowInfo { name: row_name.to_string(), tag: "AppImage", detail: String::new() }]);
+    feeder.row_state(row, 1, 0);
+    feeder.track_single(Some(row));
     let ok = match op(&backend, &log) {
         Ok(()) => true,
         Err(e) => {
@@ -1083,8 +1199,31 @@ fn run_appimage_op<F>(
             false
         }
     };
+    feeder.track_single(None);
+    feeder.row_state(row, if ok { 2 } else { 3 }, if ok { 100 } else { 0 });
+    if ok {
+        let mut counts = progress::Counts::default();
+        match title.split_whitespace().next().unwrap_or_default() {
+            "Installing" => counts.installed = 1,
+            "Removing" => counts.removed = 1,
+            _ => counts.upgraded = 1,
+        }
+        feeder.add_summary(progress::Format::AppImage, counts);
+    }
     if ok && let Some(id) = clear_update {
         let _ = tx.send(UiMessage::AppImageUpdateCleared(id));
+    }
+    if let Some(key) = quiet {
+        if !ok {
+            let _ = tx.send(UiMessage::InstallLog { backend: 3, key: key.clone(), lines: feeder.lines() });
+        }
+        let _ = tx.send(UiMessage::InstallProgress { backend: 3, key, state: if ok { 2 } else { 3 }, percent: 100 });
+        reporter.finish(ok);
+        if ok {
+            let _ = tx.send(UiMessage::InstalledAppImagesLoaded(backend.list_entries()));
+            let _ = tx.send(UiMessage::AppImageCardsRefresh);
+        }
+        return;
     }
     reporter.finish(ok);
 
@@ -1462,13 +1601,15 @@ fn build_dep_tree(pkg_name: &str) -> (Vec<DepNode>, Vec<DepNode>, String) {
     (dep_nodes, reqby_nodes, root_version)
 }
 
+const PTY_ROWS: u16 = 40;
+
 fn spawn_in_pty(cmd: &str, args: &[&str]) -> Result<(i32, u32), String> {
     use std::os::unix::io::FromRawFd;
 
     let mut master: libc::c_int = 0;
     let mut slave: libc::c_int = 0;
 
-    let winsize = libc::winsize { ws_col: 80, ws_row: 40, ws_xpixel: 0, ws_ypixel: 0 };
+    let winsize = libc::winsize { ws_col: progress::term_cols() as u16, ws_row: PTY_ROWS, ws_xpixel: 0, ws_ypixel: 0 };
     let ret = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &winsize) };
     if ret != 0 {
         return Err("openpty failed".to_string());
@@ -1525,26 +1666,10 @@ fn run_in_terminal(
 }
 
 struct UpdatePlan {
-    native: bool,
-    flatpak: bool,
+    native: usize,
+    flatpak: usize,
     appimages: Vec<String>,
     appimage_dir: String,
-}
-
-// Native + system flatpaks share one pkexec (root); user flatpaks run as the invoking
-// user, since root alone misses user-install apps (e.g. user-added remotes).
-fn update_script(native: bool, flatpak: bool) -> Option<String> {
-    const USER_FLATPAKS: &str = "flatpak update --user";
-    match (native, flatpak) {
-        (true, true) => Some(format!(
-            "pkexec bash -c 'pacman -Syu && echo \"\" && echo \"=== System flatpaks ===\" && flatpak update --system' && echo \"\" && echo \"=== User flatpaks ===\" && {USER_FLATPAKS}"
-        )),
-        (true, false) => Some("pkexec pacman -Syu".to_string()),
-        (false, true) => Some(format!(
-            "echo \"=== User flatpaks ===\" && {USER_FLATPAKS} && echo \"\" && echo \"=== System flatpaks ===\" && pkexec flatpak update --system"
-        )),
-        (false, false) => None,
-    }
 }
 
 /// One popup, one run: every enabled backend with pending updates, in sequence.
@@ -1559,11 +1684,48 @@ fn run_update_all(
     let has_appimages = !plan.appimages.is_empty();
     let mut success = true;
 
-    if let Some(script) = update_script(plan.native, plan.flatpak) {
-        if has_appimages {
-            feeder.window(0, 75);
+    let mut parts = Vec::new();
+    if plan.native > 0 {
+        parts.push(format!("{} native", plan.native));
+    }
+    if plan.flatpak > 0 {
+        parts.push(format!("{} Flatpak", plan.flatpak));
+    }
+    if has_appimages {
+        parts.push(format!("{} AppImage", plan.appimages.len()));
+    }
+    if plan.native > 0 {
+        feeder.enable_phases();
+    }
+    let (in_tx, in_rx) = mpsc::channel::<String>();
+    *input_sender.lock().unwrap() = Some(in_tx);
+    feeder.feed(format!("\x1b[1;34m::\x1b[0m \x1b[1mUpdate {}? [Y/n]\x1b[0m ", parts.join(", ")).as_bytes());
+    let go = matches!(in_rx.recv().map(|a| a.trim().to_lowercase()).as_deref(), Ok("" | "y" | "yes"));
+    *input_sender.lock().unwrap() = None;
+    feeder.line(if go { "y" } else { "n" });
+    if !go {
+        feeder.line("Cancelled.");
+        reporter.finish(false);
+        return;
+    }
+    feeder.set_auto_yes(true);
+
+    let stages = [plan.native > 0, plan.flatpak > 0, has_appimages];
+    let weights = [50, 35, 15];
+    let total: i32 = stages.iter().zip(weights).filter(|(on, _)| **on).map(|(_, w)| w).sum();
+    let mut windows = [None; 3];
+    let mut next = 0;
+    for (i, (on, w)) in stages.iter().zip(weights).enumerate() {
+        if *on {
+            windows[i] = Some((next * 100 / total, (next + w) * 100 / total));
+            next += w;
         }
-        match progress::run_pty(&feeder, "bash", &["-c", &script], input_sender, pid_holder) {
+    }
+    let [native_window, flatpak_window, appimage_window] = windows;
+
+    if let Some((lo, hi)) = native_window {
+        feeder.window(lo, hi);
+        match progress::run_pty(&feeder, "pkexec", &["pacman", "-Syu"], input_sender, pid_holder) {
             Ok(ok) => success = ok,
             Err(e) => {
                 feeder.line(&format!("Error: {e}"));
@@ -1572,12 +1734,28 @@ fn run_update_all(
         }
     }
 
+    if success && !progress::cancel_requested()
+        && let Some((lo, hi)) = flatpak_window
+    {
+        feeder.window(lo, hi);
+        if plan.native > 0 {
+            feeder.line("");
+        }
+        success = run_flatpak_transaction(&feeder, &[FlatpakRequest::UpdateAll], input_sender, None, true);
+    }
+
     if success && has_appimages && !progress::cancel_requested() {
-        let base = if plan.native || plan.flatpak { 75 } else { 0 };
+        let (base, end) = appimage_window.unwrap_or((0, 100));
         feeder.line("\n=== AppImages ===");
         match AppImageBackend::with_dir(Some(std::path::PathBuf::from(&plan.appimage_dir))) {
             Ok(backend) => {
                 let total = plan.appimages.len() as i32;
+                let first_row = feeder.rows_append(
+                    plan.appimages
+                        .iter()
+                        .map(|n| progress::RowInfo { name: n.clone(), tag: "AppImage", detail: String::new() })
+                        .collect(),
+                );
                 for (i, name) in plan.appimages.iter().enumerate() {
                     if progress::cancel_requested() {
                         feeder.line("Cancelled.");
@@ -1585,21 +1763,28 @@ fn run_update_all(
                         break;
                     }
                     let i = i as i32;
-                    feeder.window(base + (100 - base) * i / total, base + (100 - base) * (i + 1) / total);
+                    feeder.window(base + (end - base) * i / total, base + (end - base) * (i + 1) / total);
                     let _ = tx.send(UiMessage::ProgressStage(format!("Updating {name}...")));
                     feeder.line(&format!("\n- {name} -"));
                     let log = |line: &str| {
                         feeder.feed(line.as_bytes());
                     };
+                    let row = first_row + i as usize;
+                    feeder.row_state(row, 1, 0);
+                    feeder.track_single(Some(row));
                     match backend.update_app(name, &log) {
                         Ok(_) => {
+                            feeder.add_summary(progress::Format::AppImage, progress::Counts { upgraded: 1, ..Default::default() });
+                            feeder.row_state(row, 2, 100);
                             let _ = tx.send(UiMessage::AppImageUpdateCleared(name.clone()));
                         }
                         Err(e) => {
                             feeder.line(&format!("Failed: {e}"));
+                            feeder.row_state(row, 3, 0);
                             success = false;
                         }
                     }
+                    feeder.track_single(None);
                 }
                 let _ = tx.send(UiMessage::InstalledAppImagesLoaded(backend.list_entries()));
                 let _ = tx.send(UiMessage::AppImageCardsRefresh);
@@ -1613,6 +1798,8 @@ fn run_update_all(
 
     reporter.finish(success);
 }
+
+type InstallLogs = Rc<RefCell<HashMap<(i32, String), Vec<progress::StyledLine>>>>;
 
 struct RepoFile {
     name: String,
@@ -1685,20 +1872,208 @@ fn run_flatpak_file(
     }
 }
 
+fn flatpak_requests(action: &str, names: &[String]) -> Option<Vec<FlatpakRequest>> {
+    let each = |f: fn(String) -> FlatpakRequest| names.iter().cloned().map(f).collect();
+    match action {
+        "install" | "bulk-install" => Some(each(FlatpakRequest::Install)),
+        "remove" | "bulk-remove" => Some(each(FlatpakRequest::Remove)),
+        "update" => Some(each(FlatpakRequest::Update)),
+        "update-all" => Some(vec![FlatpakRequest::UpdateAll]),
+        "install-file" => {
+            let path = names.first()?.clone();
+            Some(vec![if path.to_ascii_lowercase().ends_with(".flatpakref") {
+                FlatpakRequest::FlatpakRef(path)
+            } else {
+                FlatpakRequest::Bundle(path)
+            }])
+        }
+        _ => None,
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return String::new();
+    }
+    format_size(bytes)
+}
+
+/// Runs Flatpak requests through libflatpak transactions: typed events drive the per-ref rows,
+/// the coloured log and the result tiles. Returns whether everything succeeded.
+fn run_flatpak_transaction(
+    feeder: &progress::Feeder,
+    requests: &[FlatpakRequest],
+    input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    quiet: Option<(&mpsc::Sender<UiMessage>, &str)>,
+    auto_yes: bool,
+) -> bool {
+    const BLUE: &str = "\x1b[1;34m";
+    const BOLD: &str = "\x1b[1m";
+    const DIM: &str = "\x1b[2m";
+    const GREEN: &str = "\x1b[32m";
+    const RED: &str = "\x1b[31m";
+    const YELLOW: &str = "\x1b[33m";
+    const RESET: &str = "\x1b[0m";
+
+    let (in_tx, in_rx) = mpsc::channel::<String>();
+    *input_sender.lock().unwrap() = Some(in_tx);
+
+    let names: Rc<RefCell<Vec<(String, OpKind)>>> = Rc::new(RefCell::new(Vec::new()));
+    let row_base: Rc<Cell<usize>> = Rc::new(Cell::new(0));
+    let percents: Rc<RefCell<Vec<i32>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let quiet_tx = quiet.map(|(tx, key)| (tx.clone(), key.to_string()));
+    let auto_confirm = quiet_tx.is_some() || auto_yes;
+    let on_event = {
+        let (feeder, names, percents, row_base) = (feeder.clone(), names.clone(), percents.clone(), row_base.clone());
+        let quiet_tx = quiet_tx.clone();
+        move |ev: FlatpakEvent| match ev {
+            FlatpakEvent::Plan { first, ops } => {
+                feeder.line(&format!("{BLUE}::{RESET} {BOLD}Flatpak transaction{RESET}"));
+                let mut rows = Vec::new();
+                for op in &ops {
+                    let (verb, color) = match op.kind {
+                        OpKind::Install => ("Install", GREEN),
+                        OpKind::Update => ("Update", BLUE),
+                        OpKind::Remove => ("Remove", RED),
+                    };
+                    let size = human_size(op.download);
+                    let scope = if op.system { "system" } else { "user" };
+                    feeder.line(&format!(
+                        " {color}{verb:<8}{RESET}{BOLD}{}{RESET} {DIM}{} {} {}{RESET}{}",
+                        op.name, op.branch, op.remote, scope,
+                        if size.is_empty() { String::new() } else { format!("  {size}") },
+                    ));
+                    rows.push(progress::RowInfo {
+                        name: op.name.clone(),
+                        tag: if op.tag == xpm_core::package::UpdateKind::Package { "" } else { op.tag.label() },
+                        detail: format!("{} {}", verb.to_lowercase(), op.branch),
+                    });
+                }
+                let mut n = names.borrow_mut();
+                n.truncate(first);
+                n.extend(ops.iter().map(|o| (o.name.clone(), o.kind)));
+                let mut p = percents.borrow_mut();
+                p.truncate(first);
+                p.extend(ops.iter().map(|_| 0));
+                let abs = feeder.rows_append(rows);
+                if first == 0 {
+                    row_base.set(abs);
+                }
+            }
+            FlatpakEvent::Started(i) => {
+                if let Some((name, kind)) = names.borrow().get(i) {
+                    let verb = match kind {
+                        OpKind::Install => "Installing",
+                        OpKind::Update => "Updating",
+                        OpKind::Remove => "Removing",
+                    };
+                    feeder.line(&format!("{BLUE}::{RESET} {verb} {BOLD}{name}{RESET}"));
+                    feeder.report(overall_percent(&percents.borrow()), &format!("{verb} {name}..."));
+                }
+                feeder.row_state(row_base.get() + i, 1, 0);
+            }
+            FlatpakEvent::Progress { index, percent, .. } => {
+                let mut p = percents.borrow_mut();
+                if let Some(slot) = p.get_mut(index) {
+                    *slot = percent;
+                }
+                feeder.report(overall_percent(&p), "");
+                if let Some((tx, key)) = &quiet_tx {
+                    let _ = tx.send(UiMessage::InstallProgress { backend: 1, key: key.clone(), state: 1, percent: overall_percent(&p) });
+                }
+                feeder.row_state(row_base.get() + index, 1, percent);
+            }
+            FlatpakEvent::Done(i) => {
+                if let Some(slot) = percents.borrow_mut().get_mut(i) {
+                    *slot = 100;
+                }
+                if let Some((name, _)) = names.borrow().get(i) {
+                    feeder.line(&format!("   {GREEN}done{RESET} {DIM}{name}{RESET}"));
+                }
+                feeder.report(overall_percent(&percents.borrow()), "");
+                feeder.row_state(row_base.get() + i, 2, 100);
+            }
+            FlatpakEvent::Failed { index, error } => {
+                if let Some((name, _)) = names.borrow().get(index) {
+                    feeder.line(&format!("{RED}error:{RESET} {name}: {error}"));
+                }
+                feeder.row_state(row_base.get() + index, 3, 0);
+            }
+            FlatpakEvent::Notice(text) => feeder.line(&format!("{YELLOW}warning:{RESET} {text}")),
+        }
+    };
+
+    let confirm = {
+        let feeder = feeder.clone();
+        move |ops: &[xpm_flatpak::tx::Op]| {
+            let total: u64 = ops.iter().map(|o| o.download).sum();
+            if total > 0 {
+                feeder.line(&format!("\nTotal download size: {}", format_size(total)));
+            }
+            if auto_confirm {
+                return true;
+            }
+            feeder.line("");
+            feeder.feed(format!("{BLUE}::{RESET} {BOLD}Proceed with installation? [Y/n]{RESET} ").as_bytes());
+            let go = match in_rx.recv() {
+                Ok(a) => matches!(a.trim().to_lowercase().as_str(), "" | "y" | "yes"),
+                Err(_) => false,
+            };
+            feeder.line(if go { "y" } else { "n" });
+            go
+        }
+    };
+
+    let outcome = xpm_flatpak::tx::run(requests, on_event, confirm, progress::cancel_requested);
+    *input_sender.lock().unwrap() = None;
+
+    if let Some(err) = &outcome.error {
+        feeder.line(&format!("{RED}error:{RESET} {err}"));
+    }
+    if outcome.declined {
+        feeder.line("Cancelled.");
+    } else if outcome.ok() && outcome.installed + outcome.updated + outcome.removed == 0 {
+        feeder.line("Nothing to do.");
+    }
+    feeder.add_summary(
+        progress::Format::Flatpak,
+        progress::Counts {
+            upgraded: outcome.updated as i32,
+            installed: outcome.installed as i32,
+            removed: outcome.removed as i32,
+        },
+    );
+    outcome.ok()
+}
+
+fn install_flatpak_quiet(tx: &mpsc::Sender<UiMessage>, name: &str, ctx: &ConflictCtx) {
+    *ctx.lock().unwrap() = Some(("install".to_string(), vec![name.to_string()], 1));
+    let (silent_tx, _silent_rx) = mpsc::channel();
+    let reporter = OpReporter::start(&silent_tx, name, Mode { cancellable: false }, 1);
+    let feeder = reporter.feeder();
+    let _ = tx.send(UiMessage::InstallProgress { backend: 1, key: name.to_string(), state: 1, percent: 0 });
+    let no_input = Arc::new(Mutex::new(None));
+    let ok = run_flatpak_transaction(&feeder, &[FlatpakRequest::Install(name.to_string())], &no_input, Some((tx, name)), true);
+    if ok {
+        let _ = tx.send(UiMessage::InstallProgress { backend: 1, key: name.to_string(), state: 2, percent: 100 });
+        let _ = tx.send(UiMessage::OperationDone(true));
+    } else {
+        let _ = tx.send(UiMessage::InstallLog { backend: 1, key: name.to_string(), lines: feeder.lines() });
+        let _ = tx.send(UiMessage::InstallProgress { backend: 1, key: name.to_string(), state: 3, percent: 0 });
+    }
+    reporter.finish(ok);
+}
+
+fn overall_percent(percents: &[i32]) -> i32 {
+    if percents.is_empty() {
+        return 0;
+    }
+    percents.iter().sum::<i32>() / percents.len() as i32
+}
+
 fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String, Vec<String>) {
     match (action, backend) {
-        ("install", 1) | ("bulk-install", 1) => {
-            ("flatpak".to_string(), {
-                // No --noninteractive (live progress bar) and no -y (flatpak asks first,
-                // like pacman does).
-                let mut args = vec!["install".to_string()];
-                args.extend(names.iter().cloned());
-                args
-            })
-        }
-        ("install-file", 1) => {
-            ("flatpak".to_string(), vec!["install".to_string(), names[0].clone()])
-        }
         ("add-remote-file", 1) => {
             const ADD_REMOTE: &str = r#"printf 'Add Flatpak remote "%s" (%s)? [Y/n] ' "$1" "$3"; read -r a; case "$a" in ""|y|Y|yes|Yes) flatpak remote-add --user --if-not-exists "$1" "$2" ;; *) echo Cancelled; exit 1 ;; esac"#;
             ("sh".to_string(), vec![
@@ -1706,29 +2081,12 @@ fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String
                 names[0].clone(), names[1].clone(), names[2].clone(),
             ])
         }
-        ("remove", 1) | ("bulk-remove", 1) => {
-            ("flatpak".to_string(), {
-                let mut args = vec!["uninstall".to_string()];
-                args.extend(names.iter().cloned());
-                args
-            })
-        }
-        ("update", 1) => {
-            ("flatpak".to_string(), {
-                let mut args = vec!["update".to_string()];
-                args.extend(names.iter().cloned());
-                args
-            })
-        }
         ("remove", _) | ("bulk-remove", _) => {
             ("pkexec".to_string(), {
                 let mut args = vec!["pacman".to_string(), "-R".to_string()];
                 args.extend(names.iter().cloned());
                 args
             })
-        }
-        ("update-all", 1) => {
-            ("flatpak".to_string(), vec!["update".to_string()])
         }
         ("update-all", _) => {
             ("pkexec".to_string(), vec!["pacman".to_string(), "-Syu".to_string()])
@@ -1770,11 +2128,21 @@ fn run_managed_operation(
 ) {
     *conflict_ctx.lock().unwrap() = Some((action.to_string(), names.to_vec(), backend));
 
+    let mut reporter =
+        OpReporter::start(tx, title, Mode { cancellable: true }, names.len());
+    if backend == 1
+        && let Some(requests) = flatpak_requests(action, names)
+    {
+        let ok = run_flatpak_transaction(&reporter.feeder(), &requests, input_sender, None, false);
+        reporter.finish(ok);
+        return;
+    }
+    if backend != 1 && !matches!(action, "remove" | "bulk-remove" | "add-remote-file") {
+        reporter.feeder().enable_phases();
+    }
     let (cmd, args) = build_pacman_command(action, names, backend);
     let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    let mut reporter =
-        OpReporter::start(tx, title, Mode { cancellable: true }, names.len());
     match progress::run_pty(&reporter.feeder(), &cmd, &args_str, input_sender, pid_holder) {
         Err(e) => {
             reporter.feeder().line(&format!("Error: {e}"));
@@ -2076,25 +2444,12 @@ fn load_sys_info() -> SysInfo {
             let name = entry.file_name();
             let s = name.to_string_lossy();
             if !s.starts_with("card") || s.contains('-') { continue; }
-            let vendor_path = entry.path().join("device/vendor");
-            let device_path = entry.path().join("device/device");
-            if let (Ok(vendor), Ok(device)) = (
-                std::fs::read_to_string(&vendor_path),
-                std::fs::read_to_string(&device_path),
-            ) {
-                let v = vendor.trim().to_lowercase();
-                let prefix = if v == "0x10de" { "NVIDIA" }
-                    else if v == "0x1002" { "AMD" }
-                    else if v == "0x8086" { "Intel" }
-                    else { "GPU" };
-                let dev = device.trim().to_string();
-                let uevent = entry.path().join("device/uevent");
-                if let Ok(ue) = std::fs::read_to_string(uevent)
-                    && let Some(line) = ue.lines().find(|l| l.starts_with("PCI_ID=")) {
-                        let pci_id = line.trim_start_matches("PCI_ID=");
-                        return Some(format!("{} ({})", prefix, pci_id));
-                    }
-                return Some(format!("{} {}", prefix, dev));
+            let id = |file: &str| {
+                let raw = std::fs::read_to_string(entry.path().join("device").join(file)).ok()?;
+                u16::from_str_radix(raw.trim().trim_start_matches("0x"), 16).ok()
+            };
+            if let (Some(vendor), Some(device)) = (id("vendor"), id("device")) {
+                return Some(gpu_display_name(vendor, device));
             }
         }
         None
@@ -2765,8 +3120,8 @@ fn main() {
     let local_package_path = args.iter().skip(1)
         .find(|arg| is_arch_package(arg.as_str()))
         .cloned();
-    let flatpak_file_arg = args.iter().skip(1)
-        .find(|arg| flatpak_file_kind(arg.as_str()).is_some())
+    let local_file_arg = args.iter().skip(1)
+        .find(|arg| is_local_file(arg.as_str()))
         .and_then(|arg| std::fs::canonicalize(arg).ok())
         .filter(|p| p.is_file())
         .map(|p| p.to_string_lossy().into_owned());
@@ -2779,7 +3134,7 @@ fn main() {
         Some(f) => f,
         None => {
             info!("Another instance is already running - bringing it to foreground");
-            signal_existing_instance(flatpak_file_arg.as_deref());
+            signal_existing_instance(local_file_arg.as_deref());
             return;
         }
     };
@@ -2941,6 +3296,16 @@ fn main() {
     let flatpak_ids_timer = flatpak_installed_ids.clone();
     let flatpak_store_timer = flatpak_app_store.clone();
     let notified_updates = Rc::new(std::cell::Cell::new(false));
+    let progress_lines_model: Rc<VecModel<LogLine>> = Rc::new(VecModel::default());
+    window.set_progress_lines(ModelRc::from(progress_lines_model.clone()));
+    let progress_refs_model: Rc<VecModel<RefRow>> = Rc::new(VecModel::default());
+    window.set_progress_refs(ModelRc::from(progress_refs_model.clone()));
+    let progress_tiles_model: Rc<VecModel<SummaryTile>> = Rc::new(VecModel::default());
+    window.set_progress_tiles(ModelRc::from(progress_tiles_model.clone()));
+    let progress_phases_model: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
+    window.set_progress_phases(ModelRc::from(progress_phases_model.clone()));
+    let install_logs: InstallLogs = Rc::new(RefCell::new(HashMap::new()));
+    let progress_lines_prev: Rc<RefCell<Vec<progress::StyledLine>>> = Rc::new(RefCell::new(Vec::new()));
     let awaiting_appimage_check = Rc::new(std::cell::Cell::new(false));
     let awaiting_appimage_check_dispatch = awaiting_appimage_check.clone();
     let awaiting_appimage_check_init = awaiting_appimage_check.clone();
@@ -3010,7 +3375,11 @@ fn main() {
                         window.set_progress_popup_title(SharedString::from(&title));
                         window.set_progress_popup_percent(0);
                         window.set_progress_popup_stage(SharedString::from("Starting..."));
-                        window.set_progress_popup_output(SharedString::from(""));
+                        progress_lines_model.set_vec(Vec::new());
+                        progress_refs_model.set_vec(Vec::new());
+                        progress_phases_model.set_vec(Vec::new());
+                        window.set_progress_phase(0);
+                        progress_lines_prev.borrow_mut().clear();
                         window.set_progress_popup_show_input(false);
                         window.set_progress_popup_show_buttons(false);
                         window.set_progress_popup_prompt(SharedString::from(""));
@@ -3018,6 +3387,8 @@ fn main() {
                         window.set_progress_popup_success(false);
                         window.set_progress_show_details(false);
                         window.set_progress_error_summary(SharedString::from(""));
+                        window.set_progress_summary_visible(false);
+                        progress_tiles_model.set_vec(Vec::new());
                         window.set_progress_input_focus_pending(false);
                         window.set_progress_popup_cancellable(false);
                         window.set_show_progress_popup(true);
@@ -3042,8 +3413,23 @@ fn main() {
                     UiMessage::ProgressStage(stage) => {
                         window.set_progress_popup_stage(SharedString::from(&stage));
                     }
-                    UiMessage::ProgressOutput(text) => {
-                        window.set_progress_popup_output(SharedString::from(&text));
+                    UiMessage::ProgressLines(lines) => {
+                        let mut prev = progress_lines_prev.borrow_mut();
+                        for (i, line) in lines.iter().enumerate() {
+                            if prev.get(i) == Some(line) {
+                                continue;
+                            }
+                            let row = styled_line_to_ui(line);
+                            if i < progress_lines_model.row_count() {
+                                progress_lines_model.set_row_data(i, row);
+                            } else {
+                                progress_lines_model.push(row);
+                            }
+                        }
+                        while progress_lines_model.row_count() > lines.len() {
+                            progress_lines_model.remove(progress_lines_model.row_count() - 1);
+                        }
+                        *prev = lines;
                     }
                     UiMessage::ProgressPrompt(prompt) => {
                         window.set_progress_popup_prompt(SharedString::from(&prompt));
@@ -3061,6 +3447,82 @@ fn main() {
                     }
                     UiMessage::ProgressErrorSummary(s) => {
                         window.set_progress_error_summary(SharedString::from(&s));
+                    }
+                    UiMessage::ProgressRowsAppend { first, rows } => {
+                        while progress_refs_model.row_count() > first {
+                            progress_refs_model.remove(progress_refs_model.row_count() - 1);
+                        }
+                        for r in rows {
+                            progress_refs_model.push(RefRow {
+                                name: SharedString::from(r.name.as_str()),
+                                tag: SharedString::from(r.tag),
+                                detail: SharedString::from(r.detail.as_str()),
+                                state: 0,
+                                percent: 0,
+                            });
+                        }
+                    }
+                    UiMessage::ProgressPhases(labels) => {
+                        progress_phases_model.set_vec(labels.iter().map(|l| SharedString::from(l.as_str())).collect::<Vec<_>>());
+                        window.set_progress_phase(0);
+                    }
+                    UiMessage::ProgressPhase(index) => {
+                        window.set_progress_phase(index as i32);
+                    }
+                    UiMessage::InstallProgress { backend, key, state, percent } => {
+                        if backend == 1 {
+                            window.set_flatpak_install_id(SharedString::from(key.as_str()));
+                            window.set_flatpak_install_state(state);
+                            window.set_flatpak_install_percent(percent);
+                        } else if let Some(model) = window.get_catalog_appimages().as_any().downcast_ref::<VecModel<AppImageCard>>() {
+                            for i in 0..model.row_count() {
+                                if let Some(mut card) = model.row_data(i)
+                                    && card.github.as_str() == key
+                                {
+                                    card.op_state = state;
+                                    card.op_percent = percent;
+                                    model.set_row_data(i, card);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    UiMessage::InstallLog { backend, key, lines } => {
+                        install_logs.borrow_mut().insert((backend, key), lines);
+                    }
+                    UiMessage::ShowInstallLog { backend, key } => {
+                        if let Some(lines) = install_logs.borrow().get(&(backend, key.clone())) {
+                            window.set_progress_popup_title(SharedString::from(format!("Installing {key}").as_str()));
+                            window.set_progress_popup_stage(SharedString::from(""));
+                            window.set_progress_popup_percent(100);
+                            window.set_progress_popup_done(true);
+                            window.set_progress_popup_success(false);
+                            window.set_progress_error_summary(SharedString::from(""));
+                            window.set_progress_summary_visible(false);
+                            progress_refs_model.set_vec(Vec::new());
+                            progress_phases_model.set_vec(Vec::new());
+                            progress_lines_model.set_vec(lines.iter().map(styled_line_to_ui).collect::<Vec<_>>());
+                            *progress_lines_prev.borrow_mut() = lines.clone();
+                            window.set_progress_show_details(true);
+                            window.set_show_progress_popup(true);
+                        }
+                    }
+                    UiMessage::ProgressRowState { index, state, percent } => {
+                        if let Some(mut row) = progress_refs_model.row_data(index) {
+                            row.state = state;
+                            row.percent = percent;
+                            progress_refs_model.set_row_data(index, row);
+                        }
+                    }
+                    UiMessage::ProgressSummary(tiles) => {
+                        progress_tiles_model.set_vec(
+                            tiles
+                                .into_iter()
+                                .map(|t| SummaryTile { label: SharedString::from(t.label.as_str()), count: t.count, kind: t.kind })
+                                .collect::<Vec<_>>(),
+                        );
+                        window.set_progress_summary_visible(true);
+                        window.set_progress_show_details(false);
                     }
                     UiMessage::ProgressAutoExpand => {
                         window.set_progress_show_details(true);
@@ -4202,14 +4664,14 @@ fn main() {
     let window_weak_ua = window.as_weak();
     window.on_update_all(move || {
         let Some(w) = window_weak_ua.upgrade() else { return };
-        let native = w.get_update_packages().row_count() > 0;
-        let flatpak = w.get_setting_flatpak_enabled() && w.get_flatpak_update_packages().row_count() > 0;
+        let native = w.get_update_packages().row_count();
+        let flatpak = if w.get_setting_flatpak_enabled() { w.get_flatpak_update_packages().row_count() } else { 0 };
         let appimages: Vec<String> = if w.get_setting_appimage_enabled() {
             update_all_appimage_pending.borrow().iter().cloned().collect()
         } else {
             Vec::new()
         };
-        if !native && !flatpak && appimages.is_empty() {
+        if native == 0 && flatpak == 0 && appimages.is_empty() {
             return;
         }
         info!("Update all: native={native} flatpak={flatpak} appimages={}", appimages.len());
@@ -4250,9 +4712,18 @@ fn main() {
         let pid = req_install_pid.clone();
         let ctx = req_install_ctx.clone();
         thread::spawn(move || {
+            if backend == 1 {
+                install_flatpak_quiet(&tx, &n, &ctx);
+                return;
+            }
             let title = format!("Installing {}", n);
             run_managed_operation(&tx, &title, "install", &[n], backend, &input, &pid, &ctx);
         });
+    });
+
+    let tx_install_log = tx.clone();
+    window.on_show_install_log(move |backend, key| {
+        let _ = tx_install_log.send(UiMessage::ShowInstallLog { backend, key: key.to_string() });
     });
 
     let tx_req_remove = tx.clone();
@@ -4333,6 +4804,8 @@ fn main() {
     let cancel_pid = terminal_child_pid.clone();
     let cancel_input = terminal_input_sender.clone();
     let tx_cancel = tx.clone();
+    window.on_progress_term_resized(|cols| progress::set_term_cols(cols.max(0) as usize));
+
     window.on_cancel_operation(move || {
         info!("Operation cancelled by user");
         progress::request_cancel();
@@ -4815,17 +5288,69 @@ fn main() {
             });
         }
     });
-    window.on_open_flatpak_file({
+    let launched_for_file: Rc<Cell<bool>> = Rc::new(Cell::new(local_file_arg.as_deref().is_some_and(is_appimage_path)));
+    window.on_open_local_file({
         let weak = window.as_weak();
         move |path| {
+            if is_appimage_path(path.as_str()) {
+                if let Some(w) = weak.upgrade() {
+                    w.set_appimage_open_error(SharedString::default());
+                    w.set_appimage_open_path(path);
+                    w.set_show_appimage_open(true);
+                }
+                return;
+            }
             let (weak, tx, input, pid, ctx) =
                 (weak.clone(), tx_fp_file.clone(), input_fp_file.clone(), pid_fp_file.clone(), ctx_fp_file.clone());
             let path = path.to_string();
             thread::spawn(move || run_flatpak_file(&weak, &tx, &path, &input, &pid, &ctx));
         }
     });
-    if let Some(path) = flatpak_file_arg.as_deref() {
-        window.invoke_open_flatpak_file(SharedString::from(path));
+    window.on_run_appimage_file({
+        let (weak, launched) = (window.as_weak(), launched_for_file.clone());
+        move |path| {
+            let Some(w) = weak.upgrade() else { return };
+            match run_appimage_file(path.as_str()) {
+                Ok(()) => {
+                    w.set_show_appimage_open(false);
+                    if launched.get() {
+                        slint::quit_event_loop().ok();
+                    }
+                }
+                Err(e) => w.set_appimage_open_error(SharedString::from(e.as_str())),
+            }
+        }
+    });
+    window.on_install_appimage_local({
+        let (weak, launched, tx, dir) = (window.as_weak(), launched_for_file.clone(), tx.clone(), appimage_dir_state.clone());
+        move |path| {
+            if let Some(w) = weak.upgrade() {
+                w.set_show_appimage_open(false);
+            }
+            launched.set(false);
+            let path = path.to_string();
+            let (tx, dir) = (tx.clone(), dir.lock().unwrap().clone());
+            thread::spawn(move || {
+                let name = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                run_appimage_op(&tx, &format!("Installing {name}"), Some(dir), None, None, |backend, log| {
+                    backend.install(&path, log).map(|_| ())
+                });
+            });
+        }
+    });
+    window.on_cancel_appimage_open({
+        let (weak, launched) = (window.as_weak(), launched_for_file.clone());
+        move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_show_appimage_open(false);
+            }
+            if launched.get() {
+                slint::quit_event_loop().ok();
+            }
+        }
+    });
+    if let Some(path) = local_file_arg.as_deref() {
+        window.invoke_open_local_file(SharedString::from(path));
     }
 
     let tx_ai_file = tx.clone();
@@ -4836,7 +5361,7 @@ fn main() {
         thread::spawn(move || {
             let Some(path) = pick_appimage_file() else { return };
             let title = format!("Installing {}", path);
-            run_appimage_op(&tx, &title, Some(dir), None, |backend, log| {
+            run_appimage_op(&tx, &title, Some(dir), None, None, |backend, log| {
                 backend.install(&path, log).map(|_| ())
             });
         });
@@ -4853,7 +5378,7 @@ fn main() {
         let dir = dir_ai_url.lock().unwrap().clone();
         thread::spawn(move || {
             let title = format!("Installing {}", url);
-            run_appimage_op(&tx, &title, Some(dir), None, |backend, log| {
+            run_appimage_op(&tx, &title, Some(dir), None, None, |backend, log| {
                 backend.install(&url, log).map(|_| ())
             });
         });
@@ -4865,7 +5390,7 @@ fn main() {
         let tx = tx_ai_remove.clone();
         thread::spawn(move || {
             let title = format!("Removing {}", name);
-            run_appimage_op(&tx, &title, None, None, |backend, log| backend.remove_app(&name, log));
+            run_appimage_op(&tx, &title, None, None, None, |backend, log| backend.remove_app(&name, log));
         });
     });
 
@@ -4877,7 +5402,7 @@ fn main() {
         let dir = dir_ai_update.lock().unwrap().clone();
         thread::spawn(move || {
             let title = format!("Updating {}", name);
-            run_appimage_op(&tx, &title, Some(dir), Some(name.clone()), |backend, log| {
+            run_appimage_op(&tx, &title, Some(dir), Some(name.clone()), None, |backend, log| {
                 backend.update_app(&name, log).map(|_| ())
             });
         });
@@ -4891,7 +5416,7 @@ fn main() {
         let dir = dir_ai_reinstall.lock().unwrap().clone();
         thread::spawn(move || {
             let title = format!("Reinstalling {}", name);
-            run_appimage_op(&tx, &title, Some(dir), Some(name.clone()), |backend, log| {
+            run_appimage_op(&tx, &title, Some(dir), Some(name.clone()), None, |backend, log| {
                 backend.reinstall_app(&name, log).map(|_| ())
             });
         });
@@ -4981,7 +5506,8 @@ fn main() {
         let dir = dir_ai_cat.lock().unwrap().clone();
         thread::spawn(move || {
             let title = format!("Installing {}", github);
-            run_appimage_op(&tx, &title, Some(dir), None, |backend, log| {
+            let key = github.clone();
+            run_appimage_op(&tx, &title, Some(dir), None, Some(key), |backend, log| {
                 backend.install_from_github(&github, log).map(|_| ())
             });
         });
@@ -5382,85 +5908,6 @@ fn main() {
                 .collect();
             let _ = tx.send(UiMessage::RemoteAppsFiltered { serial: my_serial, apps, total_matches: total });
         });
-    });
-
-    let win_toggle_fk = window.as_weak();
-    window.on_toggle_flatpak_selected(move |app_id, checked| {
-        if let Some(w) = win_toggle_fk.upgrade() {
-            let model = w.get_remote_apps();
-            let updated: Vec<PackageData> = (0..model.row_count())
-                .filter_map(|i| model.row_data(i))
-                .map(|mut p| {
-                    if p.name.as_str() == app_id.as_str() {
-                        p.selected = checked;
-                    }
-                    p
-                })
-                .collect();
-            let sel_count = updated.iter().filter(|p| p.selected).count() as i32;
-            let sel_installed = updated.iter().filter(|p| p.selected && p.installed).count() as i32;
-            let sel_uninstalled = updated.iter().filter(|p| p.selected && !p.installed).count() as i32;
-            w.set_remote_apps(ModelRc::new(VecModel::from(updated)));
-            w.set_selected_count(sel_count);
-            w.set_selected_installed_count(sel_installed);
-            w.set_selected_uninstalled_count(sel_uninstalled);
-        }
-    });
-
-    let win_batch_fi = window.as_weak();
-    let tx_bfi = tx.clone();
-    let bfi_input = terminal_input_sender.clone();
-    let bfi_pid = terminal_child_pid.clone();
-    window.on_batch_flatpak_install(move || {
-        if let Some(w) = win_batch_fi.upgrade() {
-            let model = w.get_remote_apps();
-            let ids: Vec<String> = (0..model.row_count())
-                .filter_map(|i| model.row_data(i))
-                .filter(|p| p.selected && !p.installed)
-                .map(|p| p.name.to_string())
-                .collect();
-            if ids.is_empty() {
-                return;
-            }
-            let tx = tx_bfi.clone();
-            let input = bfi_input.clone();
-            let pid = bfi_pid.clone();
-            let title = format!("Installing {} Flatpak(s)", ids.len());
-            thread::spawn(move || {
-                let mut args = vec!["install", "flathub"];
-                let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-                args.extend(id_refs.iter().copied());
-                run_in_terminal(&tx, &title, "flatpak", &args, &input, &pid);
-            });
-        }
-    });
-
-    let win_batch_fr = window.as_weak();
-    let tx_bfr = tx.clone();
-    let bfr_input = terminal_input_sender.clone();
-    let bfr_pid = terminal_child_pid.clone();
-    window.on_batch_flatpak_remove(move || {
-        if let Some(w) = win_batch_fr.upgrade() {
-            let model = w.get_remote_apps();
-            let ids: Vec<String> = (0..model.row_count())
-                .filter_map(|i| model.row_data(i))
-                .filter(|p| p.selected && p.installed)
-                .map(|p| p.name.to_string())
-                .collect();
-            if ids.is_empty() {
-                return;
-            }
-            let tx = tx_bfr.clone();
-            let input = bfr_input.clone();
-            let pid = bfr_pid.clone();
-            let title = format!("Removing {} Flatpak(s)", ids.len());
-            thread::spawn(move || {
-                let mut args = vec!["uninstall"];
-                let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-                args.extend(id_refs.iter().copied());
-                run_in_terminal(&tx, &title, "flatpak", &args, &input, &pid);
-            });
-        }
     });
 
     let tx_detail = tx.clone();
@@ -6324,11 +6771,9 @@ fn main() {
                     }
                 }
                 if files.is_empty() {
-                    let _ = tx.send(UiMessage::ShowProgressPopup("Rollback".to_string()));
-                    let _ = tx.send(UiMessage::ProgressOutput(
-                        "No previous versions found in cache or the Arch Linux Archive. Nothing to roll back.\n".to_string(),
-                    ));
-                    let _ = tx.send(UiMessage::OperationDone(false));
+                    let reporter = OpReporter::start(&tx, "Rollback", Mode { cancellable: false }, 1);
+                    reporter.feeder().line("No previous versions found in cache or the Arch Linux Archive. Nothing to roll back.");
+                    reporter.finish(false);
                     return;
                 }
                 // Build an interactive pacman -U over the resolved files. No --noconfirm:
@@ -6513,14 +6958,6 @@ fn main() {
     }
 
     window.set_aur_pill_dismissed(config.aur_pill_dismissed);
-    window.global::<Cat>().set_font_scale(config.font_scale);
-
-    window.on_save_font_scale(|scale| {
-        let mut cfg = load_config();
-        cfg.font_scale = scale;
-        save_config(&cfg);
-    });
-
     window.on_aur_pill_dismiss(|| {
         let mut cfg = load_config();
         cfg.aur_pill_dismissed = true;
@@ -7519,23 +7956,6 @@ mod news_tests {
 }
 
 #[cfg(test)]
-mod update_plan_tests {
-    use super::update_script;
-
-    #[test]
-    fn script_matches_enabled_backends() {
-        assert_eq!(update_script(false, false), None);
-        assert_eq!(update_script(true, false).as_deref(), Some("pkexec pacman -Syu"));
-        let both = update_script(true, true).unwrap();
-        assert!(both.starts_with("pkexec bash -c 'pacman -Syu"));
-        assert!(both.contains("flatpak update --user"));
-        let flatpak_only = update_script(false, true).unwrap();
-        assert!(!flatpak_only.contains("pacman"));
-        assert!(flatpak_only.contains("pkexec flatpak update --system"));
-    }
-}
-
-#[cfg(test)]
 mod flatpak_file_tests {
     use super::*;
 
@@ -7545,6 +7965,25 @@ mod flatpak_file_tests {
         assert!(flatpak_file_kind("/a/b.FlatpakRef") == Some(FlatpakFile::Install));
         assert!(flatpak_file_kind("/a/b.flatpakrepo") == Some(FlatpakFile::Repo));
         assert!(flatpak_file_kind("/a/b.AppImage").is_none());
+    }
+
+    #[test]
+    fn runs_a_non_executable_appimage_detached() {
+        let dir = std::env::temp_dir().join(format!("xpm-run-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("ran");
+        let app = dir.join("Test.AppImage");
+        std::fs::write(&app, format!("#!/bin/sh\necho ok > '{}'\n", marker.display())).unwrap();
+        assert!(is_appimage_path(app.to_str().unwrap()) && is_local_file(app.to_str().unwrap()));
+        run_appimage_file(app.to_str().unwrap()).unwrap();
+        for _ in 0..50 {
+            if marker.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(marker.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -7560,5 +7999,31 @@ mod flatpak_file_tests {
         std::fs::write(&path, "[Flatpak Repo]\nTitle=No Url\n").unwrap();
         assert!(parse_flatpakrepo(path.to_str().unwrap()).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod gpu_name_tests {
+    use super::*;
+
+    const DB: &str = "# comment\n10de  NVIDIA Corporation\n\t2484  GA104 [GeForce RTX 3070]\n1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\t15e7  Barcelo\n\t73ff  Navi 23 [Radeon RX 6600/6600 XT/6600M]\n8086  Intel Corporation\n\t46a6  Alder Lake-P GT2 [Iris Xe Graphics]\n";
+
+    fn name(v: u16, d: u16) -> String {
+        let (vn, dn) = pci_ids_lookup(DB, v, d);
+        gpu_label(v, vn.as_deref(), dn.as_deref())
+    }
+
+    #[test]
+    fn names_come_from_the_pci_database() {
+        assert_eq!(name(0x10de, 0x2484), "NVIDIA GeForce RTX 3070");
+        assert_eq!(name(0x1002, 0x73ff), "AMD Radeon RX 6600/6600 XT/6600M");
+        assert_eq!(name(0x1002, 0x15e7), "AMD Radeon Graphics (Barcelo)");
+        assert_eq!(name(0x8086, 0x46a6), "Intel Iris Xe Graphics");
+    }
+
+    #[test]
+    fn unknown_ids_fall_back_to_vendor_and_id() {
+        assert_eq!(pci_ids_lookup(DB, 0x1002, 0xffff).1, None);
+        assert_eq!(pci_ids_lookup(DB, 0x9999, 0x0001), (None, None));
     }
 }
