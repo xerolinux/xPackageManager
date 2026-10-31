@@ -4,9 +4,7 @@ A package manager GUI for Arch Linux that manages **pacman**, **Flatpak** and **
 
 Included by default on XeroLinux.
 
-<video src="https://github.com/xerolinux/xPackageManager/raw/main/media/xpm-demo.mp4" poster="https://github.com/xerolinux/xPackageManager/raw/main/media/xpm-demo.png" controls width="900">
-  <a href="media/xpm-demo.mp4">Watch the demo video</a>
-</video>
+[![xPackageManager demo video, click to play](media/xpm-demo.png)](media/xpm-demo.mp4)
 
 ---
 
