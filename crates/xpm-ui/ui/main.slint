@@ -86,11 +86,21 @@ export struct RefRow {
     detail: string,
     state: int,
     percent: int,
+    group: int,
+}
+
+export struct StageRow {
+    label: string,
+    kind: int,
+    steps: [string],
+    active: int,
+    state: int,
 }
 
 export struct SummaryTile {
     label: string,
     count: int,
+    detail: string,
     kind: int,
 }
 
@@ -1386,8 +1396,9 @@ component ProgressDialog inherits Rectangle {
     in-out property <bool> details-open;
     in property <[LogLine]> lines;
     in property <[RefRow]> refs;
-    in property <[string]> phases;
-    in property <int> phase;
+    in property <[StageRow]> stages;
+    in-out property <int> page;
+    in-out property <bool> page-manual;
     in property <string> error-summary;
     in property <string> prompt;
     in property <bool> show-input;
@@ -1423,7 +1434,7 @@ component ProgressDialog inherits Rectangle {
         return Cat.text;
     }
 
-    property <bool> log-visible: root.details-open || (root.refs.length == 0 && root.phases.length == 0);
+    property <bool> log-visible: root.details-open || (root.refs.length == 0 && root.stages.length == 0);
     property <length> card-w: min(680px, root.width - 40px);
     property <length> char-w: cell-probe.preferred-width / 40;
     out property <int> term-cols: max(20, floor((card-w - 24px - 16px) / max(char-w, 1px)));
@@ -1507,7 +1518,7 @@ component ProgressDialog inherits Rectangle {
                         }
                     }
 
-                    if root.refs.length > 0 || root.phases.length > 0: VerticalLayout {
+                    if root.refs.length > 0 || root.stages.length > 0: VerticalLayout {
                         alignment: center;
                         Rectangle {
                             width: 30px;
@@ -1668,49 +1679,98 @@ component ProgressDialog inherits Rectangle {
                     }
                 }
 
-                if root.phases.length > 0 && !(root.done && root.success && root.summary-visible): Rectangle {
-                    height: 54px;
-                    background: Cat.crust.with-alpha(0.5);
-                    border-radius: 8px;
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 0px;
-                        for label[i] in root.phases: VerticalLayout {
+                if root.stages.length > 1 && !(root.done && root.success && root.summary-visible): HorizontalLayout {
+                    spacing: 6px;
+                    for group[i] in root.stages: tab := Rectangle {
+                        property <color> c: group.kind == 0 ? Cat.mauve : (group.kind == 1 ? Cat.blue : Cat.peach);
+                        height: 34px;
+                        border-radius: 8px;
+                        horizontal-stretch: 1;
+                        background: i == root.page ? c.with-alpha(0.2) : (tab-touch.has-hover ? Cat.surface0 : transparent);
+                        border-width: 1px;
+                        border-color: i == root.page ? c.with-alpha(0.55) : Cat.divider;
+                        animate background { duration: 80ms; }
+                        HorizontalLayout {
                             alignment: center;
-                            spacing: 5px;
-                            horizontal-stretch: 1;
-                            Rectangle {
-                                height: 20px;
+                            spacing: 7px;
+                            VerticalLayout {
+                                alignment: center;
                                 Rectangle {
-                                    x: (parent.width - self.width) / 2;
-                                    width: 20px;
-                                    height: 20px;
-                                    border-radius: 10px;
-                                    background: i < root.phase ? Cat.green.with-alpha(0.2) : (i == root.phase && !root.done ? Cat.mauve.with-alpha(0.25) : Cat.surface1.with-alpha(0.5));
-                                    if i < root.phase: NavIcon { d: "M20 6L9 17l-5-5"; icon-color: Cat.green; width: 11px; height: 11px; x: 4.5px; y: 4.5px; }
-                                    if i == root.phase && !root.done: LoadingCircle { diameter: 14px; x: 3px; y: 3px; }
+                                    width: 16px;
+                                    height: 16px;
+                                    if group.state == 2: NavIcon { d: "M20 6L9 17l-5-5"; icon-color: tab.c; width: 13px; height: 13px; x: 1.5px; y: 1.5px; }
+                                    if group.state == 1 && !root.done: LoadingCircle { diameter: 12px; x: 2px; y: 2px; dot-color: tab.c; }
+                                    if group.state == 0 || (group.state == 1 && root.done): Rectangle { x: 4px; y: 4px; width: 8px; height: 8px; border-radius: 4px; background: Cat.overlay0; }
                                 }
                             }
-                            Text {
-                                text: label;
-                                font-size: Cat.fs11;
-                                font-weight: i == root.phase && !root.done ? 700 : 400;
-                                color: i < root.phase ? Cat.green : (i == root.phase && !root.done ? Cat.text : Cat.overlay0);
-                                horizontal-alignment: center;
+                            Text { text: group.label; font-size: Cat.fs13; font-weight: 600; color: i == root.page ? tab.c : Cat.overlay1; vertical-alignment: center; }
+                        }
+                        tab-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.page = i; root.page-manual = true; }
+                        }
+                    }
+                }
+
+                if root.stages.length > 0 && !(root.done && root.success && root.summary-visible): VerticalLayout {
+                    spacing: 0px;
+                    for group[i] in root.stages: grp := Rectangle {
+                        property <color> c: group.kind == 0 ? Cat.mauve : (group.kind == 1 ? Cat.blue : Cat.peach);
+                        property <bool> shown: root.stages.length == 1 || i == root.page;
+                        visible: shown;
+                        height: shown ? 46px : 0px;
+                        background: c.with-alpha(0.08);
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: c.with-alpha(0.25);
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            VerticalLayout {
+                                alignment: center;
+                                width: 66px;
+                                Text { text: group.label; font-size: Cat.fs12; font-weight: 700; color: grp.c; }
+                            }
+                            for label[i] in group.steps: VerticalLayout {
+                                alignment: center;
+                                spacing: 3px;
+                                horizontal-stretch: 1;
+                                Rectangle {
+                                    height: 18px;
+                                    Rectangle {
+                                        x: (parent.width - self.width) / 2;
+                                        width: 18px;
+                                        height: 18px;
+                                        border-radius: 9px;
+                                        background: i < group.active ? grp.c.with-alpha(0.22) : (i == group.active && group.state == 1 && !root.done ? grp.c.with-alpha(0.3) : Cat.surface1.with-alpha(0.5));
+                                        if i < group.active: NavIcon { d: "M20 6L9 17l-5-5"; icon-color: grp.c; width: 10px; height: 10px; x: 4px; y: 4px; }
+                                        if i == group.active && group.state == 1 && !root.done: LoadingCircle { diameter: 12px; x: 3px; y: 3px; dot-color: grp.c; }
+                                    }
+                                }
+                                Text {
+                                    text: label;
+                                    font-size: Cat.fs10;
+                                    font-weight: i == group.active && group.state == 1 && !root.done ? 700 : 400;
+                                    color: (i == group.active && group.state == 1 && !root.done) || i < group.active ? Cat.text : Cat.overlay0;
+                                    horizontal-alignment: center;
+                                }
                             }
                         }
                     }
                 }
 
                 if root.refs.length > 0 && !(root.done && root.success && root.summary-visible): Rectangle {
-                    height: min(root.refs.length * 34px, root.log-visible ? 150px : 280px) + 2px;
+                    height: root.stages.length > 1 ? (root.log-visible ? 150px : 200px) : min(root.refs.length * 34px, root.log-visible ? 150px : 280px) + 2px;
                     background: Cat.crust.with-alpha(0.5);
                     border-radius: 8px;
                     clip: true;
-                    ListView {
+                    ScrollView {
+                        VerticalLayout {
                         for r in root.refs: Rectangle {
-                            height: 34px;
+                            property <bool> shown: root.stages.length <= 1 || r.group == root.page;
+                            visible: shown;
+                            height: shown ? 34px : 0px;
                             HorizontalLayout {
                                 padding-left: 10px;
                                 padding-right: 10px;
@@ -1773,6 +1833,7 @@ component ProgressDialog inherits Rectangle {
                                 }
                             }
                         }
+                        }
                     }
                 }
 
@@ -1780,18 +1841,19 @@ component ProgressDialog inherits Rectangle {
                     alignment: center;
                     spacing: 8px;
                     for tile in root.tiles: tile-rect := Rectangle {
-                        property <color> c: tile.kind == 0 ? Cat.green : (tile.kind == 1 ? Cat.blue : (tile.kind == 2 ? Cat.red : Cat.yellow));
-                        width: min(140px, (root.card-w - 40px - 8px * (root.tiles.length - 1)) / max(root.tiles.length, 1));
-                        height: 58px;
-                        border-radius: 10px;
+                        property <color> c: tile.kind == 0 ? Cat.mauve : (tile.kind == 1 ? Cat.blue : (tile.kind == 2 ? Cat.peach : Cat.yellow));
+                        width: min(170px, (root.card-w - 40px - 8px * (root.tiles.length - 1)) / max(root.tiles.length, 1));
+                        height: 82px;
+                        border-radius: 12px;
                         background: c.with-alpha(0.12);
                         border-width: 1px;
-                        border-color: c.with-alpha(0.3);
+                        border-color: c.with-alpha(0.35);
                         VerticalLayout {
                             alignment: center;
-                            spacing: 0px;
-                            Text { text: tile.count; font-size: 22px; font-weight: 700; color: tile-rect.c; horizontal-alignment: center; }
-                            Text { text: tile.label; font-size: Cat.fs11; color: Cat.overlay1; horizontal-alignment: center; overflow: elide; }
+                            spacing: 1px;
+                            Text { text: tile.count; font-size: 26px; font-weight: 700; color: tile-rect.c; horizontal-alignment: center; }
+                            Text { text: tile.label; font-size: Cat.fs13; font-weight: 600; color: Cat.text; horizontal-alignment: center; }
+                            Text { text: tile.detail; font-size: Cat.fs11; color: Cat.overlay1; horizontal-alignment: center; overflow: elide; }
                         }
                     }
                 }
@@ -1929,7 +1991,7 @@ export component MainWindow inherits Window {
     in-out property <int> selected-index: -1;
     in-out property <bool> loading: false;
     in-out property <bool> busy: false;
-    in-out property <string> app-version: "0.8.0";
+    in-out property <string> app-version: "0.8.1";
     in-out property <bool> show-about: false;
     in-out property <bool> show-appimage-open: false;
     in-out property <string> appimage-open-path: "";
@@ -1956,6 +2018,7 @@ export component MainWindow inherits Window {
     in-out property <bool> show-pd-modal: false;
     in-out property <int> setting-clean-keep-versions: 3;
     in-out property <bool> setting-notify-on-updates: false;
+    in-out property <bool> setting-startup-sound: true;
     in-out property <bool> setting-auto-clean-cache: false;
     in-out property <bool> setting-appimage-enabled: false;
     in-out property <string> setting-appimage-dir: "";
@@ -2019,8 +2082,9 @@ export component MainWindow inherits Window {
     in-out property <bool> progress-popup-success: false;
     in-out property <[LogLine]> progress-lines: [];
     in-out property <[RefRow]> progress-refs: [];
-    in-out property <[string]> progress-phases: [];
-    in-out property <int> progress-phase: 0;
+    in-out property <[StageRow]> progress-stages: [];
+    in-out property <int> progress-page: 0;
+    in-out property <bool> progress-page-manual: false;
     in-out property <bool> progress-popup-show-input: false;
     in-out property <string> progress-popup-prompt: "";
     in-out property <bool> progress-show-details: false;
@@ -2269,9 +2333,10 @@ export component MainWindow inherits Window {
     callback import-package-list;
     in-out property <bool> show-unlock-db-confirm: false;
     callback unlock-db;
-    in-out property <bool> show-distro-warning: false;
-    in-out property <bool> distro-warning-dismissed: false;
-    callback distro-warning-dismiss();
+    in-out property <bool> show-first-launch: false;
+    in-out property <angle> fl-angle: 0deg;
+    callback first-launch-accept();
+    callback first-launch-quit();
     in-out property <bool> ignorepkg-active: false;
     in-out property <string> ignorepkg-value: "";
     in-out property <string> ignorepkg-edit-text: "";
@@ -2513,6 +2578,9 @@ export component MainWindow inherits Window {
 
             Rectangle { vertical-stretch: 1; }
 
+            Rectangle { height: 1px; background: Cat.divider; }
+            Rectangle { height: 10px; }
+
             if total-update-count > 0: NavButton {
                 icon-path: icon-arrow-up;
                 label: @tr("Updates");
@@ -2522,12 +2590,14 @@ export component MainWindow inherits Window {
                 clicked => { view = 1; selected-index = -1; }
             }
 
+            if total-update-count > 0: Rectangle { height: 10px; }
+
             HorizontalLayout {
-                spacing: 6px;
+                spacing: 8px;
                 sync-btn := Rectangle {
                     property <bool> checking: busy || loading;
-                    height: 31px;
-                    border-radius: 8px;
+                    height: 38px;
+                    border-radius: 10px;
                     background: sync-btn.checking ? Cat.mauve.with-alpha(0.5) : (sync-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85));
                     animate background { duration: 100ms; }
 
@@ -2555,9 +2625,9 @@ export component MainWindow inherits Window {
                 }
 
                 Rectangle {
-                    width: 31px;
-                    height: 31px;
-                    border-radius: 8px;
+                    width: 38px;
+                    height: 38px;
+                    border-radius: 10px;
                     background: about-touch.has-hover ? Cat.surface1 : Cat.surface0;
                     border-width: 1px;
                     border-color: Cat.surface1;
@@ -2570,10 +2640,10 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle { height: 8px; }
+            Rectangle { height: 14px; }
 
             HorizontalLayout {
-                padding-left: 4px;
+                padding-left: 6px;
                 spacing: 4px;
 
                 Text {
@@ -2699,6 +2769,45 @@ export component MainWindow inherits Window {
                     icon: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M12 18v-6M9 15h6";
                     clicked => { root.install-flatpak-file(); }
                 }
+
+                if view == 5: Rectangle {
+        width: 132px;
+                    height: 30px;
+        HorizontalLayout {
+            alignment: center;
+            spacing: 8px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 28px;
+                    height: 16px;
+                    border-radius: 8px;
+                    background: root.setting-startup-sound ? Cat.mauve : Cat.surface1;
+                    animate background { duration: 100ms; }
+                    Rectangle {
+                        x: root.setting-startup-sound ? parent.width - self.width - 2px : 2px;
+                        y: 2px;
+                        width: 12px;
+                        height: 12px;
+                        border-radius: 6px;
+                        background: root.setting-startup-sound ? Cat.crust : Cat.overlay1;
+                        animate x { duration: 100ms; }
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Text { text: @tr("Startup sound"); font-size: Cat.fs11; color: Cat.overlay1; }
+            }
+        }
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.setting-startup-sound = !root.setting-startup-sound;
+                root.save-settings();
+            }
+        }
+    }
 
                 if view == 13: Btn {
                     label: arch-news-loading ? "Loading..." : "Refresh";
@@ -7876,8 +7985,9 @@ export component MainWindow inherits Window {
         details-open <=> progress-show-details;
         lines: progress-lines;
         refs: progress-refs;
-        phases: progress-phases;
-        phase: progress-phase;
+        stages: progress-stages;
+        page <=> progress-page;
+        page-manual <=> progress-page-manual;
         error-summary: progress-error-summary;
         prompt: progress-popup-prompt;
         show-input: progress-popup-show-input;
@@ -8766,162 +8876,315 @@ export component MainWindow inherits Window {
     }
 
 
-    if show-distro-warning: Rectangle {
-        width: 100%; height: 100%;
-        background: #000000.with-alpha(0.72);
+    if show-first-launch: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.with-alpha(0.74);
         TouchArea {}
+        Timer {
+            interval: 30ms;
+            running: root.show-first-launch;
+            triggered => { root.fl-angle = Math.mod(root.fl-angle / 1deg + 4, 360) * 1deg; }
+        }
 
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: min(500px, parent.width - 48px);
-            height: layout.min-height;
-            border-radius: 14px;
-            background: #1a0a0a;
-            border-width: 2px;
-            border-color: Cat.red.with-alpha(0.7);
-            drop-shadow-blur: 40px;
-            drop-shadow-color: Cat.red.with-alpha(0.35);
-            drop-shadow-offset-y: 8px;
+            width: min(580px, parent.width - 40px);
+            height: min(fl-layout.preferred-height + 40px, parent.height - 40px);
+            background: Cat.panel;
+            border-radius: 18px;
+            border-width: 1px;
+            border-color: Cat.divider;
+            clip: true;
+            drop-shadow-blur: 44px;
+            drop-shadow-color: black.with-alpha(0.6);
+            drop-shadow-offset-y: 14px;
 
-            layout := VerticalLayout {
-                padding: 28px;
-                spacing: 20px;
-                property <bool> never-show-checked: false;
+            fl-layout := VerticalLayout {
+                property <bool> accepted: false;
 
                 Rectangle {
-                    height: 4px;
-                    border-radius: 2px;
-                    background: @linear-gradient(90deg, Cat.red, Cat.red.with-alpha(0.3));
-                }
-
-                HorizontalLayout {
-                    spacing: 14px;
-                    VerticalLayout {
-                        alignment: center;
-                        NavIcon {
-                            d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
-                            icon-color: Cat.red;
-                            width: 28px; height: 28px;
+                    height: 108px;
+                    background: @linear-gradient(135deg, Cat.mauve.with-alpha(0.26), Cat.mauve.with-alpha(0.04));
+                    HorizontalLayout {
+                        padding-left: 32px;
+                        padding-right: 32px;
+                        spacing: 18px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 52px;
+                                height: 52px;
+                                border-radius: 16px;
+                                background: Cat.mauve.with-alpha(0.22);
+                                border-width: 1px;
+                                border-color: Cat.mauve.with-alpha(0.55);
+                                NavIcon {
+                                    d: "M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4L12 3z M18.5 15l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9.9-2.1z";
+                                    icon-color: Cat.mauve;
+                                    width: 28px;
+                                    height: 28px;
+                                    x: 12px;
+                                    y: 12px;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 6px;
+                                Text { text: "A.I/CLAUDE"; font-size: Cat.fs11; font-weight: 800; letter-spacing: 0.8px; color: #cc785c; }
+                                Text { text: @tr("ASSISTED  ·  WORK IN PROGRESS"); font-size: Cat.fs11; font-weight: 700; letter-spacing: 0.8px; color: Cat.yellow; }
+                            }
+                            Text { text: @tr("Welcome to xPackage Manager"); font-size: 21px; font-weight: 700; color: Cat.text; }
                         }
                     }
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 4px;
-                        Text {
-                            text: @tr("⚠  UNSUPPORTED DISTRIBUTION");
-                            font-size: Cat.fs16; font-weight: 800;
-                            color: Cat.red;
-                            letter-spacing: 0.5px;
+                }
+
+                Rectangle { height: 1px; background: Cat.divider; }
+
+                VerticalLayout {
+                    padding-left: 32px;
+                    padding-right: 32px;
+                    padding-top: 28px;
+                    padding-bottom: 28px;
+                    spacing: 22px;
+
+                    HorizontalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 34px;
+                                height: 34px;
+                                border-radius: 10px;
+                                background: Cat.mauve.with-alpha(0.14);
+                                NavIcon { d: "M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4L12 3z"; icon-color: Cat.mauve; width: 17px; height: 17px; x: 8.5px; y: 8.5px; }
+                            }
                         }
-                        Text {
-                            text: @tr("xPackageManager is built exclusively for XeroLinux");
-                            font-size: Cat.fs11; font-weight: 400;
-                            color: #aa7777;
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            FlexboxLayout {
+                                spacing-horizontal: 5px;
+                                spacing-vertical: 0px;
+                                min-height: 42px;
+                                for w in [
+                                    { t: "Built", x: false }, { t: "with", x: false }, { t: "the", x: false }, { t: "help", x: false }, { t: "of", x: false },
+                                    { t: "A.I/Claude", x: true },
+                                    { t: "and", x: false }, { t: "still", x: false }, { t: "being", x: false }, { t: "developed.", x: false },
+                                    { t: "Things", x: false }, { t: "may", x: false }, { t: "break,", x: false }, { t: "change", x: false },
+                                    { t: "or", x: false }, { t: "behave", x: false }, { t: "unexpectedly.", x: false },
+                                ]: Text {
+                                    text: w.t;
+                                    font-size: Cat.fs14;
+                                    font-weight: w.x ? 800 : 400;
+                                    color: w.x ? #cc785c : Cat.subtext0;
+                                }
+                            }
                         }
                     }
-                }
 
-                Rectangle { height: 1px; background: Cat.red.with-alpha(0.2); }
+                    HorizontalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 34px;
+                                height: 34px;
+                                border-radius: 10px;
+                                background: Cat.yellow.with-alpha(0.14);
+                                NavIcon { d: "M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6l8-3z M9 12l2 2 4-4"; icon-color: Cat.yellow; width: 17px; height: 17px; x: 8.5px; y: 8.5px; }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: @tr("It manages your system's packages, so back up anything important before you update or remove things.");
+                                font-size: Cat.fs14;
+                                color: Cat.subtext0;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
 
-                Text {
-                    text: @tr("This application was built specifically for XeroLinux.\n\nUsing it on any other Arch-based distribution is entirely at your own risk. No support, warranty, or guarantees of any kind are provided. \n\nFunctionality may be incomplete or incorrect on unsupported systems.");
-                    font-size: Cat.fs14;
-                    color: #e8c8c8;
-                    wrap: word-wrap;
-                }
+                    Rectangle {
+                        height: 82px;
+                        border-radius: 13px;
+                        background: @conic-gradient(from root.fl-angle,
+                            Cat.mauve 0deg,
+                            Cat.blue 55deg,
+                            Cat.mauve.with-alpha(0.22) 120deg,
+                            Cat.mauve.with-alpha(0.22) 300deg,
+                            Cat.mauve 360deg);
 
-                Rectangle { height: 1px; background: Cat.red.with-alpha(0.2); }
+                        Rectangle {
+                            x: 1.5px;
+                            y: 1.5px;
+                            width: parent.width - 3px;
+                            height: parent.height - 3px;
+                            border-radius: 11.5px;
+                            background: Cat.panel;
 
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: end;
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 14px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 34px;
+                                        height: 34px;
+                                        border-radius: 10px;
+                                        background: Cat.mauve.with-alpha(0.16);
+                                        NavIcon { d: "M3 4h18v12H3z M8 21h8 M12 16v5"; icon-color: Cat.mauve; width: 17px; height: 17px; x: 8.5px; y: 8.5px; }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    FlexboxLayout {
+                                        spacing-horizontal: 5px;
+                                        spacing-vertical: 0px;
+                                        min-height: 42px;
+                                        for w in [
+                                            { t: "Primarily", x: false }, { t: "built", x: false }, { t: "for", x: false },
+                                            { t: "XeroLinux.", x: true },
+                                            { t: "On", x: false }, { t: "any", x: false }, { t: "other", x: false },
+                                            { t: "Arch-based", x: false }, { t: "distribution,", x: false },
+                                            { t: "which", x: false }, { t: "is", x: false }, { t: "possible,", x: false },
+                                            { t: "no", x: false }, { t: "support", x: false }, { t: "will", x: false },
+                                            { t: "be", x: false }, { t: "provided.", x: false },
+                                        ]: Text {
+                                            text: w.t;
+                                            font-size: Cat.fs14;
+                                            font-weight: w.x ? 800 : 400;
+                                            color: w.x ? Cat.mauve : Cat.subtext0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
-                    VerticalLayout {
-                        alignment: center;
-                        horizontal-stretch: 1;
+                    Rectangle {
+                        border-radius: 12px;
+                        background: Cat.yellow.with-alpha(0.09);
+                        border-width: 1px;
+                        border-color: Cat.yellow.with-alpha(0.35);
                         HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
+                            padding: 20px;
+                            padding-top: 18px;
+                            padding-bottom: 18px;
+                            spacing: 16px;
                             VerticalLayout {
-                                alignment: center;
-                                Rectangle {
-                                    width: 18px; height: 18px;
-                                    border-radius: 4px;
-                                    border-width: 1.5px;
-                                    border-color: layout.never-show-checked ? Cat.red.with-alpha(0.8) : Cat.red.with-alpha(0.35);
-                                    background: layout.never-show-checked ? Cat.red.with-alpha(0.18) : transparent;
-                                    animate background { duration: 60ms; }
-
-                                    if layout.never-show-checked: NavIcon {
-                                        d: "M5 12l4 4L19 7";
-                                        icon-color: Cat.red;
-                                        width: 12px; height: 12px;
-                                        x: (parent.width - 12px) / 2;
-                                        y: (parent.height - 12px) / 2;
-                                    }
-
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { layout.never-show-checked = !layout.never-show-checked; }
-                                    }
+                                alignment: start;
+                                NavIcon {
+                                    d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
+                                    icon-color: Cat.yellow;
+                                    width: 18px;
+                                    height: 18px;
                                 }
                             }
                             VerticalLayout {
                                 alignment: center;
+                                horizontal-stretch: 1;
                                 Text {
-                                    text: @tr("Don't show this again");
+                                    text: @tr("NO WARRANTY. This software is provided \"as is\", without warranty of any kind. You use it entirely at your own risk.");
                                     font-size: Cat.fs13;
-                                    color: #aa7777;
+                                    font-weight: 600;
+                                    color: Cat.yellow;
+                                    wrap: word-wrap;
                                 }
                             }
                         }
                     }
+                }
 
-                    Rectangle {
-                        width: src-lbl.preferred-width + 28px;
-                        height: 36px;
-                        border-radius: 8px;
-                        background: src-ta.has-hover ? Cat.blue.with-alpha(0.22) : Cat.blue.with-alpha(0.1);
-                        border-width: 1px;
-                        border-color: Cat.blue.with-alpha(0.4);
-                        animate background { duration: 60ms; }
-                        src-lbl := Text {
-                            text: @tr("View Source");
-                            font-size: Cat.fs13; font-weight: 600;
-                            color: Cat.blue;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        src-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.open-url("https://github.com/xerolinux/xPackageManager"); }
-                        }
-                    }
+                Rectangle { height: 1px; background: Cat.divider; }
 
-                    Rectangle {
-                        width: ack-lbl.preferred-width + 28px;
-                        height: 36px;
-                        border-radius: 8px;
-                        background: ack-ta.has-hover ? Cat.red.with-alpha(0.35) : Cat.red.with-alpha(0.18);
-                        border-width: 1px;
-                        border-color: Cat.red.with-alpha(0.55);
-                        animate background { duration: 60ms; }
-                        ack-lbl := Text {
-                            text: @tr("I Understand, Proceed");
-                            font-size: Cat.fs13; font-weight: 700;
-                            color: Cat.red;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        ack-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                if layout.never-show-checked {
-                                    root.distro-warning-dismissed = true;
-                                    root.distro-warning-dismiss();
+                Rectangle {
+                    background: Cat.crust.with-alpha(0.45);
+                    height: 88px;
+                    HorizontalLayout {
+                        padding-left: 32px;
+                        padding-right: 28px;
+                        spacing: 16px;
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 10px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 22px;
+                                        height: 22px;
+                                        border-radius: 7px;
+                                        border-width: 1.5px;
+                                        border-color: fl-layout.accepted ? Cat.mauve : Cat.overlay1;
+                                        background: fl-layout.accepted ? Cat.mauve : Cat.base.with-alpha(0.4);
+                                        animate background, border-color { duration: 90ms; }
+                                        if fl-layout.accepted: NavIcon { d: "M5 12l5 5 9-10"; icon-color: Cat.crust; width: 14px; height: 14px; x: 4px; y: 4px; }
+                                    }
                                 }
-                                root.show-distro-warning = false;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text { text: @tr("I understand and accept these terms."); font-size: Cat.fs13; color: Cat.text; }
+                                }
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { fl-layout.accepted = !fl-layout.accepted; }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 88px;
+                                height: 38px;
+                                border-radius: 10px;
+                                background: quit-ta.has-hover ? Cat.surface1 : Cat.surface0;
+                                border-width: 1px;
+                                border-color: Cat.overlay0.with-alpha(0.6);
+                                animate background { duration: 80ms; }
+                                Text { text: @tr("Quit"); font-size: Cat.fs14; font-weight: 600; color: Cat.text; horizontal-alignment: center; vertical-alignment: center; }
+                                quit-ta := TouchArea { mouse-cursor: pointer; clicked => { root.first-launch-quit(); } }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 116px;
+                                height: 38px;
+                                border-radius: 10px;
+                                background: fl-layout.accepted ? (cont-ta.has-hover ? Cat.mauve.brighter(0.15) : Cat.mauve) : Cat.mauve.with-alpha(0.18);
+                                animate background { duration: 80ms; }
+                                Text {
+                                    text: @tr("Continue");
+                                    font-size: Cat.fs14;
+                                    font-weight: 700;
+                                    color: fl-layout.accepted ? Cat.crust : Cat.overlay1;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                cont-ta := TouchArea {
+                                    mouse-cursor: fl-layout.accepted ? pointer : default;
+                                    clicked => {
+                                        if fl-layout.accepted {
+                                            root.show-first-launch = false;
+                                            root.first-launch-accept();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

@@ -5,7 +5,7 @@
 # PKGBUILDs under deps/ (real, separately-removable packages with their OWN
 # versions - never the AUR), then builds this. Clean with: ./build.sh --clean
 pkgname=xpm-gui
-pkgver=0.8.0
+pkgver=0.8.1
 pkgrel=1
 pkgdesc="A modern package manager for Arch Linux supporting pacman, Flatpak and AppImage"
 arch=('x86_64')

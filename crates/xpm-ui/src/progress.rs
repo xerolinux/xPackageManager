@@ -273,11 +273,12 @@ fn detect_phase(lower: &str, raw: &str, _total_packages: usize) -> Option<(&'sta
     if lower.contains("grub-mkconfig") || lower.contains("grub") {
         return Some(("Updating bootloader...", 99));
     }
-    if lower.contains("arming") || lower.contains("ldconfig") || lower.contains("dkms")
-        || lower.contains("systemd") || lower.contains("fontconfig") || lower.contains("update-desktop")
-        || lower.contains("gtk-update") || lower.contains("update-mime") {
-        let pct = parse_kn_fraction(raw).map(|f| (95.0 + 4.0 * f) as i32).unwrap_or(96);
-        return Some(("Running hooks...", pct.min(99)));
+    if let Some(frac) = parse_kn_fraction(raw)
+        && (lower.contains("arming") || lower.contains("ldconfig") || lower.contains("dkms")
+            || lower.contains("systemd") || lower.contains("fontconfig") || lower.contains("update-desktop")
+            || lower.contains("gtk-update") || lower.contains("update-mime"))
+    {
+        return Some(("Running hooks...", ((95.0 + 4.0 * frac) as i32).min(99)));
     }
 
     None
@@ -290,17 +291,15 @@ fn is_proceed_prompt(cleaned: &str) -> bool {
     cleaned.contains("Proceed with installation? [Y/n]") || cleaned.contains("Proceed with download? [Y/n]")
 }
 
-fn handle_pty_prompt(cleaned: &str, tx: &mpsc::Sender<UiMessage>) -> bool {
+fn handle_pty_prompt(cleaned: &str, tx: &mpsc::Sender<UiMessage>, label: Option<&str>) -> bool {
     let has_yn = cleaned.contains("[Y/n]") || cleaned.contains("[y/n]")
         || cleaned.contains("[Y|n]") || cleaned.contains("[y|n]");
     let has_y_n = cleaned.contains("[y/N]") || cleaned.contains("[y|N]");
     let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p)) || has_y_n;
     if needs_user_input || has_yn {
-        let prompt_text = cleaned.lines()
-            .rfind(|l| !l.trim().is_empty())
-            .unwrap_or(cleaned)
-            .trim()
-            .to_string();
+        let prompt_text = label.map(str::to_string).unwrap_or_else(|| {
+            cleaned.lines().rfind(|l| !l.trim().is_empty()).unwrap_or(cleaned).trim().to_string()
+        });
         if has_yn || has_y_n {
             let _ = tx.send(UiMessage::ProgressPromptButtons);
             let _ = tx.send(UiMessage::ProgressPrompt(prompt_text));
@@ -386,13 +385,32 @@ fn detect_generic_phase(lower: &str, raw: &str) -> Option<(&'static str, i32)> {
     None
 }
 
-pub(crate) const PACMAN_PHASES: [&str; 6] = ["Sync", "Resolve", "Download", "Verify", "Install", "Hooks"];
+/// One row of steps in the progress dialog, e.g. Native: Sync, Resolve, Download, Verify, Installing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StageGroup {
+    pub label: &'static str,
+    /// 0 native, 1 flatpak, 2 appimage (picks the colour in the UI).
+    pub kind: i32,
+    pub steps: Vec<&'static str>,
+}
+
+impl StageGroup {
+    pub(crate) fn for_format(format: Format) -> StageGroup {
+        match format {
+            Format::Native => StageGroup { label: "Native", kind: 0, steps: vec!["Sync", "Resolve", "Download", "Verify", "Installing"] },
+            Format::Flatpak => StageGroup { label: "Flatpak", kind: 1, steps: vec!["Resolve", "Installing"] },
+            Format::AppImage => StageGroup { label: "AppImage", kind: 2, steps: vec!["Download", "Installing"] },
+        }
+    }
+}
+
+fn appimage_step(label: &str) -> usize {
+    if label.starts_with("Resolving") || label.starts_with("Downloading") { 0 } else { 1 }
+}
 
 fn pacman_phase(lower: &str, active: usize) -> Option<usize> {
     let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
-    if has(&["post-transaction"]) {
-        Some(5)
-    } else if parse_action(lower.trim()).is_some() {
+    if has(&["post-transaction"]) || parse_action(lower.trim()).is_some() {
         Some(4)
     } else if has(&["checking keys", "checking keyring", "checking integrity", "checking package integrity", "loading package files", "checking for file conflicts", "checking available disk space", "pre-transaction"]) {
         Some(3)
@@ -410,7 +428,8 @@ fn pacman_phase(lower: &str, active: usize) -> Option<usize> {
 /// Moves the pacman stage indicator forward as output lines arrive.
 #[derive(Default)]
 struct PhaseTracker {
-    enabled: bool,
+    /// Group index the native steps are reported to; `None` leaves the tracker silent.
+    group: Option<usize>,
     line: String,
     active: usize,
     saw_sync: bool,
@@ -440,8 +459,8 @@ impl PhaseTracker {
         self.saw_sync |= p == 0;
         if p > self.active {
             self.active = p;
-            if self.enabled {
-                let _ = tx.send(UiMessage::ProgressPhase(p));
+            if let Some(group) = self.group {
+                let _ = tx.send(UiMessage::ProgressStageStep { group, step: p });
             }
         }
     }
@@ -615,13 +634,14 @@ impl PacmanRows {
 struct RowSink<'a> {
     tx: &'a mpsc::Sender<UiMessage>,
     len: &'a mut usize,
+    group: usize,
 }
 
 impl RowSink<'_> {
     fn append(&mut self, rows: Vec<RowInfo>) -> usize {
         let first = *self.len;
         *self.len += rows.len();
-        let _ = self.tx.send(UiMessage::ProgressRowsAppend { first, rows });
+        let _ = self.tx.send(UiMessage::ProgressRowsAppend { first, rows, group: self.group });
         first
     }
 
@@ -649,8 +669,9 @@ impl Counts {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Format {
+    Native,
     Flatpak,
     AppImage,
 }
@@ -663,11 +684,12 @@ pub(crate) struct Summary {
     pub warnings: i32,
 }
 
-/// One result pill: `kind` 0 upgraded, 1 installed, 2 removed, 3 warnings.
+/// One result card per package format: `kind` 0 native, 1 flatpak, 2 appimage, 3 warnings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SummaryTile {
     pub label: String,
     pub count: i32,
+    pub detail: String,
     pub kind: i32,
 }
 
@@ -681,6 +703,7 @@ impl Summary {
 
     fn counts_mut(&mut self, format: Format) -> &mut Counts {
         match format {
+            Format::Native => &mut self.native,
             Format::Flatpak => &mut self.flatpak,
             Format::AppImage => &mut self.appimage,
         }
@@ -690,18 +713,23 @@ impl Summary {
         self.native.total() + self.flatpak.total() + self.appimage.total()
     }
 
-    /// One pill per package format and kind of change, plus one for serious warnings.
+    /// One card per package format that changed something, plus one for serious warnings.
     fn tiles(&self) -> Vec<SummaryTile> {
         let mut tiles = Vec::new();
-        for (name, c) in [("Native", self.native), ("Flatpak", self.flatpak), ("AppImage", self.appimage)] {
-            for (verb, count, kind) in [("upgraded", c.upgraded, 0), ("installed", c.installed, 1), ("removed", c.removed, 2)] {
-                if count > 0 {
-                    tiles.push(SummaryTile { label: format!("{name} {verb}"), count, kind });
-                }
+        for (kind, name, c) in [(0, "Native", self.native), (1, "Flatpak", self.flatpak), (2, "AppImage", self.appimage)] {
+            if c.total() == 0 {
+                continue;
             }
+            let detail = [("upgraded", c.upgraded), ("installed", c.installed), ("removed", c.removed)]
+                .iter()
+                .filter(|(_, n)| *n > 0)
+                .map(|(verb, n)| format!("{n} {verb}"))
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ");
+            tiles.push(SummaryTile { label: name.to_string(), count: c.total(), detail, kind });
         }
         if self.warnings > 0 {
-            tiles.push(SummaryTile { label: "Warnings".to_string(), count: self.warnings, kind: 3 });
+            tiles.push(SummaryTile { label: "Warnings".to_string(), count: self.warnings, detail: "check the log".to_string(), kind: 3 });
         }
         tiles
     }
@@ -801,9 +829,13 @@ struct Inner {
     single_row: Option<usize>,
     percent_hook: Option<Arc<dyn Fn(i32) + Send + Sync>>,
     phases: PhaseTracker,
-    /// Answer pacman's "Proceed with installation?" automatically (the user already said yes globally).
-    auto_yes: bool,
-    input: Option<Arc<Mutex<Option<mpsc::Sender<String>>>>>,
+    /// Replaces pacman's "Proceed with installation?" in the prompt pill (the answer covers every package type).
+    prompt_label: Option<String>,
+    appimage_group: Option<usize>,
+    appimage_step: usize,
+    stages: bool,
+    /// Page (package type) that rows appended from now on belong to.
+    row_group: usize,
 }
 
 impl Inner {
@@ -844,21 +876,13 @@ impl Feeder {
 
         let text = String::from_utf8_lossy(bytes);
         let cleaned = normalize_typographic(&strip_ansi(&text));
-        let force_flush = if inner.auto_yes && is_proceed_prompt(&cleaned) {
-            if let Some(input) = &inner.input
-                && let Some(sender) = input.lock().unwrap().as_ref()
-            {
-                let _ = sender.send("y".to_string());
-            }
-            false
-        } else {
-            handle_pty_prompt(&cleaned, &self.tx)
-        };
+        let label = inner.prompt_label.as_deref().filter(|_| is_proceed_prompt(&cleaned));
+        let force_flush = handle_pty_prompt(&cleaned, &self.tx, label);
 
         inner.stream.process(bytes);
         {
-            let Inner { pacman_rows, rows_len, .. } = &mut *inner;
-            pacman_rows.feed(&cleaned, &mut RowSink { tx: &self.tx, len: rows_len });
+            let Inner { pacman_rows, rows_len, row_group, .. } = &mut *inner;
+            pacman_rows.feed(&cleaned, &mut RowSink { tx: &self.tx, len: rows_len, group: *row_group });
         }
         inner.phases.feed(&cleaned, &self.tx);
         if inner.captured.len() < CAPTURE_LIMIT {
@@ -875,6 +899,13 @@ impl Feeder {
             if let Some((mut label, pct)) = phase {
                 if label == "Downloading packages..." && inner.phases.syncing() {
                     label = "Synchronizing databases...";
+                }
+                if let Some(group) = inner.appimage_group {
+                    let step = appimage_step(label);
+                    if step > inner.appimage_step {
+                        inner.appimage_step = step;
+                        let _ = self.tx.send(UiMessage::ProgressStageStep { group, step });
+                    }
                 }
                 if pct > inner.percent {
                     inner.percent = pct.min(100);
@@ -909,23 +940,45 @@ impl Feeder {
     /// Appends progress rows; returns the absolute index of the first one.
     pub(crate) fn rows_append(&self, rows: Vec<RowInfo>) -> usize {
         let mut inner = self.inner.lock().unwrap();
-        RowSink { tx: &self.tx, len: &mut inner.rows_len }.append(rows)
+        let group = inner.row_group;
+        RowSink { tx: &self.tx, len: &mut inner.rows_len, group }.append(rows)
     }
 
-    pub(crate) fn set_auto_yes(&self, on: bool) {
-        self.inner.lock().unwrap().auto_yes = on;
+    /// Declares the step rows (one per package type) shown in the dialog.
+    pub(crate) fn init_stages(&self, formats: &[Format]) {
+        let groups: Vec<StageGroup> = formats.iter().map(|f| StageGroup::for_format(*f)).collect();
+        self.inner.lock().unwrap().stages = true;
+        let _ = self.tx.send(UiMessage::ProgressStageGroups(groups));
     }
 
-    pub(crate) fn bind_input(&self, input: Arc<Mutex<Option<mpsc::Sender<String>>>>) {
-        self.inner.lock().unwrap().input = Some(input);
+    pub(crate) fn stage_step(&self, group: usize, step: usize) {
+        let _ = self.tx.send(UiMessage::ProgressStageStep { group, step });
     }
 
-    /// Shows the pacman stage indicator (sync, resolve, download, verify, install, hooks).
-    pub(crate) fn enable_phases(&self) {
+    /// Follows pacman output and moves `group` along its steps.
+    pub(crate) fn track_native(&self, group: usize) {
         let mut inner = self.inner.lock().unwrap();
-        inner.phases.enabled = true;
+        inner.phases.group = Some(group);
         inner.phases.active = 0;
-        let _ = self.tx.send(UiMessage::ProgressPhases(PACMAN_PHASES.iter().map(|p| p.to_string()).collect()));
+    }
+
+    /// Follows the AppImage tool's output (download, then install) in `group`; `None` stops.
+    pub(crate) fn track_appimage_stage(&self, group: Option<usize>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.appimage_group = group;
+        inner.appimage_step = 0;
+        if let Some(g) = group {
+            let _ = self.tx.send(UiMessage::ProgressStageStep { group: g, step: 0 });
+        }
+    }
+
+    /// Rows appended from now on belong to this page (package type).
+    pub(crate) fn set_row_group(&self, group: usize) {
+        self.inner.lock().unwrap().row_group = group;
+    }
+
+    pub(crate) fn set_prompt_label(&self, label: Option<String>) {
+        self.inner.lock().unwrap().prompt_label = label;
     }
 
     /// Calls `hook` with the overall percent whenever it advances.
@@ -996,8 +1049,11 @@ impl OpReporter {
             single_row: None,
             percent_hook: None,
             phases: PhaseTracker::default(),
-            auto_yes: false,
-            input: None,
+            prompt_label: None,
+            appimage_group: None,
+            appimage_step: 0,
+            stages: false,
+            row_group: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let flusher = {
@@ -1036,13 +1092,13 @@ impl OpReporter {
     pub(crate) fn finish(mut self, success: bool) {
         self.settle();
         if success {
-            if self.feeder.inner.lock().unwrap().phases.enabled {
-                let _ = self.feeder.tx.send(UiMessage::ProgressPhase(PACMAN_PHASES.len()));
+            if self.feeder.inner.lock().unwrap().stages {
+                let _ = self.feeder.tx.send(UiMessage::ProgressStagesDone);
             }
             {
                 let mut inner = self.feeder.inner.lock().unwrap();
-                let Inner { pacman_rows, rows_len, .. } = &mut *inner;
-                pacman_rows.complete(&mut RowSink { tx: &self.feeder.tx, len: rows_len });
+                let Inner { pacman_rows, rows_len, row_group, .. } = &mut *inner;
+                pacman_rows.complete(&mut RowSink { tx: &self.feeder.tx, len: rows_len, group: *row_group });
             }
             let inner = self.feeder.inner.lock().unwrap();
             let mut sum = summarize(&inner.captured);
@@ -1079,7 +1135,6 @@ pub(crate) fn run_pty(
     use std::io::{Read, Write};
     use std::os::unix::io::FromRawFd;
 
-    feeder.bind_input(input_sender.clone());
     let (master_fd, child_pid) = crate::spawn_in_pty(cmd, args)?;
     *pid_holder.lock().unwrap() = Some(child_pid);
 
@@ -1247,7 +1302,7 @@ mod tests {
     #[test]
     fn yes_no_prompt_shows_buttons_with_real_text() {
         let (tx, rx) = mpsc::channel();
-        assert!(handle_pty_prompt(":: Replace foo with bar? [Y/n]", &tx));
+        assert!(handle_pty_prompt(":: Replace foo with bar? [Y/n]", &tx, None));
         let msgs: Vec<UiMessage> = rx.try_iter().collect();
         assert!(matches!(msgs[0], UiMessage::ProgressPromptButtons));
         assert!(matches!(&msgs[1], UiMessage::ProgressPrompt(t) if t == ":: Replace foo with bar? [Y/n]"));
@@ -1349,26 +1404,28 @@ mod tests {
     }
 
     #[test]
-    fn result_pills_are_split_per_package_format() {
+    fn result_cards_are_one_per_package_format() {
         let mut sum = Summary::default();
         sum.native.upgraded = 3;
         sum.flatpak.upgraded = 2;
         sum.flatpak.installed = 1;
         sum.appimage.upgraded = 1;
-        let tiles: Vec<(String, i32)> = sum.tiles().into_iter().map(|t| (t.label, t.count)).collect();
+        let tiles: Vec<(String, i32, String)> = sum.tiles().into_iter().map(|t| (t.label, t.count, t.detail)).collect();
         assert_eq!(
             tiles,
             vec![
-                ("Native upgraded".to_string(), 3),
-                ("Flatpak upgraded".to_string(), 2),
-                ("Flatpak installed".to_string(), 1),
-                ("AppImage upgraded".to_string(), 1),
+                ("Native".to_string(), 3, "3 upgraded".to_string()),
+                ("Flatpak".to_string(), 3, "2 upgraded \u{b7} 1 installed".to_string()),
+                ("AppImage".to_string(), 1, "1 upgraded".to_string()),
             ]
         );
+        let mut only_flatpak = Summary::default();
+        only_flatpak.flatpak.upgraded = 4;
+        assert_eq!(only_flatpak.tiles().len(), 1);
     }
 
     #[test]
-    fn proceed_prompts_are_answered_when_the_user_said_yes_globally() {
+    fn proceed_prompts_are_recognised() {
         assert!(is_proceed_prompt(":: Proceed with installation? [Y/n]"));
         assert!(!is_proceed_prompt(":: Replace foo with bar? [Y/n]"));
     }
@@ -1389,11 +1446,11 @@ mod tests {
         let mut rows = PacmanRows::default();
         let mut len = 0;
         for c in chunks {
-            rows.feed(c, &mut RowSink { tx: &tx, len: &mut len });
+            rows.feed(c, &mut RowSink { tx: &tx, len: &mut len, group: 0 });
         }
         rx.try_iter()
             .map(|m| match m {
-                UiMessage::ProgressRowsAppend { first, rows } => {
+                UiMessage::ProgressRowsAppend { first, rows, .. } => {
                     format!("plan {first}: {}", rows.iter().map(|r| format!("{} [{}]", r.name, r.detail)).collect::<Vec<_>>().join(", "))
                 }
                 UiMessage::ProgressRowState { index, state, percent } => format!("row {index} state {state} {percent}%"),
@@ -1425,7 +1482,7 @@ mod tests {
     #[test]
     fn pacman_output_advances_the_stage_indicator() {
         let (tx, rx) = mpsc::channel();
-        let mut t = PhaseTracker { enabled: true, ..PhaseTracker::default() };
+        let mut t = PhaseTracker { group: Some(0), ..PhaseTracker::default() };
         t.feed(" core  135.2 KiB  1234 KiB/s 00:00 [###] 100%\r\n", &tx);
         assert!(rx.try_recv().is_err(), "database transfers are not package downloads");
         for chunk in [
@@ -1437,7 +1494,15 @@ mod tests {
         ] {
             t.feed(chunk, &tx);
         }
-        let seen: Vec<usize> = rx.try_iter().filter_map(|m| match m { UiMessage::ProgressPhase(p) => Some(p), _ => None }).collect();
-        assert_eq!(seen, vec![1, 3, 4, 5]);
+        let seen: Vec<usize> = rx.try_iter().filter_map(|m| match m { UiMessage::ProgressStageStep { step, .. } => Some(step), _ => None }).collect();
+        assert_eq!(seen, vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn package_names_in_the_table_are_not_hooks() {
+        let line = "core/systemd         258.1-1      258.2-1          0.40 MiB";
+        assert!(detect_phase(&line.to_lowercase(), line, 6).is_none());
+        let hook = "(1/3) Reloading system manager configuration (systemd)...";
+        assert_eq!(detect_phase(&hook.to_lowercase(), hook, 6).unwrap().0, "Running hooks...");
     }
 }

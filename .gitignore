@@ -15,3 +15,9 @@ session-*.md
 /packaging/deps/appimageupdate-git/argagg/
 /packaging/deps/appimageupdate-git/build/
 /packaging/deps/downgrade/downgrade-*/
+
+# local tooling and planning notes
+/.claude/
+/docs/
+.directory
+*.log

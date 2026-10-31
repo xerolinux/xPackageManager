@@ -198,6 +198,32 @@ fn gpu_display_name(vendor: u16, device: u16) -> String {
     }
 }
 
+const INITIALIZING_SOUND: &[u8] = include_bytes!("../assets/initializing.wav");
+
+/// First-launch jingle; plays through whichever audio player is installed and stays silent otherwise.
+fn play_initializing_sound() {
+    thread::spawn(|| {
+        let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        let path = format!("{dir}/xpackagemanager-initializing.wav");
+        if std::fs::write(&path, INITIALIZING_SOUND).is_err() {
+            return;
+        }
+        for player in ["pw-play", "paplay", "aplay"] {
+            let played = std::process::Command::new(player)
+                .arg(&path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if played {
+                break;
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    });
+}
+
 fn activate_window(window: &MainWindow) {
     use i_slint_core::window::WindowInner;
     let adapter = WindowInner::from_pub(window.window()).window_adapter();
@@ -279,10 +305,11 @@ enum UiMessage {
     ProgressHidePrompt,
     ProgressPromptButtons,
     ProgressErrorSummary(String),
-    ProgressRowsAppend { first: usize, rows: Vec<progress::RowInfo> },
+    ProgressRowsAppend { first: usize, rows: Vec<progress::RowInfo>, group: usize },
     ProgressRowState { index: usize, state: i32, percent: i32 },
-    ProgressPhases(Vec<String>),
-    ProgressPhase(usize),
+    ProgressStageGroups(Vec<progress::StageGroup>),
+    ProgressStageStep { group: usize, step: usize },
+    ProgressStagesDone,
     InstallProgress { backend: i32, key: String, state: i32, percent: i32 },
     InstallLog { backend: i32, key: String, lines: Vec<progress::StyledLine> },
     ShowInstallLog { backend: i32, key: String },
@@ -627,7 +654,9 @@ struct AppConfig {
     #[serde(default)]
     aur_pill_dismissed: bool,
     #[serde(default)]
-    distro_warning_dismissed: bool,
+    first_launch_ack: bool,
+    #[serde(default = "default_true")]
+    startup_sound: bool,
     #[serde(default)]
     notify_on_updates: bool,
     #[serde(default)]
@@ -666,6 +695,7 @@ fn default_appimage_feeds() -> Vec<AppImageFeed> {
 }
 
 fn default_parallel_downloads() -> u32 { 5 }
+fn default_true() -> bool { true }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -674,7 +704,8 @@ impl Default for AppConfig {
             check_updates_on_start: false,
             parallel_downloads: 5,
             aur_pill_dismissed: false,
-            distro_warning_dismissed: false,
+            first_launch_ack: false,
+            startup_sound: true,
             notify_on_updates: false,
             auto_clean_cache: false,
             appimage_enabled: false,
@@ -719,7 +750,8 @@ fn build_config(window: &MainWindow) -> AppConfig {
         check_updates_on_start: window.get_setting_check_updates_on_start(),
         parallel_downloads: window.get_setting_parallel_downloads() as u32,
         aur_pill_dismissed: window.get_aur_pill_dismissed(),
-        distro_warning_dismissed: window.get_distro_warning_dismissed(),
+        first_launch_ack: load_config().first_launch_ack,
+        startup_sound: window.get_setting_startup_sound(),
         notify_on_updates: window.get_setting_notify_on_updates(),
         auto_clean_cache: window.get_setting_auto_clean_cache(),
         appimage_enabled: window.get_setting_appimage_enabled(),
@@ -1189,7 +1221,7 @@ fn run_appimage_op<F>(
     };
     let row_name = title.split_once(' ').map_or(title, |(_, rest)| rest);
     let row_name = row_name.rsplit('/').next().unwrap_or(row_name);
-    let row = feeder.rows_append(vec![progress::RowInfo { name: row_name.to_string(), tag: "AppImage", detail: String::new() }]);
+    let row = feeder.rows_append(vec![progress::RowInfo { name: row_name.to_string(), tag: "", detail: String::new() }]);
     feeder.row_state(row, 1, 0);
     feeder.track_single(Some(row));
     let ok = match op(&backend, &log) {
@@ -1685,30 +1717,40 @@ fn run_update_all(
     let mut success = true;
 
     let mut parts = Vec::new();
+    let mut formats = Vec::new();
     if plan.native > 0 {
         parts.push(format!("{} native", plan.native));
+        formats.push(progress::Format::Native);
     }
     if plan.flatpak > 0 {
         parts.push(format!("{} Flatpak", plan.flatpak));
+        formats.push(progress::Format::Flatpak);
     }
     if has_appimages {
         parts.push(format!("{} AppImage", plan.appimages.len()));
+        formats.push(progress::Format::AppImage);
     }
+    feeder.init_stages(&formats);
+    let group_of = |f: progress::Format| formats.iter().position(|x| *x == f).unwrap_or(0);
+
+    // With native updates, pacman asks right after the password and database sync, with the real
+    // package list; that one answer covers every package type. Otherwise ask up front.
+    let question = format!(":: Update {}? [Y/n]", parts.join(", "));
     if plan.native > 0 {
-        feeder.enable_phases();
+        feeder.set_prompt_label(Some(question));
+    } else {
+        let (in_tx, in_rx) = mpsc::channel::<String>();
+        *input_sender.lock().unwrap() = Some(in_tx);
+        feeder.feed(format!("\x1b[1;34m::\x1b[0m \x1b[1m{}\x1b[0m ", &question[3..]).as_bytes());
+        let go = matches!(in_rx.recv().map(|a| a.trim().to_lowercase()).as_deref(), Ok("" | "y" | "yes"));
+        *input_sender.lock().unwrap() = None;
+        feeder.line(if go { "y" } else { "n" });
+        if !go {
+            feeder.line("Cancelled.");
+            reporter.finish(false);
+            return;
+        }
     }
-    let (in_tx, in_rx) = mpsc::channel::<String>();
-    *input_sender.lock().unwrap() = Some(in_tx);
-    feeder.feed(format!("\x1b[1;34m::\x1b[0m \x1b[1mUpdate {}? [Y/n]\x1b[0m ", parts.join(", ")).as_bytes());
-    let go = matches!(in_rx.recv().map(|a| a.trim().to_lowercase()).as_deref(), Ok("" | "y" | "yes"));
-    *input_sender.lock().unwrap() = None;
-    feeder.line(if go { "y" } else { "n" });
-    if !go {
-        feeder.line("Cancelled.");
-        reporter.finish(false);
-        return;
-    }
-    feeder.set_auto_yes(true);
 
     let stages = [plan.native > 0, plan.flatpak > 0, has_appimages];
     let weights = [50, 35, 15];
@@ -1725,6 +1767,8 @@ fn run_update_all(
 
     if let Some((lo, hi)) = native_window {
         feeder.window(lo, hi);
+        feeder.set_row_group(group_of(progress::Format::Native));
+        feeder.track_native(group_of(progress::Format::Native));
         match progress::run_pty(&feeder, "pkexec", &["pacman", "-Syu"], input_sender, pid_holder) {
             Ok(ok) => success = ok,
             Err(e) => {
@@ -1732,28 +1776,39 @@ fn run_update_all(
                 success = false;
             }
         }
+        feeder.set_prompt_label(None);
     }
 
     if success && !progress::cancel_requested()
         && let Some((lo, hi)) = flatpak_window
     {
         feeder.window(lo, hi);
+        feeder.set_row_group(group_of(progress::Format::Flatpak));
         if plan.native > 0 {
             feeder.line("");
         }
-        success = run_flatpak_transaction(&feeder, &[FlatpakRequest::UpdateAll], input_sender, None, true);
+        success = run_flatpak_transaction(
+            &feeder,
+            &[FlatpakRequest::UpdateAll],
+            input_sender,
+            None,
+            true,
+            Some(group_of(progress::Format::Flatpak)),
+        );
     }
 
     if success && has_appimages && !progress::cancel_requested() {
         let (base, end) = appimage_window.unwrap_or((0, 100));
         feeder.line("\n=== AppImages ===");
+        let appimage_group = group_of(progress::Format::AppImage);
+        feeder.set_row_group(appimage_group);
         match AppImageBackend::with_dir(Some(std::path::PathBuf::from(&plan.appimage_dir))) {
             Ok(backend) => {
                 let total = plan.appimages.len() as i32;
                 let first_row = feeder.rows_append(
                     plan.appimages
                         .iter()
-                        .map(|n| progress::RowInfo { name: n.clone(), tag: "AppImage", detail: String::new() })
+                        .map(|n| progress::RowInfo { name: n.clone(), tag: "", detail: String::new() })
                         .collect(),
                 );
                 for (i, name) in plan.appimages.iter().enumerate() {
@@ -1772,6 +1827,7 @@ fn run_update_all(
                     let row = first_row + i as usize;
                     feeder.row_state(row, 1, 0);
                     feeder.track_single(Some(row));
+                    feeder.track_appimage_stage(Some(appimage_group));
                     match backend.update_app(name, &log) {
                         Ok(_) => {
                             feeder.add_summary(progress::Format::AppImage, progress::Counts { upgraded: 1, ..Default::default() });
@@ -1786,6 +1842,7 @@ fn run_update_all(
                     }
                     feeder.track_single(None);
                 }
+                feeder.track_appimage_stage(None);
                 let _ = tx.send(UiMessage::InstalledAppImagesLoaded(backend.list_entries()));
                 let _ = tx.send(UiMessage::AppImageCardsRefresh);
             }
@@ -1906,6 +1963,7 @@ fn run_flatpak_transaction(
     input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
     quiet: Option<(&mpsc::Sender<UiMessage>, &str)>,
     auto_yes: bool,
+    stage_group: Option<usize>,
 ) -> bool {
     const BLUE: &str = "\x1b[1;34m";
     const BOLD: &str = "\x1b[1m";
@@ -1924,6 +1982,9 @@ fn run_flatpak_transaction(
 
     let quiet_tx = quiet.map(|(tx, key)| (tx.clone(), key.to_string()));
     let auto_confirm = quiet_tx.is_some() || auto_yes;
+    if let Some(g) = stage_group {
+        feeder.stage_step(g, 0);
+    }
     let on_event = {
         let (feeder, names, percents, row_base) = (feeder.clone(), names.clone(), percents.clone(), row_base.clone());
         let quiet_tx = quiet_tx.clone();
@@ -1959,6 +2020,9 @@ fn run_flatpak_transaction(
                 let abs = feeder.rows_append(rows);
                 if first == 0 {
                     row_base.set(abs);
+                }
+                if let Some(g) = stage_group {
+                    feeder.stage_step(g, 1);
                 }
             }
             FlatpakEvent::Started(i) => {
@@ -2054,7 +2118,7 @@ fn install_flatpak_quiet(tx: &mpsc::Sender<UiMessage>, name: &str, ctx: &Conflic
     let feeder = reporter.feeder();
     let _ = tx.send(UiMessage::InstallProgress { backend: 1, key: name.to_string(), state: 1, percent: 0 });
     let no_input = Arc::new(Mutex::new(None));
-    let ok = run_flatpak_transaction(&feeder, &[FlatpakRequest::Install(name.to_string())], &no_input, Some((tx, name)), true);
+    let ok = run_flatpak_transaction(&feeder, &[FlatpakRequest::Install(name.to_string())], &no_input, Some((tx, name)), true, None);
     if ok {
         let _ = tx.send(UiMessage::InstallProgress { backend: 1, key: name.to_string(), state: 2, percent: 100 });
         let _ = tx.send(UiMessage::OperationDone(true));
@@ -2133,12 +2197,13 @@ fn run_managed_operation(
     if backend == 1
         && let Some(requests) = flatpak_requests(action, names)
     {
-        let ok = run_flatpak_transaction(&reporter.feeder(), &requests, input_sender, None, false);
+        let ok = run_flatpak_transaction(&reporter.feeder(), &requests, input_sender, None, false, None);
         reporter.finish(ok);
         return;
     }
     if backend != 1 && !matches!(action, "remove" | "bulk-remove" | "add-remote-file") {
-        reporter.feeder().enable_phases();
+        reporter.feeder().init_stages(&[progress::Format::Native]);
+        reporter.feeder().track_native(0);
     }
     let (cmd, args) = build_pacman_command(action, names, backend);
     let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -2641,17 +2706,6 @@ fn build_mirrorlist_update_script() -> String {
     } else {
         cmds.join(" && ")
     }
-}
-
-fn is_xerolinux() -> bool {
-    std::fs::read_to_string("/etc/os-release")
-        .unwrap_or_default()
-        .lines()
-        .any(|l| {
-            let l = l.trim();
-            (l.starts_with("ID=") || l.starts_with("NAME="))
-                && l.to_lowercase().contains("xero")
-        })
 }
 
 fn fetch_arch_news() -> Vec<ArchNewsItem> {
@@ -3302,8 +3356,8 @@ fn main() {
     window.set_progress_refs(ModelRc::from(progress_refs_model.clone()));
     let progress_tiles_model: Rc<VecModel<SummaryTile>> = Rc::new(VecModel::default());
     window.set_progress_tiles(ModelRc::from(progress_tiles_model.clone()));
-    let progress_phases_model: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
-    window.set_progress_phases(ModelRc::from(progress_phases_model.clone()));
+    let progress_stages_model: Rc<VecModel<StageRow>> = Rc::new(VecModel::default());
+    window.set_progress_stages(ModelRc::from(progress_stages_model.clone()));
     let install_logs: InstallLogs = Rc::new(RefCell::new(HashMap::new()));
     let progress_lines_prev: Rc<RefCell<Vec<progress::StyledLine>>> = Rc::new(RefCell::new(Vec::new()));
     let awaiting_appimage_check = Rc::new(std::cell::Cell::new(false));
@@ -3377,8 +3431,9 @@ fn main() {
                         window.set_progress_popup_stage(SharedString::from("Starting..."));
                         progress_lines_model.set_vec(Vec::new());
                         progress_refs_model.set_vec(Vec::new());
-                        progress_phases_model.set_vec(Vec::new());
-                        window.set_progress_phase(0);
+                        progress_stages_model.set_vec(Vec::new());
+                        window.set_progress_page(0);
+                        window.set_progress_page_manual(false);
                         progress_lines_prev.borrow_mut().clear();
                         window.set_progress_popup_show_input(false);
                         window.set_progress_popup_show_buttons(false);
@@ -3448,7 +3503,7 @@ fn main() {
                     UiMessage::ProgressErrorSummary(s) => {
                         window.set_progress_error_summary(SharedString::from(&s));
                     }
-                    UiMessage::ProgressRowsAppend { first, rows } => {
+                    UiMessage::ProgressRowsAppend { first, rows, group } => {
                         while progress_refs_model.row_count() > first {
                             progress_refs_model.remove(progress_refs_model.row_count() - 1);
                         }
@@ -3459,15 +3514,52 @@ fn main() {
                                 detail: SharedString::from(r.detail.as_str()),
                                 state: 0,
                                 percent: 0,
+                                group: group as i32,
                             });
                         }
                     }
-                    UiMessage::ProgressPhases(labels) => {
-                        progress_phases_model.set_vec(labels.iter().map(|l| SharedString::from(l.as_str())).collect::<Vec<_>>());
-                        window.set_progress_phase(0);
+                    UiMessage::ProgressStageGroups(groups) => {
+                        progress_stages_model.set_vec(
+                            groups
+                                .iter()
+                                .enumerate()
+                                .map(|(i, g)| StageRow {
+                                    label: SharedString::from(g.label),
+                                    kind: g.kind,
+                                    steps: ModelRc::new(VecModel::from(g.steps.iter().map(|s| SharedString::from(*s)).collect::<Vec<_>>())),
+                                    active: 0,
+                                    state: if i == 0 { 1 } else { 0 },
+                                })
+                                .collect::<Vec<_>>(),
+                        );
                     }
-                    UiMessage::ProgressPhase(index) => {
-                        window.set_progress_phase(index as i32);
+                    UiMessage::ProgressStageStep { group, step } => {
+                        for i in 0..progress_stages_model.row_count() {
+                            let Some(mut row) = progress_stages_model.row_data(i) else { continue };
+                            let before = (row.active, row.state);
+                            if i < group {
+                                row.active = row.steps.row_count() as i32;
+                                row.state = 2;
+                            } else if i == group {
+                                row.active = row.active.max(step as i32);
+                                row.state = 1;
+                            }
+                            if before != (row.active, row.state) {
+                                progress_stages_model.set_row_data(i, row);
+                            }
+                        }
+                        if !window.get_progress_page_manual() && group as i32 > window.get_progress_page() {
+                            window.set_progress_page(group as i32);
+                        }
+                    }
+                    UiMessage::ProgressStagesDone => {
+                        for i in 0..progress_stages_model.row_count() {
+                            if let Some(mut row) = progress_stages_model.row_data(i) {
+                                row.active = row.steps.row_count() as i32;
+                                row.state = 2;
+                                progress_stages_model.set_row_data(i, row);
+                            }
+                        }
                     }
                     UiMessage::InstallProgress { backend, key, state, percent } => {
                         if backend == 1 {
@@ -3500,7 +3592,7 @@ fn main() {
                             window.set_progress_error_summary(SharedString::from(""));
                             window.set_progress_summary_visible(false);
                             progress_refs_model.set_vec(Vec::new());
-                            progress_phases_model.set_vec(Vec::new());
+                            progress_stages_model.set_vec(Vec::new());
                             progress_lines_model.set_vec(lines.iter().map(styled_line_to_ui).collect::<Vec<_>>());
                             *progress_lines_prev.borrow_mut() = lines.clone();
                             window.set_progress_show_details(true);
@@ -3518,7 +3610,12 @@ fn main() {
                         progress_tiles_model.set_vec(
                             tiles
                                 .into_iter()
-                                .map(|t| SummaryTile { label: SharedString::from(t.label.as_str()), count: t.count, kind: t.kind })
+                                .map(|t| SummaryTile {
+                                label: SharedString::from(t.label.as_str()),
+                                count: t.count,
+                                detail: SharedString::from(t.detail.as_str()),
+                                kind: t.kind,
+                            })
                                 .collect::<Vec<_>>(),
                         );
                         window.set_progress_summary_visible(true);
@@ -6964,10 +7061,13 @@ fn main() {
         save_config(&cfg);
     });
 
-    window.on_distro_warning_dismiss(|| {
+    window.on_first_launch_accept(|| {
         let mut cfg = load_config();
-        cfg.distro_warning_dismissed = true;
+        cfg.first_launch_ack = true;
         save_config(&cfg);
+    });
+    window.on_first_launch_quit(|| {
+        slint::quit_event_loop().ok();
     });
 
     window.window().on_close_requested(|| {
@@ -6975,8 +7075,12 @@ fn main() {
         slint::CloseRequestResponse::HideWindow
     });
 
-    if !is_xerolinux() && !config.distro_warning_dismissed {
-        window.set_show_distro_warning(true);
+    window.set_setting_startup_sound(config.startup_sound);
+    if !config.first_launch_ack {
+        window.set_show_first_launch(true);
+    }
+    if config.startup_sound {
+        play_initializing_sound();
     }
 
     info!("Running application");

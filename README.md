@@ -4,7 +4,9 @@ A package manager GUI for Arch Linux that manages **pacman**, **Flatpak** and **
 
 Included by default on XeroLinux.
 
-<img src="Screenshot.gif" alt="xPackageManager screenshots" width="900" />
+<video src="https://github.com/xerolinux/xPackageManager/raw/main/media/xpm-demo.mp4" poster="https://github.com/xerolinux/xPackageManager/raw/main/media/xpm-demo.png" controls width="900">
+  <a href="media/xpm-demo.mp4">Watch the demo video</a>
+</video>
 
 ---
 
@@ -28,6 +30,12 @@ cd packaging && ./build.sh
 ---
 
 ## Changelog
+
+### v0.8.1
+
+- Update popup split into one page per package type, with a result card for each.
+- Startup sound (toggle in Settings) and a one-time welcome notice.
+- Opening an AppImage offers Run or Install, with a right-click action in Dolphin.
 
 ### v0.8.0
 
