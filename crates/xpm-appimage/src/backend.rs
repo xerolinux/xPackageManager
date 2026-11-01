@@ -156,7 +156,7 @@ impl AppImageBackend {
     ///   1. recorded GitHub repo - re-resolve the latest release and download it.
     ///      Preferred because it's reliable; `appimageupdatetool` is known to abort
     ///      (uncaught C++ exception) on some update-info transports.
-    ///   2. embedded update info + `appimageupdatetool` (efficient binary delta) -
+    ///   2. embedded update info (GitHub transports count as step 1) + `appimageupdatetool` (efficient binary delta) -
     ///      a soft fallback: any non-success, including a crash signal, falls through.
     ///   3. recorded http(s) source URL - re-download in place.
     pub fn update_app(&self, name: &str, log: &LogFn<'_>) -> Result<AppImageEntry> {
@@ -175,9 +175,9 @@ impl AppImageBackend {
         let mut new_source = entry.source_url.clone();
         let mut done = false;
 
-        if let Some(gh) = &entry.github {
+        if let Some(gh) = github_repo(&entry) {
             log(&format!("Resolving latest release for {}…\n", gh));
-            match crate::catalog::resolve_download(gh) {
+            match crate::catalog::resolve_download(&gh) {
                 Ok(url) => {
                     log("Downloading latest release…\n");
                     download(&url, &path, log)?;
@@ -249,14 +249,18 @@ impl AppImageBackend {
     }
 
     /// Check whether a newer version is available for one entry, without
-    /// downloading. GitHub apps compare the freshly-resolved release URL against
-    /// the stored one (AM's "URL as version" technique); embedded-update-info apps
-    /// defer to `appimageupdatetool --check-for-update` (exit code 1 = available).
+    /// downloading. Catalog apps compare the freshly-resolved release URL against
+    /// the stored one (AM's "URL as version" technique); apps whose embedded update
+    /// info points at GitHub compare the release version; other embedded-update-info
+    /// apps defer to `appimageupdatetool --check-for-update` (exit code 1 = available).
     /// Returns `Ok(false)` for anything we can't check.
     pub fn check_update(&self, entry: &AppImageEntry) -> Result<bool> {
-        if let Some(gh) = &entry.github {
-            let latest = crate::catalog::resolve_download(gh)?;
-            return Ok(Some(latest.as_str()) != entry.source_url.as_deref());
+        if let Some(gh) = github_repo(entry) {
+            let latest = crate::catalog::resolve_download(&gh)?;
+            if entry.github.is_some() {
+                return Ok(Some(latest.as_str()) != entry.source_url.as_deref());
+            }
+            return Ok(is_newer(&latest, &entry.version));
         }
         if let Some(tool) = entry
             .update_info
@@ -481,6 +485,39 @@ impl PackageSource for AppImageBackend {
     }
 }
 
+/// The GitHub repo behind an entry: the recorded one, or the owner/repo of a
+/// `gh-releases-*` update string. `appimageupdatetool` aborts on those, so we skip it.
+fn github_repo(entry: &AppImageEntry) -> Option<String> {
+    if let Some(gh) = &entry.github {
+        return Some(gh.clone());
+    }
+    let mut parts = entry.update_info.as_deref()?.split('|');
+    matches!(parts.next(), Some("gh-releases-zsync" | "gh-releases-direct")).then_some(())?;
+    let (owner, repo) = (parts.next()?, parts.next()?);
+    (!owner.is_empty() && !repo.is_empty()).then(|| format!("{owner}/{repo}"))
+}
+
+fn version_numbers(text: &str) -> Vec<u64> {
+    let name = text.rsplit('/').next().unwrap_or(text);
+    let name = name.trim_end_matches(".AppImage").trim_end_matches(".appimage");
+    name.split(['-', '_'])
+        .map(|t| t.trim_start_matches(['v', 'V']))
+        .find(|t| t.starts_with(|c: char| c.is_ascii_digit()) && t.contains('.'))
+        .map(|t| {
+            t.split('.')
+                .map(|p| p.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True when the release asset's version is higher than the installed one.
+fn is_newer(latest_asset: &str, installed: &str) -> bool {
+    let latest = version_numbers(latest_asset);
+    let installed = version_numbers(installed);
+    !latest.is_empty() && !installed.is_empty() && latest > installed
+}
+
 fn chmod_exec(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path)?.permissions();
@@ -530,4 +567,46 @@ fn download(url: &str, dest: &Path, log: &LogFn<'_>) -> Result<()> {
     std::fs::rename(&part, dest)?;
     log("Download complete.\n");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(github: Option<&str>, update_info: Option<&str>) -> AppImageEntry {
+        AppImageEntry {
+            name: "x".into(),
+            display_name: "X".into(),
+            version: "0.15.0".into(),
+            path: "/tmp/x.AppImage".into(),
+            source_url: None,
+            github: github.map(String::from),
+            update_info: update_info.map(String::from),
+            supports_update: true,
+            icon_path: None,
+            desktop_path: None,
+            size: 0,
+            external: false,
+        }
+    }
+
+    #[test]
+    fn github_repo_comes_from_update_info() {
+        let info = "gh-releases-zsync|storytold|filmcraft|latest|filmcraft-*-linux-x86_64.AppImage.zsync";
+        assert_eq!(github_repo(&entry(None, Some(info))).as_deref(), Some("storytold/filmcraft"));
+        assert_eq!(github_repo(&entry(Some("a/b"), Some(info))).as_deref(), Some("a/b"));
+        assert_eq!(github_repo(&entry(None, Some("zsync|https://x/y.zsync"))), None);
+        assert_eq!(github_repo(&entry(None, None)), None);
+    }
+
+    #[test]
+    fn release_version_is_compared_numerically() {
+        let url = |v: &str| format!("https://github.com/o/r/releases/download/v{v}/filmcraft-{v}-linux-x86_64.AppImage");
+        assert!(is_newer(&url("0.16.0"), "0.15.0"));
+        assert!(is_newer(&url("0.100.0"), "0.15.0"));
+        assert!(!is_newer(&url("0.15.0"), "0.15.0"));
+        assert!(!is_newer(&url("0.9.0"), "0.15.0"));
+        assert!(!is_newer("https://x/app.AppImage", "0.15.0"));
+        assert!(!is_newer(&url("0.16.0"), "unknown"));
+    }
 }
