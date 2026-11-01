@@ -2309,7 +2309,7 @@ export component MainWindow inherits Window {
     preferred-width: 1600px;
     preferred-height: 1000px;
     min-width: 960px;
-    min-height: 600px;
+    min-height: 800px;
     background: Cat.bg;
 
     in-out property <int> view: 9;
@@ -2693,8 +2693,8 @@ export component MainWindow inherits Window {
     in-out property <string> scx-selected: "";
     in-out property <ScxLive> scx-live;
     property <float> log-k: root.scx-tab == 0 ? root.sched-k : 1;
-    property <float> sched-k: Math.clamp(Math.min((root.width - root.sidebar-w) / 1450px, (root.height - 190px) / 760px), 1, 2.6);
-    property <bool> sched-compact: root.height < 780px;
+    property <float> sched-k: Math.clamp(Math.min((root.width - root.sidebar-w) / 1450px, root.height / 900px), 1, 2.6);
+    property <bool> sched-compact: root.height < 880px;
     in-out property <string> scx-mode: "auto";
     in-out property <bool> scx-persist: false;
     in-out property <bool> scx-busy: false;
@@ -7345,7 +7345,7 @@ export component MainWindow inherits Window {
                         live-card := PageCard {
                             k: root.sched-k;
                             vertical-stretch: 1;
-                            min-height: 120px * root.sched-k;
+                            min-height: 180px * root.sched-k;
                             preferred-height: 0px;
                             clip: true;
                             accent: Cat.mauve;
