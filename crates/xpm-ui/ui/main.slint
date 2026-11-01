@@ -2729,7 +2729,6 @@ export component MainWindow inherits Window {
     in-out property <bool> show-unlock-db-confirm: false;
     callback unlock-db;
     in-out property <bool> show-first-launch: false;
-    in-out property <angle> fl-angle: 0deg;
     callback first-launch-accept();
     callback first-launch-quit();
     in-out property <bool> ignorepkg-active: false;
@@ -10118,11 +10117,6 @@ export component MainWindow inherits Window {
         height: 100%;
         background: black.with-alpha(0.74);
         TouchArea {}
-        Timer {
-            interval: 30ms;
-            running: root.show-first-launch;
-            triggered => { root.fl-angle = Math.mod(root.fl-angle / 1deg + 4, 360) * 1deg; }
-        }
 
         Rectangle {
             x: (parent.width - self.width) / 2;
@@ -10256,7 +10250,7 @@ export component MainWindow inherits Window {
                         Rectangle {
                             height: 82px;
                             border-radius: 13px;
-                            background: @conic-gradient(from root.fl-angle,
+                            background: @conic-gradient(from 215deg,
                                 Cat.mauve 0deg,
                                 Cat.blue 55deg,
                                 Cat.mauve.with-alpha(0.22) 120deg,
