@@ -198,7 +198,7 @@ fn find_icon_source(root: &Path, icon_name: Option<&str>) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-fn desktop_value(content: &str, key: &str) -> Option<String> {
+pub(crate) fn desktop_value(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix(key) {

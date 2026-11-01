@@ -31,6 +31,9 @@ pub struct AppImageEntry {
     pub desktop_path: Option<String>,
     #[serde(default)]
     pub size: u64,
+    /// Found on the system rather than installed by xPM: the file and its launcher are the user's own.
+    #[serde(default)]
+    pub external: bool,
 }
 
 fn data_home() -> PathBuf {

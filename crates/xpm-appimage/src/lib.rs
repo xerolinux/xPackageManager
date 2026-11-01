@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod catalog;
+pub mod discover;
 pub mod elf;
 pub mod integration;
 pub mod manifest;

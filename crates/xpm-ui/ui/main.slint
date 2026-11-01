@@ -148,18 +148,40 @@ export struct HistAction { kind: string, pkg: string, change: string }
 
 export struct ShotItem { image: image, caption: string }
 export struct ReleaseItem { version: string, date: string, notes: string }
+export struct KernelRow { name: string, detail: string, installed: bool }
+export struct KernelGroup { title: string, blurb: string, kind: int, installed: int, total: int, rows: [KernelRow] }
+export struct KernelCat { title: string, count: int, kind: int }
+export struct KernelCatRow { items: [KernelCat] }
+export struct DropItem { id: string, label: string, header: bool }
+export struct FlagRow { scheduler: string, flag: string, required: bool, desc: string }
+export struct SchedInfoRow { id: string, name: string, category: string, desc: string }
 
 
 export global Cat {
-    out property <color> base: Palette.background;
-    out property <color> mantle: Palette.background.darker(0.06);
-    out property <color> crust: Palette.background.darker(0.14);
-    out property <color> sidebar: Palette.background.brighter(0.5);
-    out property <color> panel: Palette.background.brighter(0.12);
+    out property <color> bg: Palette.background.mix(Palette.background.with-alpha(1.0), 0.2);
+    pure public function kind(k: int) -> color {
+        if k == 0 { return Cat.blue; }
+        if k == 1 { return Cat.teal; }
+        if k == 2 { return Cat.green; }
+        if k == 3 { return Cat.peach; }
+        if k == 4 { return Cat.mauve; }
+        if k == 5 { return Cat.red; }
+        if k == 6 { return Cat.yellow; }
+        if k == 7 { return Cat.blue; }
+        return Cat.overlay2;
+    }
+    pure public function card(tint: color) -> color {
+        return Cat.crust.with-alpha(0.62).mix(tint, 0.86);
+    }
+    out property <color> base: bg;
+    out property <color> mantle: bg.darker(0.06);
+    out property <color> crust: bg.darker(0.14);
+    out property <color> sidebar: bg.brighter(0.5);
+    out property <color> panel: bg.brighter(0.12);
     out property <color> divider: Palette.foreground.with-alpha(0.16);
-    out property <color> surface0: Palette.background.brighter(0.08);
-    out property <color> surface1: Palette.background.brighter(0.16);
-    out property <color> surface2: Palette.background.brighter(0.26);
+    out property <color> surface0: bg.brighter(0.08);
+    out property <color> surface1: bg.brighter(0.16);
+    out property <color> surface2: bg.brighter(0.26);
     out property <color> overlay0: Palette.foreground.with-alpha(0.38);
     out property <color> overlay1: Palette.foreground.with-alpha(0.55);
     out property <color> overlay2: Palette.foreground.with-alpha(0.7);
@@ -361,11 +383,12 @@ component NavButton inherits Rectangle {
     in property <string> icon-path: "";
     in property <bool> icon-filled: false;
     in property <bool> active: false;
+    in property <bool> compact: false;
     in property <string> badge: "";
     in property <string> tooltip-text: "";
     callback clicked;
 
-    height: 40px;
+    height: compact ? 34px : 40px;
     border-radius: 8px;
     background: active ? Cat.mauve.with-alpha(0.2) : (touch.has-hover ? Cat.surface0.with-alpha(0.6) : transparent);
     animate background { duration: 120ms; easing: ease-out; }
@@ -1160,7 +1183,9 @@ component PermSectionLabel inherits Rectangle {
 component DialogButton inherits Rectangle {
     in property <string> label;
     in property <string> kind: "secondary";
+    in property <bool> enabled: true;
     callback clicked;
+    opacity: enabled ? 1.0 : 0.4;
 
     height: 34px;
     width: max(92px, db-label.preferred-width + 32px);
@@ -1182,8 +1207,8 @@ component DialogButton inherits Rectangle {
     }
 
     db-touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { if root.enabled { root.clicked(); } }
     }
 }
 
@@ -1387,6 +1412,365 @@ component AboutTerminal inherits Rectangle {
         }
 }
 
+component DropDown inherits Rectangle {
+    in property <[DropItem]> items;
+    in property <string> current-id;
+    in property <string> current-label;
+    callback selected(string);
+
+    height: 32px;
+    border-radius: 8px;
+    background: dd-touch.has-hover ? Cat.surface1 : Cat.surface0;
+    border-width: 1.5px;
+    border-color: dd-touch.has-hover ? Cat.mauve.with-alpha(0.6) : Cat.overlay0.with-alpha(0.3);
+    animate background { duration: 80ms; }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 8px;
+        Text {
+            text: root.current-label;
+            font-size: Cat.fs14;
+            color: Cat.text;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        VerticalLayout {
+            alignment: center;
+            NavIcon { d: "M6 9l6 6 6-6"; icon-color: Cat.subtext0; width: 14px; height: 14px; }
+        }
+    }
+
+    dd-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { dd-popup.show(); }
+    }
+
+    dd-popup := PopupWindow {
+        x: 0;
+        y: root.height + 2px;
+        width: root.width;
+        height: min(dd-list.preferred-height + 8px, 340px);
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Cat.panel;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Cat.divider;
+            clip: true;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: black.with-alpha(0.45);
+
+            ScrollView {
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                dd-list := VerticalLayout {
+                    padding: 4px;
+                    spacing: 1px;
+                    for it in root.items: Rectangle {
+                        height: it.header ? 26px : 30px;
+                        border-radius: 6px;
+                        background: (!it.header && opt-touch.has-hover) ? Cat.mauve.with-alpha(0.18) : (it.id == root.current-id ? Cat.mauve.with-alpha(0.1) : transparent);
+                        if it.header: Text {
+                            x: 8px;
+                            text: it.label.to-uppercase();
+                            font-size: Cat.fs11;
+                            font-weight: 700;
+                            color: Cat.overlay0;
+                            letter-spacing: 0.8px;
+                            vertical-alignment: center;
+                        }
+                        if !it.header: Text {
+                            x: 16px;
+                            text: it.label;
+                            font-size: Cat.fs14;
+                            font-weight: it.id == root.current-id ? 700 : 400;
+                            color: it.id == root.current-id ? Cat.mauve : Cat.text;
+                            vertical-alignment: center;
+                        }
+                        opt-touch := TouchArea {
+                            enabled: !it.header;
+                            mouse-cursor: pointer;
+                            clicked => { root.selected(it.id); dd-popup.close(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ActionButton inherits Rectangle {
+    in property <string> label;
+    in property <string> kind: "secondary";
+    in property <bool> enabled: true;
+    callback clicked;
+
+    horizontal-stretch: 1;
+    height: 36px;
+    border-radius: 8px;
+    opacity: enabled ? 1.0 : 0.4;
+    border-width: kind == "secondary" ? 1px : 0px;
+    border-color: Cat.divider;
+    background: kind == "primary" ? (ab-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.9))
+        : kind == "danger" ? (ab-touch.has-hover ? Cat.red.with-alpha(0.3) : Cat.red.with-alpha(0.16))
+        : (ab-touch.has-hover ? Cat.surface1 : Cat.surface0);
+    animate background { duration: 100ms; }
+
+    Text {
+        text: root.label;
+        font-size: Cat.fs13;
+        font-weight: 600;
+        color: kind == "primary" ? Cat.crust : kind == "danger" ? Cat.red : Cat.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ab-touch := TouchArea {
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { if root.enabled { root.clicked(); } }
+    }
+}
+
+component CircuitBanner inherits Rectangle {
+    height: 78px;
+    property <length> cx: self.width / 2;
+    property <color> dim: Cat.mauve.with-alpha(0.4);
+    property <color> bright: Cat.mauve.with-alpha(0.85);
+    property <color> glow: Cat.mauve.brighter(0.25);
+    property <length> lx1: Math.max(8px, cx - 190px);
+    property <length> rx1: Math.min(self.width - 8px, cx + 190px);
+
+    Rectangle { x: 8px; y: 12px; width: cx - 55px - 8px; height: 1px; background: bright; }
+    Rectangle { x: cx + 55px; y: 12px; width: root.width - 8px - (cx + 55px); height: 1px; background: bright; }
+    Rectangle { x: 8px; y: 65px; width: root.width - 16px; height: 2px; background: dim; }
+
+    Rectangle { x: lx1; y: 12px; width: 1px; height: 26px; background: bright; }
+    Rectangle { x: lx1; y: 38px; width: cx - 135px - lx1; height: 1px; background: bright; }
+    Rectangle { x: cx - 135px; y: 38px; width: 1px; height: 27px; background: bright; }
+    Rectangle { x: rx1; y: 12px; width: 1px; height: 26px; background: bright; }
+    Rectangle { x: cx + 135px; y: 38px; width: rx1 - (cx + 135px); height: 1px; background: bright; }
+    Rectangle { x: cx + 135px; y: 38px; width: 1px; height: 27px; background: bright; }
+
+    Rectangle { x: cx - 110px; y: 12px; width: 2px; height: 17px; background: dim; }
+    Rectangle { x: cx - 110px; y: 29px; width: 55px; height: 2px; background: dim; }
+    Rectangle { x: cx + 110px; y: 12px; width: 2px; height: 17px; background: dim; }
+    Rectangle { x: cx + 55px; y: 29px; width: 55px; height: 2px; background: dim; }
+    Rectangle { x: cx; y: 52px; width: 2px; height: 13px; background: dim; }
+
+    for py in [22px, 29px, 36px, 44px]: Rectangle {
+        x: cx - 64px; y: py; width: 9px; height: 1px; background: dim;
+    }
+    for py in [22px, 29px, 36px, 44px]: Rectangle {
+        x: cx + 55px; y: py; width: 9px; height: 1px; background: dim;
+    }
+
+    Rectangle {
+        x: cx - 55px;
+        y: 14px;
+        width: 110px;
+        height: 40px;
+        background: Cat.crust;
+        border-width: 1px;
+        border-color: bright;
+        HorizontalLayout {
+            alignment: center;
+            spacing: 4px;
+            VerticalLayout {
+                alignment: center;
+                NavIcon { d: "M13 2L3 14h9l-1 8 10-12h-9l1-8z"; icon-color: glow; width: 13px; height: 13px; }
+            }
+            Text { text: "SCX"; font-family: "JetBrains Mono"; font-size: Cat.fs13; font-weight: 700; color: glow; vertical-alignment: center; }
+        }
+    }
+
+    for n in [
+        { a: 0, dx: 8px, y: 12px }, { a: 2, dx: 8px, y: 12px }, { a: 0, dx: 8px, y: 65px }, { a: 2, dx: 8px, y: 65px },
+        { a: 3, dx: 0px, y: 12px }, { a: 4, dx: 0px, y: 12px }, { a: 3, dx: 0px, y: 38px }, { a: 4, dx: 0px, y: 38px },
+        { a: 1, dx: -135px, y: 38px }, { a: 1, dx: 135px, y: 38px }, { a: 1, dx: -135px, y: 65px }, { a: 1, dx: 135px, y: 65px },
+        { a: 1, dx: -110px, y: 12px }, { a: 1, dx: 110px, y: 12px }, { a: 1, dx: -110px, y: 29px }, { a: 1, dx: 110px, y: 29px },
+        { a: 1, dx: 0px, y: 65px },
+    ]: Rectangle {
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: glow;
+        x: (n.a == 0 ? n.dx : (n.a == 1 ? cx + n.dx : (n.a == 2 ? root.width - n.dx : (n.a == 3 ? lx1 : rx1)))) - 3px;
+        y: n.y - 3px;
+    }
+}
+
+component TagPill inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <color> accent: Cat.mauve;
+    callback clicked();
+
+    height: tag-lbl.preferred-height + 12px;
+    width: tag-lbl.preferred-width + 26px;
+    border-radius: self.height / 2;
+    background: active ? accent : (tag-t.has-hover ? accent.with-alpha(0.26) : accent.with-alpha(0.14));
+    border-width: 1px;
+    border-color: active ? accent : accent.with-alpha(0.5);
+    animate background { duration: 80ms; }
+
+    tag-lbl := Text {
+        text: label;
+        font-size: Cat.fs14;
+        font-weight: 700;
+        color: active ? Cat.crust : accent;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    tag-t := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component UnderTab inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <color> accent: Cat.blue;
+    callback clicked;
+
+    width: ut-label.preferred-width + 36px;
+    height: 40px;
+
+    ut-label := Text {
+        text: root.label;
+        font-size: Cat.fs14;
+        font-weight: root.active ? 700 : 500;
+        color: root.active ? root.accent : Cat.overlay1;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        y: parent.height - 2px;
+        height: 2px;
+        width: parent.width;
+        background: root.active ? root.accent : transparent;
+        animate background { duration: 120ms; }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component PageCard inherits Rectangle {
+    in property <color> accent: Cat.mauve;
+    background: Cat.card(Cat.surface1);
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: root.accent.with-alpha(0.45);
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 5px;
+        @children
+    }
+}
+
+component CardTitle inherits Text {
+    font-size: Cat.fs15;
+    font-weight: 700;
+    color: Cat.text;
+}
+
+component WrapText inherits Text {
+    in property <length> char-w: 6.6px;
+    in property <length> line-h: 18px;
+    wrap: word-wrap;
+    height: Math.max(1, Math.ceil(self.text.character-count * self.char-w / Math.max(self.width, 120px))) * self.line-h;
+}
+
+component CardHint inherits WrapText {
+    font-size: Cat.fs13;
+    color: Cat.overlay1;
+}
+
+component KernelItemRow inherits Rectangle {
+    in property <string> name;
+    in property <string> detail;
+    in property <bool> installed;
+    in property <color> accent: Cat.mauve;
+    callback action;
+
+    height: 56px;
+    border-radius: 10px;
+    background: kr-touch.has-hover ? Cat.card(Cat.surface2) : Cat.card(Cat.surface1);
+    border-width: 1px;
+    border-color: root.installed ? Cat.green.with-alpha(0.45) : Cat.divider;
+    animate background { duration: 80ms; }
+
+    kr-touch := TouchArea { }
+
+    Rectangle {
+        x: 0;
+        width: 4px;
+        height: parent.height;
+        border-top-left-radius: 10px;
+        border-bottom-left-radius: 10px;
+        background: root.accent.with-alpha(root.installed ? 0.9 : 0.45);
+    }
+
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 12px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                border-radius: 9px;
+                background: root.accent.with-alpha(0.16);
+                NavIcon {
+                    d: "M9 3v2M15 3v2M9 19v2M15 19v2M3 9h2M3 15h2M19 9h2M19 15h2M7 5h10a2 2 0 012 2v10a2 2 0 01-2 2H7a2 2 0 01-2-2V7a2 2 0 012-2zM9 9h6v6H9z";
+                    icon-color: root.accent;
+                    width: 16px;
+                    height: 16px;
+                    x: 8px;
+                    y: 8px;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 1px;
+            Text { text: root.name; font-size: Cat.fs14; font-weight: 700; color: Cat.text; overflow: elide; }
+            Text { text: root.detail; font-size: Cat.fs12; color: Cat.overlay0; overflow: elide; }
+        }
+        if root.installed: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: 22px;
+                width: inst-lbl.preferred-width + 18px;
+                border-radius: 11px;
+                background: Cat.green.with-alpha(0.16);
+                inst-lbl := Text {
+                    text: @tr("Installed");
+                    font-size: Cat.fs12;
+                    font-weight: 700;
+                    color: Cat.green;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            DialogButton {
+                label: root.installed ? @tr("Remove") : @tr("Install");
+                kind: root.installed ? "danger" : "primary";
+                clicked => { root.action(); }
+            }
+        }
+    }
+}
 component ProgressDialog inherits Rectangle {
     in property <string> title;
     in property <string> stage;
@@ -1766,6 +2150,7 @@ component ProgressDialog inherits Rectangle {
                     border-radius: 8px;
                     clip: true;
                     ScrollView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                         VerticalLayout {
                         for r in root.refs: Rectangle {
                             property <bool> shown: root.stages.length <= 1 || r.group == root.page;
@@ -1899,6 +2284,7 @@ component ProgressDialog inherits Rectangle {
                 background: Cat.crust;
 
                 ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     x: 0px;
                     y: 0px;
                     width: parent.width;
@@ -1977,9 +2363,16 @@ export component MainWindow inherits Window {
     preferred-height: 1000px;
     min-width: 960px;
     min-height: 600px;
-    background: Palette.background;
+    background: Cat.bg;
 
     in-out property <int> view: 9;
+    property <bool> sidebar-compact: root.height < 900px;
+    property <bool> sidebar-tight: root.height < 700px;
+    Timer {
+        interval: 500ms;
+        running: root.view == 17 && root.scx-tab == 0 && !root.scx-missing;
+        triggered => { root.scx-poll(); }
+    }
     in-out property <[PackageData]> installed-packages: [];
     in-out property <[PackageData]> update-packages: [];
     in-out property <[PackageData]> flatpak-update-packages: [];
@@ -1991,7 +2384,7 @@ export component MainWindow inherits Window {
     in-out property <int> selected-index: -1;
     in-out property <bool> loading: false;
     in-out property <bool> busy: false;
-    in-out property <string> app-version: "0.8.1";
+    in-out property <string> app-version: "0.9.0";
     in-out property <bool> show-about: false;
     in-out property <bool> show-appimage-open: false;
     in-out property <string> appimage-open-path: "";
@@ -2316,6 +2709,55 @@ export component MainWindow inherits Window {
     callback install-dep-package(string);
     callback clean-package-cache;
     callback clean-app-cache;
+    callback reset-settings();
+    in-out property <[KernelGroup]> kernel-groups: [];
+    in-out property <[KernelCatRow]> kernel-cat-rows: [];
+    in-out property <int> kernel-installed-count: 0;
+    in-out property <int> kernel-available-count: 0;
+    in-out property <int> kernel-total: 0;
+    in-out property <string> kernel-filter: "";
+    in-out property <bool> kernels-loading: false;
+    in-out property <bool> show-kernel-confirm: false;
+    in-out property <string> kernel-confirm-name: "";
+    in-out property <bool> kernel-confirm-remove: false;
+    callback refresh-kernels();
+    callback kernel-set-filter(string);
+    callback install-kernel(string);
+    callback remove-kernel(string);
+    in-out property <int> scx-tab: 0;
+    in-out property <bool> scx-missing: false;
+    in-out property <string> scx-kernel-version: "";
+    in-out property <int> scx-kernel-level: 0;
+    in-out property <string> scx-kernel-msg: "";
+    in-out property <bool> scx-active: false;
+    in-out property <string> scx-active-name: "EEVDF (Default)";
+    in-out property <string> scx-active-mode: "N/A";
+    in-out property <[DropItem]> scx-options: [];
+    in-out property <string> scx-selected-label: "";
+    property <[DropItem]> scx-mode-items: [
+        { id: "auto", label: "Auto", header: false },
+        { id: "gaming", label: "Gaming", header: false },
+        { id: "lowlatency", label: "Low Latency", header: false },
+        { id: "powersave", label: "Power Save", header: false },
+    ];
+    property <string> scx-mode-label: scx-mode == "gaming" ? "Gaming" : (scx-mode == "lowlatency" ? "Low Latency" : (scx-mode == "powersave" ? "Power Save" : "Auto"));
+    in-out property <string> scx-selected: "";
+    in-out property <string> scx-mode: "auto";
+    in-out property <bool> scx-persist: false;
+    in-out property <bool> scx-busy: false;
+    in-out property <[string]> scx-log: [];
+    in-out property <[FlagRow]> scx-flags: [];
+    in-out property <string> scx-flag-filter: "";
+    in-out property <[SchedInfoRow]> scx-info: [];
+    callback scx-refresh(bool);
+    callback scx-poll();
+    callback scx-select(string);
+    callback scx-switch(string, string);
+    callback scx-stop();
+    callback scx-persist-toggled(bool, string, string);
+    callback scx-filter-flags(string);
+    callback install-scx-tools();
+    in-out property <bool> show-reset-confirm: false;
     callback load-orphan-list;
     in-out property <bool> show-orphan-dialog: false;
     in-out property <[PackageData]> orphan-list: [];
@@ -2458,8 +2900,8 @@ export component MainWindow inherits Window {
                     alignment: center;
                     Image {
                         source: @image-url("xerolinux.png");
-                        width: 100px;
-                        height: 100px;
+                        width: root.sidebar-compact ? 52px : 100px;
+                        height: root.sidebar-compact ? 52px : 100px;
                         image-fit: contain;
                     }
                 }
@@ -2474,7 +2916,7 @@ export component MainWindow inherits Window {
                         color: Cat.mauve;
                         horizontal-alignment: center;
                     }
-                    HorizontalLayout {
+                    if !root.sidebar-compact: HorizontalLayout {
                         alignment: center;
                         spacing: 5px;
                         Text {
@@ -2495,14 +2937,15 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle { height: 8px; }
-            HorizontalLayout {
+            Rectangle { height: root.sidebar-compact ? 4px : 8px; }
+            if !root.sidebar-tight: HorizontalLayout {
                 padding-left: 10px;
                 SectionLabel { section-title: @tr("LIBRARY"); }
             }
-            Rectangle { height: 4px; }
+            if !root.sidebar-tight: Rectangle { height: 4px; }
 
             NavButton {
+                compact: root.sidebar-compact;
                 icon-path: icon-home;
                 label: @tr("Home");
                 tooltip-text: @tr("Overview, quick actions and cache management");
@@ -2511,6 +2954,7 @@ export component MainWindow inherits Window {
             }
 
             if setting-flatpak-enabled: NavButton {
+                compact: root.sidebar-compact;
                 icon-path: icon-flatpak;
                 label: @tr("Flatpaks");
                 tooltip-text: @tr("Browse and install Flatpak applications");
@@ -2522,6 +2966,7 @@ export component MainWindow inherits Window {
             }
 
             NavButton {
+                compact: root.sidebar-compact;
                 icon-path: icon-folder;
                 label: @tr("Packages");
                 tooltip-text: @tr("Browse and install packages from Arch repositories");
@@ -2534,6 +2979,7 @@ export component MainWindow inherits Window {
             }
 
             if setting-appimage-enabled: NavButton {
+                compact: root.sidebar-compact;
                 icon-path: icon-image;
                 label: @tr("AppImages");
                 tooltip-text: @tr("Install and manage AppImages");
@@ -2546,6 +2992,7 @@ export component MainWindow inherits Window {
             }
 
             NavButton {
+                compact: root.sidebar-compact;
                 icon-path: icon-rss;
                 label: @tr("Arch News");
                 tooltip-text: @tr("View latest Arch Linux news and announcements");
@@ -2559,8 +3006,41 @@ export component MainWindow inherits Window {
             Rectangle { height: 6px; }
             Rectangle { height: 1px; background: Cat.divider; }
             Rectangle { height: 6px; }
+            if !root.sidebar-tight: HorizontalLayout {
+                padding-left: 10px;
+                SectionLabel { section-title: @tr("KERNELS & TOOLS"); }
+            }
+            if !root.sidebar-tight: Rectangle { height: 4px; }
 
             NavButton {
+                compact: root.sidebar-compact;
+                icon-path: "M9 3v2M15 3v2M9 19v2M15 19v2M3 9h2M3 15h2M19 9h2M19 15h2M7 5h10a2 2 0 012 2v10a2 2 0 01-2 2H7a2 2 0 01-2-2V7a2 2 0 012-2zM9 9h6v6H9z";
+                label: @tr("Kernel Manager");
+                tooltip-text: @tr("Install and remove Linux kernels");
+                active: view == 16;
+                clicked => { view = 16; selected-index = -1; root.refresh-kernels(); }
+            }
+
+            NavButton {
+                compact: root.sidebar-compact;
+                icon-path: "M13 2L3 14h9l-1 8 10-12h-9l1-8z";
+                label: @tr("Kernel Schedulers");
+                tooltip-text: @tr("Switch sched-ext CPU schedulers on the fly");
+                active: view == 17;
+                clicked => { view = 17; selected-index = -1; root.scx-refresh(root.scx-log.length == 0); }
+            }
+
+            Rectangle { height: 6px; }
+            Rectangle { height: 1px; background: Cat.divider; }
+            Rectangle { height: 6px; }
+            if !root.sidebar-tight: HorizontalLayout {
+                padding-left: 10px;
+                SectionLabel { section-title: @tr("TBS & SETTINGS"); }
+            }
+            if !root.sidebar-tight: Rectangle { height: 4px; }
+
+            NavButton {
+                compact: root.sidebar-compact;
                 icon-path: icon-wrench;
                 label: @tr("Troubleshooting");
                 tooltip-text: @tr("Fix orphaned packages and manage ignored packages");
@@ -2569,6 +3049,7 @@ export component MainWindow inherits Window {
             }
 
             NavButton {
+                compact: root.sidebar-compact;
                 icon-path: icon-gear;
                 label: @tr("Settings & Tweaks");
                 tooltip-text: @tr("Configure pacman settings, parallel downloads and held packages");
@@ -2582,6 +3063,7 @@ export component MainWindow inherits Window {
             Rectangle { height: 10px; }
 
             if total-update-count > 0: NavButton {
+                compact: root.sidebar-compact;
                 icon-path: icon-arrow-up;
                 label: @tr("Updates");
                 tooltip-text: @tr("View and install available package updates");
@@ -2695,7 +3177,7 @@ export component MainWindow inherits Window {
             padding-top: (view == 11 || view == 12) ? 0px : 20px;
             spacing: 12px;
 
-            if view != 11 && view != 12 && view != 15: HorizontalLayout {
+            if view != 11 && view != 12 && view != 15: hdr-row := HorizontalLayout {
                 spacing: 12px;
 
                 Text {
@@ -2708,13 +3190,49 @@ export component MainWindow inherits Window {
                           view == 8 ? selected-repo :
                           view == 10 ? (show-flatpak-detail ? flatpak-detail-name : "Flatpaks") :
                           view == 14 ? "AppImages" :
+                          view == 16 ? "Kernel Manager" :
+                          view == 17 ? "Kernel Schedulers" :
                           view == 13 ? "Arch News" : "";
                     font-size: Cat.fs22;
                     font-weight: 700;
                     color: Cat.text;
                 }
 
-                Rectangle { horizontal-stretch: 1; }
+                hdr-spacer := Rectangle {
+                    horizontal-stretch: 1;
+                    if view == 17: Rectangle {
+                        width: min(adv-text.preferred-width + 15px + 8px + 24px, parent.width - 8px);
+                        height: 30px;
+                        x: Math.max(0px, Math.min((hdr-row.width - self.width) / 2 - hdr-spacer.x, parent.width - self.width));
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 15px;
+                        background: Cat.mauve.with-alpha(0.14);
+                        border-width: 1px;
+                        border-color: Cat.mauve.with-alpha(0.5);
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                NavIcon {
+                                    d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
+                                    icon-color: Cat.mauve;
+                                    width: 15px;
+                                    height: 15px;
+                                }
+                            }
+                            adv-text := Text {
+                                text: @tr("Advanced Users Only! Know what you are doing. Breakage might occur.");
+                                font-size: Cat.fs13;
+                                font-weight: 600;
+                                color: Cat.mauve;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
 
                 if (view == 0 || view == 1 || view == 8) || (view == 10 && !show-flatpak-detail): Text {
                     text: view == 10
@@ -2763,6 +3281,18 @@ export component MainWindow inherits Window {
                     }
                 }
 
+
+                if view == 16: RefreshButton {
+                    loading: kernels-loading;
+                    enabled: !kernels-loading;
+                    clicked => { root.refresh-kernels(); }
+                }
+
+                if view == 5: HeaderButton {
+                    label: @tr("Reset to Defaults");
+                    icon: "M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8M3 3v5h5";
+                    clicked => { root.show-reset-confirm = true; }
+                }
 
                 if view == 10 && !show-flatpak-detail: HeaderButton {
                     label: @tr("Install File");
@@ -3049,6 +3579,7 @@ export component MainWindow inherits Window {
                 vertical-stretch: 1;
 
                 ListView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
                     for p[i] in installed-packages: PackageRow {
                         pkg: p;
@@ -3068,6 +3599,7 @@ export component MainWindow inherits Window {
             }
 
             if !loading && view == 1 && total-update-count > 0: ScrollView {
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 vertical-stretch: 1;
                 VerticalLayout {
                     alignment: start;
@@ -3289,6 +3821,7 @@ export component MainWindow inherits Window {
                                         border-width: 1px;
                                         border-color: Cat.overlay0.with-alpha(0.3);
                                         ScrollView {
+                                            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                                             remote-list-layout := VerticalLayout {
                                                 padding: 4px;
                                                 spacing: 2px;
@@ -3550,6 +4083,7 @@ export component MainWindow inherits Window {
                 }
 
                 if !remote-apps-loading && show-flatpak-detail: ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
 
                     VerticalLayout {
@@ -4091,6 +4625,7 @@ export component MainWindow inherits Window {
                     }
 
                     ScrollView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                         vertical-stretch: 1;
 
                         VerticalLayout {
@@ -4397,6 +4932,7 @@ export component MainWindow inherits Window {
                     }
 
                     if installed-flatpaks.length > 0: ScrollView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                         vertical-stretch: 1;
 
                         VerticalLayout {
@@ -4724,6 +5260,7 @@ export component MainWindow inherits Window {
                                         border-width: 1px;
                                         border-color: Cat.overlay0.with-alpha(0.3);
                                         ScrollView {
+                                            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                                             ai-src-list := VerticalLayout {
                                                 padding: 4px;
                                                 spacing: 2px;
@@ -4856,6 +5393,7 @@ export component MainWindow inherits Window {
                     }
 
                     if !appimage-catalog-loading && catalog-appimages.length > 0: ScrollView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                         vertical-stretch: 1;
                         VerticalLayout {
                             spacing: 0;
@@ -4992,6 +5530,7 @@ export component MainWindow inherits Window {
 
 
                     if installed-appimages.length > 0: ScrollView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                         vertical-stretch: 1;
                         VerticalLayout {
                             spacing: 0;
@@ -5326,6 +5865,7 @@ export component MainWindow inherits Window {
                     }
 
                     if !repo-loading && repo-packages.length > 0: ListView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                         vertical-stretch: 1;
                         for p[i] in repo-packages: RepoRow {
                             pkg: p;
@@ -5362,6 +5902,7 @@ export component MainWindow inherits Window {
             }
 
             if !loading && view == 2 && (search-installed.length > 0 || search-available.length > 0): ScrollView {
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 vertical-stretch: 1;
 
                 VerticalLayout {
@@ -5588,6 +6129,7 @@ export component MainWindow inherits Window {
                     }
 
                     if installed-grouped.length > 0: ListView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                         vertical-stretch: 1;
 
                             for pkg[i] in installed-grouped: Rectangle {
@@ -5841,6 +6383,7 @@ export component MainWindow inherits Window {
             }
 
             if view == 5: ScrollView {
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 vertical-stretch: 1;
 
                 VerticalLayout {
@@ -6118,6 +6661,7 @@ export component MainWindow inherits Window {
                 }
             }
 
+
             if view == 12: Rectangle {
                 vertical-stretch: 1;
                 border-radius: 14px;
@@ -6276,6 +6820,7 @@ export component MainWindow inherits Window {
                     }
 
                     if dep-tree-nodes.length > 0: ListView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                         vertical-stretch: 1;
 
                         for node[i] in dep-tree-nodes: Rectangle {
@@ -6442,6 +6987,7 @@ export component MainWindow inherits Window {
                         Rectangle { height: 4px; background: transparent; }
 
                         ListView {
+                            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                             vertical-stretch: 1;
                             for node[i] in dep-reqby-nodes: Rectangle {
                                 height: 46px;
@@ -6497,6 +7043,7 @@ export component MainWindow inherits Window {
                 }
 
                 if arch-news-items.length > 0: ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
 
                     VerticalLayout {
@@ -6572,6 +7119,458 @@ export component MainWindow inherits Window {
                                             mouse-cursor: pointer;
                                             clicked => { root.open-url(item.link); }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if view == 16: ScrollView {
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 10px;
+                    alignment: start;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: risk-text.preferred-width + 15px + 8px + 24px + 8px;
+                            height: 34px;
+                            border-radius: 8px;
+                            background: Cat.red.with-alpha(0.1);
+                            border-width: 1px;
+                            border-color: Cat.red.with-alpha(0.4);
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 8px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    NavIcon {
+                                        d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
+                                        icon-color: Cat.red;
+                                        width: 15px;
+                                        height: 15px;
+                                    }
+                                }
+                                risk-text := Text {
+                                    text: @tr("Use at your own risk! Playing with kernels comes with risks.");
+                                    font-size: Cat.fs13;
+                                    font-weight: 600;
+                                    color: Cat.red;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    WrapText {
+                        text: @tr("Install or remove Linux kernels from your enabled repositories. A kernel is always installed together with its headers.");
+                        font-size: Cat.fs13;
+                        color: Cat.overlay1;
+                    }
+
+                    if kernels-loading && kernel-groups.length == 0: VerticalLayout {
+                        padding-top: 60px;
+                        HorizontalLayout { alignment: center; LoadingCircle { diameter: 28px; } }
+                    }
+
+                    if kernel-groups.length > 0: HorizontalLayout {
+                        spacing: 10px;
+                        alignment: center;
+                        for stat in [
+                            { value: kernel-installed-count, label: @tr("installed"), accent: Cat.green },
+                            { value: kernel-available-count, label: @tr("available"), accent: Cat.mauve },
+                        ]: Rectangle {
+                            height: 30px;
+                            width: stat-row.preferred-width + 22px;
+                            border-radius: 15px;
+                            background: stat.accent.with-alpha(0.14);
+                            stat-row := HorizontalLayout {
+                                padding-left: 11px;
+                                padding-right: 11px;
+                                spacing: 6px;
+                                Text { text: stat.value; font-size: Cat.fs14; font-weight: 700; color: stat.accent; vertical-alignment: center; }
+                                Text { text: stat.label; font-size: Cat.fs13; color: stat.accent; vertical-alignment: center; }
+                            }
+                        }
+                    }
+
+                    for row[i] in kernel-cat-rows: HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        if i == 0: TagPill {
+                            label: @tr("All") + " (" + kernel-total + ")";
+                            accent: Cat.mauve;
+                            active: kernel-filter == "";
+                            clicked => { root.kernel-set-filter(""); }
+                        }
+                        for cat in row.items: TagPill {
+                            label: cat.title + " (" + cat.count + ")";
+                            accent: Cat.kind(cat.kind);
+                            active: kernel-filter == cat.title;
+                            clicked => { root.kernel-set-filter(cat.title); }
+                        }
+                    }
+
+                    for g in kernel-groups: VerticalLayout {
+                        spacing: 6px;
+                        padding-top: 8px;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle { width: 4px; height: 18px; border-radius: 2px; background: Cat.kind(g.kind); }
+                            }
+                            Text { text: g.title; font-size: Cat.fs17; font-weight: 700; color: Cat.text; vertical-alignment: center; }
+                            Text {
+                                text: g.installed + " " + @tr("installed") + "  /  " + g.total + " " + @tr("total");
+                                font-size: Cat.fs12;
+                                color: Cat.overlay0;
+                                vertical-alignment: center;
+                            }
+                        }
+                        WrapText { text: g.blurb; font-size: Cat.fs13; color: Cat.overlay1; }
+                        for k in g.rows: KernelItemRow {
+                            name: k.name;
+                            detail: k.detail;
+                            installed: k.installed;
+                            accent: Cat.kind(g.kind);
+                            action => {
+                                root.kernel-confirm-name = k.name;
+                                root.kernel-confirm-remove = k.installed;
+                                root.show-kernel-confirm = true;
+                            }
+                        }
+                    }
+
+                    if !kernels-loading && kernel-groups.length == 0: Text {
+                        text: @tr("No kernels found in your repositories");
+                        font-size: Cat.fs13;
+                        color: Cat.overlay0;
+                    }
+                }
+            }
+
+            if view == 17: VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    alignment: start;
+                    UnderTab { label: @tr("Scheduler"); active: scx-tab == 0; accent: Cat.mauve; clicked => { scx-tab = 0; } }
+                    UnderTab { label: @tr("Flags Reference"); active: scx-tab == 1; accent: Cat.blue; clicked => { scx-tab = 1; } }
+                    UnderTab { label: @tr("SCX Info"); active: scx-tab == 2; accent: Cat.teal; clicked => { scx-tab = 2; } }
+                }
+
+                if scx-tab == 0: sched-scroll := ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        min-height: sched-scroll.visible-height;
+                        padding: 4px;
+                        spacing: 8px;
+
+                        if scx-missing: PageCard {
+                            accent: Cat.yellow;
+                            HorizontalLayout {
+                                spacing: 12px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    CardTitle { text: @tr("scxctl not found"); }
+                                    CardHint { text: @tr("Install scx-tools to enable this feature."); }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    DialogButton { label: @tr("Install scx-tools"); kind: "primary"; clicked => { root.install-scx-tools(); } }
+                                }
+                            }
+                        }
+
+                        PageCard {
+                            accent: scx-kernel-level == 0 ? Cat.green : (scx-kernel-level == 1 ? Cat.yellow : Cat.red);
+                            CardTitle { text: @tr("Kernel Support"); }
+                            CardHint { text: @tr("Verifies your kernel has sched-ext compiled in. Requires Linux 6.12 or newer."); }
+                            HorizontalLayout {
+                                spacing: 14px;
+                                alignment: start;
+                                Text { text: @tr("Kernel: ") + (scx-kernel-version == "" ? @tr("Detecting...") : scx-kernel-version); font-size: Cat.fs14; font-weight: 700; color: Cat.text; vertical-alignment: center; }
+                                Text {
+                                    text: scx-kernel-msg;
+                                    font-size: Cat.fs14;
+                                    font-weight: 600;
+                                    color: scx-kernel-level == 0 ? Cat.green : (scx-kernel-level == 1 ? Cat.yellow : Cat.red);
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        PageCard {
+                            accent: Cat.blue;
+                            CardTitle { text: @tr("Current Status"); }
+                            CardHint { text: @tr("Live view of the active sched-ext scheduler and its operating mode. Updates every 500ms."); }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: start;
+                                Text { text: @tr("Active Scheduler:"); font-size: Cat.fs14; color: Cat.overlay1; vertical-alignment: center; }
+                                Text { text: scx-active-name; font-size: Cat.fs15; font-weight: 700; color: scx-active ? Cat.mauve : Cat.text; vertical-alignment: center; }
+                                Rectangle { width: 14px; }
+                                Text { text: @tr("Mode:"); font-size: Cat.fs14; color: Cat.overlay1; vertical-alignment: center; }
+                                Text { text: scx-active-mode; font-size: Cat.fs15; font-weight: 700; color: Cat.text; vertical-alignment: center; }
+                            }
+                        }
+
+                        PageCard {
+                            accent: Cat.mauve;
+                            CardTitle { text: @tr("Scheduler Selection"); }
+                            CardHint { text: @tr("Choose a scheduler and performance mode. Enable persistence to auto-start on every boot via systemd."); }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                alignment: start;
+                                padding-top: 4px;
+                                VerticalLayout { alignment: center; Text { text: @tr("Scheduler:"); font-size: Cat.fs14; color: Cat.overlay1; } }
+                                DropDown {
+                                    width: 240px;
+                                    items: scx-options;
+                                    current-id: scx-selected;
+                                    current-label: scx-selected-label == "" ? @tr("None") : scx-selected-label;
+                                    selected(id) => { root.scx-select(id); }
+                                }
+                                VerticalLayout { alignment: center; Text { text: @tr("Mode:"); font-size: Cat.fs14; color: Cat.overlay1; } }
+                                DropDown {
+                                    width: 160px;
+                                    items: scx-mode-items;
+                                    current-id: scx-mode;
+                                    current-label: scx-mode-label;
+                                    selected(id) => { root.scx-mode = id; }
+                                }
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 10px;
+                                padding-top: 4px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    CheckBox {
+                                        checked: scx-persist;
+                                        toggled(val) => {
+                                            root.scx-persist = val;
+                                            root.scx-persist-toggled(val, root.scx-selected, root.scx-mode);
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text { text: @tr("Persist scheduler after reboot"); font-size: Cat.fs14; color: Cat.text; }
+                                }
+                            }
+                        }
+
+                        Rectangle { vertical-stretch: 1; min-height: 4px; }
+
+                        if sched-scroll.visible-height > 560px: CircuitBanner { }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            ActionButton {
+                                label: @tr("Switch / Start Scheduler");
+                                kind: "primary";
+                                enabled: !scx-missing && scx-kernel-level != 2 && scx-selected != "" && !scx-busy;
+                                clicked => { root.scx-switch(root.scx-selected, root.scx-mode); }
+                            }
+                            ActionButton {
+                                label: @tr("Stop Scheduler");
+                                kind: "danger";
+                                enabled: scx-active && !scx-busy;
+                                clicked => { root.scx-stop(); }
+                            }
+                            ActionButton {
+                                label: @tr("Refresh List");
+                                enabled: !scx-missing && !scx-busy;
+                                clicked => { root.scx-refresh(true); }
+                            }
+                        }
+                    }
+                }
+
+                if scx-tab == 1: ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 10px;
+                        alignment: start;
+
+                        PageCard {
+                            accent: Cat.mauve;
+                            CardTitle { text: @tr("How to use flags"); color: Cat.mauve; }
+                            CardHint { text: @tr("Flags are extra options you pass on the command line when starting a scheduler manually. They let you tune behaviour beyond what the GUI exposes. The table below lists every known flag, whether it is optional or required, and what it does."); }
+                            Text { text: @tr("Example usage:"); font-size: Cat.fs13; font-weight: 700; color: Cat.mauve; }
+                            Rectangle {
+                                background: Cat.crust.with-alpha(0.7);
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: Cat.mauve.with-alpha(0.4);
+                                HorizontalLayout {
+                                    padding: 8px;
+                                    WrapText {
+                                        text: "scxctl start --sched bpfland -- --slice-us 500 --freq-to-lowfreq performance";
+                                        font-family: "JetBrains Mono";
+                                        font-size: Cat.fs12;
+                                        color: Cat.mauve;
+                                        char-w: 7.4px;
+                                    }
+                                }
+                            }
+                            CardHint { text: @tr("Flags specific to the scheduler go after a bare -- separator. Required flags must always be provided; optional ones fall back to their defaults if omitted."); }
+                        }
+
+                        Rectangle {
+                            height: 40px;
+                            border-radius: 10px;
+                            background: flag-ti.has-focus ? Cat.surface1 : Cat.surface0;
+                            border-width: 1.5px;
+                            border-color: flag-ti.has-focus ? Cat.mauve.with-alpha(0.7) : Cat.overlay0.with-alpha(0.25);
+                            clip: true;
+                            flag-ti := TextInput {
+                                x: 14px;
+                                width: parent.width - 28px;
+                                height: parent.height;
+                                text <=> scx-flag-filter;
+                                font-size: Cat.fs14;
+                                color: Cat.text;
+                                single-line: true;
+                                vertical-alignment: center;
+                                selection-background-color: Cat.mauve.with-alpha(0.3);
+                                selection-foreground-color: Cat.text;
+                                edited => { root.scx-filter-flags(self.text); }
+                            }
+                            if scx-flag-filter == "" && !flag-ti.has-focus: Text {
+                                x: 14px;
+                                width: parent.width - 28px;
+                                height: parent.height;
+                                text: @tr("Type to filter by scheduler, flag, or description...");
+                                font-size: Cat.fs14;
+                                color: Cat.subtext0.with-alpha(0.5);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 12px;
+                            Text { text: @tr("SCHEDULER"); width: 110px; font-size: Cat.fs11; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.8px; }
+                            Text { text: @tr("FLAG"); width: 170px; font-size: Cat.fs11; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.8px; }
+                            Text { text: @tr("STATUS"); width: 70px; font-size: Cat.fs11; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.8px; }
+                            Text { text: @tr("DESCRIPTION"); horizontal-stretch: 1; font-size: Cat.fs11; font-weight: 700; color: Cat.overlay0; letter-spacing: 0.8px; }
+                        }
+
+                        for f[i] in scx-flags: Rectangle {
+                            border-radius: 8px;
+                            background: Math.mod(i, 2) == 0 ? Cat.card(Cat.surface2) : Cat.card(Cat.surface0);
+                            HorizontalLayout {
+                                padding: 10px;
+                                spacing: 12px;
+                                Text { text: f.scheduler; width: 110px; font-size: Cat.fs13; color: Cat.text; overflow: elide; }
+                                Text { text: f.flag; width: 170px; font-family: "JetBrains Mono"; font-size: Cat.fs12; color: Cat.mauve; overflow: elide; }
+                                Text { text: f.required ? "required" : "optional"; width: 70px; font-size: Cat.fs12; font-weight: 600; color: f.required ? Cat.red : Cat.green; }
+                                WrapText { text: f.desc; horizontal-stretch: 1; font-size: Cat.fs13; color: Cat.subtext0; }
+                            }
+                        }
+                    }
+                }
+
+                if scx-tab == 2: ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 10px;
+                        alignment: start;
+
+                        Text {
+                            text: @tr("Descriptions sourced from the XeroLinux Wiki.");
+                            font-size: Cat.fs13;
+                            color: Cat.overlay1;
+                        }
+
+                        for it in scx-info: PageCard {
+                            accent: Cat.blue;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                CardTitle { text: it.name; }
+                                Text { text: "(" + it.id + ")"; font-size: Cat.fs13; color: Cat.overlay0; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Rectangle {
+                                    height: 22px;
+                                    width: info-cat.preferred-width + 16px;
+                                    border-radius: 6px;
+                                    background: Cat.blue.with-alpha(0.14);
+                                    info-cat := Text {
+                                        text: it.category;
+                                        font-size: Cat.fs12;
+                                        color: Cat.blue;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            CardHint { text: it.desc; }
+                        }
+                    }
+                }
+
+                PageCard {
+                    accent: Cat.overlay0;
+                    height: 124px;
+                    CardTitle { text: @tr("Activity Log"); }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: Cat.crust.with-alpha(0.7);
+                        border-radius: 6px;
+                        clip: true;
+                        ScrollView {
+                            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                            content-y: min(0px, self.visible-height - self.content-height);
+                            VerticalLayout {
+                                padding: 6px;
+                                if scx-log.length == 0: Rectangle {
+                                    height: 17px;
+                                    Text {
+                                        x: 0;
+                                        width: parent.width;
+                                        text: @tr("Waiting for user action...");
+                                        font-family: "JetBrains Mono";
+                                        font-size: Cat.fs12;
+                                        color: Cat.overlay0;
+                                        horizontal-alignment: left;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                for line in scx-log: Rectangle {
+                                    height: 17px;
+                                    Text {
+                                        x: 0;
+                                        width: parent.width;
+                                        text: line;
+                                        font-family: "JetBrains Mono";
+                                        font-size: Cat.fs12;
+                                        color: Cat.subtext0;
+                                        wrap: no-wrap;
+                                        overflow: elide;
+                                        horizontal-alignment: left;
+                                        vertical-alignment: center;
                                     }
                                 }
                             }
@@ -6697,6 +7696,7 @@ export component MainWindow inherits Window {
                 }
 
                 ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 VerticalLayout {
                     alignment: window-width > 1200 ? center : start;
                     padding-left: 28px; padding-right: 28px;
@@ -6986,6 +7986,7 @@ export component MainWindow inherits Window {
             }
 
             if view == 9: ScrollView {
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 vertical-stretch: 1;
 
                 VerticalLayout {
@@ -7063,7 +8064,7 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                                 height: 82px;
                                 border-radius: 10px;
-                                background: Cat.blue.with-alpha(0.1);
+                                background: Cat.card(Cat.blue);
                                 border-width: 1px;
                                 border-color: Cat.blue.with-alpha(0.25);
 
@@ -7092,7 +8093,7 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                                 height: 82px;
                                 border-radius: 10px;
-                                background: Cat.teal.with-alpha(0.1);
+                                background: Cat.card(Cat.teal);
                                 border-width: 1px;
                                 border-color: Cat.teal.with-alpha(0.25);
 
@@ -7121,7 +8122,7 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                                 height: 82px;
                                 border-radius: 10px;
-                                background: total-update-count > 0 ? Cat.peach.with-alpha(0.1) : Cat.surface0.with-alpha(0.35);
+                                background: total-update-count > 0 ? Cat.card(Cat.peach) : Cat.card(Cat.overlay0);
                                 border-width: 1px;
                                 border-color: total-update-count > 0 ? Cat.peach.with-alpha(0.25) : Cat.surface0.with-alpha(0.2);
 
@@ -7150,7 +8151,7 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                                 height: 82px;
                                 border-radius: 10px;
-                                background: Cat.mauve.with-alpha(0.1);
+                                background: Cat.card(Cat.mauve);
                                 border-width: 1px;
                                 border-color: Cat.mauve.with-alpha(0.25);
 
@@ -7188,7 +8189,7 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                                 height: 66px;
                                 border-radius: 10px;
-                                background: home-appcache-touch.has-hover ? Cat.peach.with-alpha(0.18) : Cat.surface0.with-alpha(0.4);
+                                background: home-appcache-touch.has-hover ? Cat.card(Cat.peach).brighter(0.25) : Cat.card(Cat.surface2);
                                 animate background { duration: 100ms; }
 
                                 home-appcache-touch := TouchArea {
@@ -7220,7 +8221,7 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                                 height: 66px;
                                 border-radius: 10px;
-                                background: home-cache-touch.has-hover ? Cat.blue.with-alpha(0.15) : Cat.surface0.with-alpha(0.4);
+                                background: home-cache-touch.has-hover ? Cat.card(Cat.blue).brighter(0.25) : Cat.card(Cat.surface2);
                                 animate background { duration: 100ms; }
 
                                 home-cache-touch := TouchArea {
@@ -7253,7 +8254,7 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                                 height: 66px;
                                 border-radius: 10px;
-                                background: home-mirror-touch.has-hover ? Cat.teal.with-alpha(0.15) : Cat.surface0.with-alpha(0.4);
+                                background: home-mirror-touch.has-hover ? Cat.card(Cat.teal).brighter(0.25) : Cat.card(Cat.surface2);
                                 opacity: busy ? 0.5 : 1.0;
                                 animate background { duration: 100ms; }
 
@@ -7291,7 +8292,7 @@ export component MainWindow inherits Window {
 
                         Rectangle {
                             border-radius: 12px;
-                            background: Cat.crust.with-alpha(0.25);
+                            background: Cat.crust.with-alpha(0.6);
                             border-width: 1px;
                             border-color: Cat.surface0;
                             clip: true;
@@ -7342,7 +8343,7 @@ export component MainWindow inherits Window {
                                         if sys-info.distro != "": Rectangle {
                                             width: distro-lbl2.preferred-width + 14px;
                                             height: 20px; border-radius: 4px;
-                                            background: Cat.mauve.with-alpha(0.1);
+                                            background: Cat.card(Cat.mauve);
                                             border-width: 1px; border-color: Cat.mauve.with-alpha(0.25);
                                             distro-lbl2 := Text {
                                                 text: sys-info.distro;
@@ -7408,7 +8409,7 @@ export component MainWindow inherits Window {
                             if activity-items.length == 0: Rectangle {
                                 height: 40px;
                                 border-radius: 8px;
-                                background: Cat.surface0.with-alpha(0.3);
+                                background: Cat.card(Cat.surface2);
                                 Text {
                                     text: @tr("No activity found");
                                     font-size: Cat.fs15;
@@ -7631,6 +8632,114 @@ export component MainWindow inherits Window {
         }
     }
 
+    if show-kernel-confirm: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Cat.crust.with-alpha(0.65);
+        TouchArea { clicked => { root.show-kernel-confirm = false; } }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(480px, parent.width - 40px);
+            height: kernel-confirm-layout.preferred-height;
+            background: Cat.panel;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: (root.kernel-confirm-remove ? Cat.red : Cat.mauve).with-alpha(0.45);
+            drop-shadow-blur: 32px;
+            drop-shadow-color: black.with-alpha(0.5);
+            drop-shadow-offset-y: 10px;
+            TouchArea {}
+
+            kernel-confirm-layout := VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                Text {
+                    text: root.kernel-confirm-remove ? @tr("Confirm Removal") : @tr("Confirm Installation");
+                    font-size: Cat.fs17;
+                    font-weight: 700;
+                    color: Cat.text;
+                }
+                Text {
+                    text: root.kernel-confirm-remove
+                        ? @tr("Remove {} and {}-headers? This will uninstall the kernel and its headers. Make sure you have at least one other kernel installed.", root.kernel-confirm-name, root.kernel-confirm-name)
+                        : @tr("Install {} and {}-headers? This will download and install the kernel and its headers.", root.kernel-confirm-name, root.kernel-confirm-name);
+                    font-size: Cat.fs14;
+                    color: Cat.subtext0;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+                    DialogButton { label: @tr("Cancel"); clicked => { root.show-kernel-confirm = false; } }
+                    DialogButton {
+                        label: root.kernel-confirm-remove ? @tr("Remove") : @tr("Install");
+                        kind: root.kernel-confirm-remove ? "danger" : "primary";
+                        clicked => {
+                            root.show-kernel-confirm = false;
+                            if root.kernel-confirm-remove { root.remove-kernel(root.kernel-confirm-name); }
+                            else { root.install-kernel(root.kernel-confirm-name); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if show-reset-confirm: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Cat.crust.with-alpha(0.65);
+        TouchArea { clicked => { root.show-reset-confirm = false; } }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(460px, parent.width - 40px);
+            height: reset-layout.preferred-height;
+            background: Cat.panel;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: Cat.yellow.with-alpha(0.4);
+            drop-shadow-blur: 32px;
+            drop-shadow-color: black.with-alpha(0.5);
+            drop-shadow-offset-y: 10px;
+            TouchArea {}
+
+            reset-layout := VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    NavIcon {
+                        d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
+                        icon-color: Cat.yellow;
+                        width: 22px;
+                        height: 22px;
+                    }
+                    Text { text: @tr("Reset all settings?"); font-size: Cat.fs17; font-weight: 700; color: Cat.text; vertical-alignment: center; }
+                }
+                Text {
+                    text: @tr("This resets every xPackage Manager setting to its stock defaults and restarts the app. System files such as pacman.conf are not changed.");
+                    font-size: Cat.fs14;
+                    color: Cat.subtext0;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+                    DialogButton { label: @tr("Cancel"); clicked => { root.show-reset-confirm = false; } }
+                    DialogButton {
+                        label: @tr("Proceed");
+                        kind: "danger";
+                        clicked => { root.show-reset-confirm = false; root.reset-settings(); }
+                    }
+                }
+            }
+        }
+    }
+
     if show-addons-modal: Rectangle {
         width: 100%;
         height: 100%;
@@ -7705,6 +8814,7 @@ export component MainWindow inherits Window {
                 Rectangle { height: 14px; }
 
                 ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
 
                     VerticalLayout {
@@ -8177,6 +9287,7 @@ export component MainWindow inherits Window {
                 }
 
                 if !pkg-info-loading: ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
                     VerticalLayout {
                         padding: 16px;
@@ -8385,6 +9496,7 @@ export component MainWindow inherits Window {
                 }
 
                 ListView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
 
                     for pkg[i] in orphan-list: Rectangle {
@@ -8777,6 +9889,7 @@ export component MainWindow inherits Window {
                     background: Cat.crust;
 
                     ScrollView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                         VerticalLayout {
                             padding: 14px;
 
@@ -8891,7 +10004,7 @@ export component MainWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: min(580px, parent.width - 40px);
-            height: min(fl-layout.preferred-height + 40px, parent.height - 40px);
+            height: min(fl-layout.preferred-height, parent.height - 40px);
             background: Cat.panel;
             border-radius: 18px;
             border-width: 1px;
@@ -8947,159 +10060,163 @@ export component MainWindow inherits Window {
 
                 Rectangle { height: 1px; background: Cat.divider; }
 
-                VerticalLayout {
-                    padding-left: 32px;
-                    padding-right: 32px;
-                    padding-top: 28px;
-                    padding-bottom: 28px;
-                    spacing: 22px;
+                ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    height: max(80px, min(fl-body.preferred-height + 40px, root.height - 238px));
+                    fl-body := VerticalLayout {
+                        padding-left: 32px;
+                        padding-right: 32px;
+                        padding-top: 28px;
+                        padding-bottom: 28px;
+                        spacing: 22px;
 
-                    HorizontalLayout {
-                        spacing: 14px;
-                        VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 34px;
-                                height: 34px;
-                                border-radius: 10px;
-                                background: Cat.mauve.with-alpha(0.14);
-                                NavIcon { d: "M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4L12 3z"; icon-color: Cat.mauve; width: 17px; height: 17px; x: 8.5px; y: 8.5px; }
-                            }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            horizontal-stretch: 1;
-                            FlexboxLayout {
-                                spacing-horizontal: 5px;
-                                spacing-vertical: 0px;
-                                min-height: 42px;
-                                for w in [
-                                    { t: "Built", x: false }, { t: "with", x: false }, { t: "the", x: false }, { t: "help", x: false }, { t: "of", x: false },
-                                    { t: "A.I/Claude", x: true },
-                                    { t: "and", x: false }, { t: "still", x: false }, { t: "being", x: false }, { t: "developed.", x: false },
-                                    { t: "Things", x: false }, { t: "may", x: false }, { t: "break,", x: false }, { t: "change", x: false },
-                                    { t: "or", x: false }, { t: "behave", x: false }, { t: "unexpectedly.", x: false },
-                                ]: Text {
-                                    text: w.t;
-                                    font-size: Cat.fs14;
-                                    font-weight: w.x ? 800 : 400;
-                                    color: w.x ? #cc785c : Cat.subtext0;
-                                }
-                            }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        spacing: 14px;
-                        VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 34px;
-                                height: 34px;
-                                border-radius: 10px;
-                                background: Cat.yellow.with-alpha(0.14);
-                                NavIcon { d: "M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6l8-3z M9 12l2 2 4-4"; icon-color: Cat.yellow; width: 17px; height: 17px; x: 8.5px; y: 8.5px; }
-                            }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            horizontal-stretch: 1;
-                            Text {
-                                text: @tr("It manages your system's packages, so back up anything important before you update or remove things.");
-                                font-size: Cat.fs14;
-                                color: Cat.subtext0;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        height: 82px;
-                        border-radius: 13px;
-                        background: @conic-gradient(from root.fl-angle,
-                            Cat.mauve 0deg,
-                            Cat.blue 55deg,
-                            Cat.mauve.with-alpha(0.22) 120deg,
-                            Cat.mauve.with-alpha(0.22) 300deg,
-                            Cat.mauve 360deg);
-
-                        Rectangle {
-                            x: 1.5px;
-                            y: 1.5px;
-                            width: parent.width - 3px;
-                            height: parent.height - 3px;
-                            border-radius: 11.5px;
-                            background: Cat.panel;
-
-                            HorizontalLayout {
-                                padding-left: 16px;
-                                padding-right: 16px;
-                                spacing: 14px;
-                                VerticalLayout {
-                                    alignment: center;
-                                    Rectangle {
-                                        width: 34px;
-                                        height: 34px;
-                                        border-radius: 10px;
-                                        background: Cat.mauve.with-alpha(0.16);
-                                        NavIcon { d: "M3 4h18v12H3z M8 21h8 M12 16v5"; icon-color: Cat.mauve; width: 17px; height: 17px; x: 8.5px; y: 8.5px; }
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    horizontal-stretch: 1;
-                                    FlexboxLayout {
-                                        spacing-horizontal: 5px;
-                                        spacing-vertical: 0px;
-                                        min-height: 42px;
-                                        for w in [
-                                            { t: "Primarily", x: false }, { t: "built", x: false }, { t: "for", x: false },
-                                            { t: "XeroLinux.", x: true },
-                                            { t: "On", x: false }, { t: "any", x: false }, { t: "other", x: false },
-                                            { t: "Arch-based", x: false }, { t: "distribution,", x: false },
-                                            { t: "which", x: false }, { t: "is", x: false }, { t: "possible,", x: false },
-                                            { t: "no", x: false }, { t: "support", x: false }, { t: "will", x: false },
-                                            { t: "be", x: false }, { t: "provided.", x: false },
-                                        ]: Text {
-                                            text: w.t;
-                                            font-size: Cat.fs14;
-                                            font-weight: w.x ? 800 : 400;
-                                            color: w.x ? Cat.mauve : Cat.subtext0;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        border-radius: 12px;
-                        background: Cat.yellow.with-alpha(0.09);
-                        border-width: 1px;
-                        border-color: Cat.yellow.with-alpha(0.35);
                         HorizontalLayout {
-                            padding: 20px;
-                            padding-top: 18px;
-                            padding-bottom: 18px;
-                            spacing: 16px;
+                            spacing: 14px;
                             VerticalLayout {
-                                alignment: start;
-                                NavIcon {
-                                    d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
-                                    icon-color: Cat.yellow;
-                                    width: 18px;
-                                    height: 18px;
+                                alignment: center;
+                                Rectangle {
+                                    width: 34px;
+                                    height: 34px;
+                                    border-radius: 10px;
+                                    background: Cat.mauve.with-alpha(0.14);
+                                    NavIcon { d: "M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4L12 3z"; icon-color: Cat.mauve; width: 17px; height: 17px; x: 8.5px; y: 8.5px; }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                FlexboxLayout {
+                                    spacing-horizontal: 5px;
+                                    spacing-vertical: 0px;
+                                    min-height: 42px;
+                                    for w in [
+                                        { t: "Built", x: false }, { t: "with", x: false }, { t: "the", x: false }, { t: "help", x: false }, { t: "of", x: false },
+                                        { t: "A.I/Claude", x: true },
+                                        { t: "and", x: false }, { t: "still", x: false }, { t: "being", x: false }, { t: "developed.", x: false },
+                                        { t: "Things", x: false }, { t: "may", x: false }, { t: "break,", x: false }, { t: "change", x: false },
+                                        { t: "or", x: false }, { t: "behave", x: false }, { t: "unexpectedly.", x: false },
+                                    ]: Text {
+                                        text: w.t;
+                                        font-size: Cat.fs14;
+                                        font-weight: w.x ? 800 : 400;
+                                        color: w.x ? #cc785c : Cat.subtext0;
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 14px;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 34px;
+                                    height: 34px;
+                                    border-radius: 10px;
+                                    background: Cat.yellow.with-alpha(0.14);
+                                    NavIcon { d: "M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6l8-3z M9 12l2 2 4-4"; icon-color: Cat.yellow; width: 17px; height: 17px; x: 8.5px; y: 8.5px; }
                                 }
                             }
                             VerticalLayout {
                                 alignment: center;
                                 horizontal-stretch: 1;
                                 Text {
-                                    text: @tr("NO WARRANTY. This software is provided \"as is\", without warranty of any kind. You use it entirely at your own risk.");
-                                    font-size: Cat.fs13;
-                                    font-weight: 600;
-                                    color: Cat.yellow;
+                                    text: @tr("It manages your system's packages, so back up anything important before you update or remove things.");
+                                    font-size: Cat.fs14;
+                                    color: Cat.subtext0;
                                     wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 82px;
+                            border-radius: 13px;
+                            background: @conic-gradient(from root.fl-angle,
+                                Cat.mauve 0deg,
+                                Cat.blue 55deg,
+                                Cat.mauve.with-alpha(0.22) 120deg,
+                                Cat.mauve.with-alpha(0.22) 300deg,
+                                Cat.mauve 360deg);
+
+                            Rectangle {
+                                x: 1.5px;
+                                y: 1.5px;
+                                width: parent.width - 3px;
+                                height: parent.height - 3px;
+                                border-radius: 11.5px;
+                                background: Cat.panel;
+
+                                HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    spacing: 14px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 34px;
+                                            height: 34px;
+                                            border-radius: 10px;
+                                            background: Cat.mauve.with-alpha(0.16);
+                                            NavIcon { d: "M3 4h18v12H3z M8 21h8 M12 16v5"; icon-color: Cat.mauve; width: 17px; height: 17px; x: 8.5px; y: 8.5px; }
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        FlexboxLayout {
+                                            spacing-horizontal: 5px;
+                                            spacing-vertical: 0px;
+                                            min-height: 42px;
+                                            for w in [
+                                                { t: "Primarily", x: false }, { t: "built", x: false }, { t: "for", x: false },
+                                                { t: "XeroLinux.", x: true },
+                                                { t: "On", x: false }, { t: "any", x: false }, { t: "other", x: false },
+                                                { t: "Arch-based", x: false }, { t: "distribution,", x: false },
+                                                { t: "which", x: false }, { t: "is", x: false }, { t: "possible,", x: false },
+                                                { t: "no", x: false }, { t: "support", x: false }, { t: "will", x: false },
+                                                { t: "be", x: false }, { t: "provided.", x: false },
+                                            ]: Text {
+                                                text: w.t;
+                                                font-size: Cat.fs14;
+                                                font-weight: w.x ? 800 : 400;
+                                                color: w.x ? Cat.mauve : Cat.subtext0;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            border-radius: 12px;
+                            background: Cat.yellow.with-alpha(0.09);
+                            border-width: 1px;
+                            border-color: Cat.yellow.with-alpha(0.35);
+                            HorizontalLayout {
+                                padding: 20px;
+                                padding-top: 18px;
+                                padding-bottom: 18px;
+                                spacing: 16px;
+                                VerticalLayout {
+                                    alignment: start;
+                                    NavIcon {
+                                        d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
+                                        icon-color: Cat.yellow;
+                                        width: 18px;
+                                        height: 18px;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: @tr("NO WARRANTY. This software is provided \"as is\", without warranty of any kind. You use it entirely at your own risk.");
+                                        font-size: Cat.fs13;
+                                        font-weight: 600;
+                                        color: Cat.yellow;
+                                        wrap: word-wrap;
+                                    }
                                 }
                             }
                         }
@@ -9281,6 +10398,7 @@ export component MainWindow inherits Window {
                 }
 
                 if !repo-mgr-loading: ListView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
 
                     for repo[i] in repo-mgr-list: Rectangle {
@@ -9538,6 +10656,7 @@ export component MainWindow inherits Window {
                 }
 
                 if !repo-mgr-loading: ListView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     height: min(repo-mgr-list.length * 52px, 280px);
 
                     for repo[i] in repo-mgr-list: Rectangle {
@@ -10508,6 +11627,7 @@ export component MainWindow inherits Window {
                         background: Cat.mantle;
                         Rectangle { x: parent.width - 1px; width: 1px; height: 100%; background: Cat.surface0; }
                         ScrollView {
+                            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                             VerticalLayout {
                                 padding: 8px; spacing: 3px; alignment: start;
                                 for tx[i] in history-txns: Rectangle {
@@ -10564,6 +11684,7 @@ export component MainWindow inherits Window {
                                 }
                             }
                             ScrollView {
+                                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                                 vertical-stretch: 1;
                                 VerticalLayout {
                                     padding: 8px; spacing: 1px; alignment: start;
@@ -10780,6 +11901,7 @@ export component MainWindow inherits Window {
                                 }
                             }
                             ScrollView {
+                                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                                 vertical-stretch: 1;
                                 VerticalLayout {
                                     spacing: 2px; alignment: start;
@@ -10871,6 +11993,7 @@ export component MainWindow inherits Window {
                             if perm-loading: VerticalLayout { alignment: center; LoadingCircle { diameter: 26px; } }
 
                             if !perm-loading: ScrollView {
+                                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                                 vertical-stretch: 1;
                                 VerticalLayout {
                                     padding: 10px; spacing: 2px; alignment: start;
@@ -11042,6 +12165,7 @@ export component MainWindow inherits Window {
                 }
 
                 ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
 
                     VerticalLayout {
@@ -11248,6 +12372,7 @@ export component MainWindow inherits Window {
                 }
 
                 ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
                     VerticalLayout {
                         padding: 20px;

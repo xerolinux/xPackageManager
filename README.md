@@ -4,7 +4,7 @@ A package manager GUI for Arch Linux that manages **pacman**, **Flatpak** and **
 
 Included by default on XeroLinux.
 
-https://github.com/user-attachments/assets/a8e74cb9-9a7f-435e-bb28-661b4d73b654
+![xPackageManager demo](media/xpm-demo.gif)
 
 ---
 
@@ -28,6 +28,14 @@ cd packaging && ./build.sh
 ---
 
 ## Changelog
+
+### v0.9.0
+
+- New Kernel Manager page: install and remove kernels grouped by family, using pacman only.
+- New Kernel Schedulers page: switch sched-ext schedulers live, with flags reference and scheduler info.
+- Reset all settings to defaults from the Settings page.
+- Installed AppImages are now detected wherever they live on the system.
+- Smoother progress dialog on slower machines, sidebar sections, a less see-through window and darker cards.
 
 ### v0.8.1
 

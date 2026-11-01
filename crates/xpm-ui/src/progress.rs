@@ -1,8 +1,9 @@
 use crate::UiMessage;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TERM_COLS: AtomicUsize = AtomicUsize::new(80);
@@ -26,6 +27,7 @@ pub(crate) fn cancel_requested() -> bool {
 
 const CAPTURE_LIMIT: usize = 65536;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(60);
+const FLUSH_INTERVAL_MAX: Duration = Duration::from_millis(500);
 
 const PACMAN_USER_PROMPT_PATTERNS: &[&str] = &[
     "Proceed with installation? [Y/n]",
@@ -634,6 +636,7 @@ impl PacmanRows {
 struct RowSink<'a> {
     tx: &'a mpsc::Sender<UiMessage>,
     len: &'a mut usize,
+    states: &'a mut BTreeMap<usize, (i32, i32)>,
     group: usize,
 }
 
@@ -645,8 +648,8 @@ impl RowSink<'_> {
         first
     }
 
-    fn state(&self, index: usize, state: i32, percent: i32) {
-        let _ = self.tx.send(UiMessage::ProgressRowState { index, state, percent });
+    fn state(&mut self, index: usize, state: i32, percent: i32) {
+        self.states.insert(index, (state, percent));
     }
 }
 
@@ -836,9 +839,17 @@ struct Inner {
     stages: bool,
     /// Page (package type) that rows appended from now on belong to.
     row_group: usize,
+    /// Latest row states and overall progress, sent on the next flush so the UI sees at most one update each.
+    row_states: BTreeMap<usize, (i32, i32)>,
+    progress: Option<(i32, String)>,
 }
 
 impl Inner {
+    fn queue_progress(&mut self, percent: i32, label: &str) {
+        let label = if label.is_empty() { self.progress.take().map(|(_, l)| l).unwrap_or_default() } else { label.to_string() };
+        self.progress = Some((percent, label));
+    }
+
     fn mapped(&self) -> i32 {
         self.lo + self.percent * (self.hi - self.lo) / 100
     }
@@ -858,6 +869,12 @@ pub(crate) struct Feeder {
 }
 
 fn flush(tx: &mpsc::Sender<UiMessage>, inner: &mut Inner) {
+    for (index, (state, percent)) in std::mem::take(&mut inner.row_states) {
+        let _ = tx.send(UiMessage::ProgressRowState { index, state, percent });
+    }
+    if let Some((percent, label)) = inner.progress.take() {
+        let _ = tx.send(UiMessage::OperationProgress(percent, label));
+    }
     if inner.dirty {
         let _ = tx.send(UiMessage::ProgressLines(inner.stream.lines()));
         inner.dirty = false;
@@ -881,8 +898,8 @@ impl Feeder {
 
         inner.stream.process(bytes);
         {
-            let Inner { pacman_rows, rows_len, row_group, .. } = &mut *inner;
-            pacman_rows.feed(&cleaned, &mut RowSink { tx: &self.tx, len: rows_len, group: *row_group });
+            let Inner { pacman_rows, rows_len, row_group, row_states, .. } = &mut *inner;
+            pacman_rows.feed(&cleaned, &mut RowSink { tx: &self.tx, len: rows_len, states: row_states, group: *row_group });
         }
         inner.phases.feed(&cleaned, &self.tx);
         if inner.captured.len() < CAPTURE_LIMIT {
@@ -910,12 +927,14 @@ impl Feeder {
                 if pct > inner.percent {
                     inner.percent = pct.min(100);
                 }
-                let _ = self.tx.send(UiMessage::OperationProgress(inner.mapped(), label.to_string()));
+                let mapped = inner.mapped();
+                inner.queue_progress(mapped, label);
                 if let Some(hook) = &inner.percent_hook {
-                    hook(inner.mapped());
+                    hook(mapped);
                 }
                 if let Some(row) = inner.single_row {
-                    let _ = self.tx.send(UiMessage::ProgressRowState { index: row, state: 1, percent: inner.percent });
+                    let percent = inner.percent;
+                    inner.row_states.insert(row, (1, percent));
                 }
             }
         }
@@ -934,14 +953,16 @@ impl Feeder {
     pub(crate) fn report(&self, percent: i32, stage: &str) {
         let mut inner = self.inner.lock().unwrap();
         inner.percent = inner.percent.max(percent.clamp(0, 100));
-        let _ = self.tx.send(UiMessage::OperationProgress(inner.mapped(), stage.to_string()));
+        let mapped = inner.mapped();
+        inner.queue_progress(mapped, stage);
     }
 
     /// Appends progress rows; returns the absolute index of the first one.
     pub(crate) fn rows_append(&self, rows: Vec<RowInfo>) -> usize {
         let mut inner = self.inner.lock().unwrap();
         let group = inner.row_group;
-        RowSink { tx: &self.tx, len: &mut inner.rows_len, group }.append(rows)
+        let Inner { rows_len, row_states, .. } = &mut *inner;
+        RowSink { tx: &self.tx, len: rows_len, states: row_states, group }.append(rows)
     }
 
     /// Declares the step rows (one per package type) shown in the dialog.
@@ -998,7 +1019,7 @@ impl Feeder {
     }
 
     pub(crate) fn row_state(&self, index: usize, state: i32, percent: i32) {
-        let _ = self.tx.send(UiMessage::ProgressRowState { index, state, percent });
+        self.inner.lock().unwrap().row_states.insert(index, (state, percent));
     }
 
     /// Counts from a typed backend, added to whatever is parsed from the output.
@@ -1012,7 +1033,7 @@ impl Feeder {
         inner.lo = lo;
         inner.hi = hi;
         inner.percent = 0;
-        let _ = self.tx.send(UiMessage::OperationProgress(lo, String::new()));
+        inner.queue_progress(lo, "");
     }
 }
 
@@ -1054,14 +1075,19 @@ impl OpReporter {
             appimage_step: 0,
             stages: false,
             row_group: 0,
+            row_states: BTreeMap::new(),
+            progress: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let flusher = {
             let (tx, inner, stop) = (tx.clone(), inner.clone(), stop.clone());
             thread::spawn(move || {
+                let mut wait = FLUSH_INTERVAL;
                 while !stop.load(Ordering::Relaxed) {
-                    thread::sleep(FLUSH_INTERVAL);
+                    thread::sleep(wait);
+                    let started = Instant::now();
                     flush(&tx, &mut inner.lock().unwrap());
+                    wait = (started.elapsed() * 4).clamp(FLUSH_INTERVAL, FLUSH_INTERVAL_MAX);
                 }
             })
         };
@@ -1097,8 +1123,9 @@ impl OpReporter {
             }
             {
                 let mut inner = self.feeder.inner.lock().unwrap();
-                let Inner { pacman_rows, rows_len, row_group, .. } = &mut *inner;
-                pacman_rows.complete(&mut RowSink { tx: &self.feeder.tx, len: rows_len, group: *row_group });
+                let Inner { pacman_rows, rows_len, row_group, row_states, .. } = &mut *inner;
+                pacman_rows.complete(&mut RowSink { tx: &self.feeder.tx, len: rows_len, states: row_states, group: *row_group });
+                flush(&self.feeder.tx, &mut inner);
             }
             let inner = self.feeder.inner.lock().unwrap();
             let mut sum = summarize(&inner.captured);
@@ -1284,7 +1311,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(pcts, vec![73, 73]);
+        assert_eq!(pcts, vec![73]);
     }
 
     #[test]
@@ -1445,17 +1472,18 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let mut rows = PacmanRows::default();
         let mut len = 0;
+        let mut states = BTreeMap::new();
         for c in chunks {
-            rows.feed(c, &mut RowSink { tx: &tx, len: &mut len, group: 0 });
+            rows.feed(c, &mut RowSink { tx: &tx, len: &mut len, states: &mut states, group: 0 });
         }
         rx.try_iter()
             .map(|m| match m {
                 UiMessage::ProgressRowsAppend { first, rows, .. } => {
                     format!("plan {first}: {}", rows.iter().map(|r| format!("{} [{}]", r.name, r.detail)).collect::<Vec<_>>().join(", "))
                 }
-                UiMessage::ProgressRowState { index, state, percent } => format!("row {index} state {state} {percent}%"),
                 _ => String::new(),
             })
+            .chain(states.into_iter().map(|(index, (state, percent))| format!("row {index} state {state} {percent}%")))
             .collect()
     }
 
@@ -1468,7 +1496,6 @@ mod tests {
             "(2/2) upgrading glibc  [#     ]  20%",
         ]);
         assert_eq!(msgs[0], "plan 0: 7zip [26.04-1 \u{2192} 26.05-1], glibc [2.41-2 \u{2192} 2.42-1]");
-        assert!(msgs.contains(&"row 0 state 1 40%".to_string()), "{msgs:?}");
         assert!(msgs.contains(&"row 0 state 2 100%".to_string()), "{msgs:?}");
         assert!(msgs.contains(&"row 1 state 1 20%".to_string()), "{msgs:?}");
     }

@@ -24,7 +24,10 @@ use xpm_appimage::{AppImageBackend, AppImageEntry, CatalogEntry};
 mod appstream;
 mod flathub;
 mod icons;
+mod kernels;
 mod progress;
+mod sched;
+mod scx_data;
 mod xml;
 use appstream::CachedRemoteApp;
 use progress::{Mode, OpReporter};
@@ -294,6 +297,12 @@ enum UiMessage {
     SearchResults(Vec<PackageData>),
     SetLoading(bool),
     SetBusy(bool),
+    KernelsLoaded { installed: Vec<kernels::Kernel>, available: Vec<kernels::Kernel> },
+    ScxLoaded(sched::Snapshot),
+    ScxStatus(sched::Status),
+    ScxLog(String),
+    ScxPersist(bool),
+    ScxBusy(bool),
     SetStatus(String),
     SetProgress(i32),
     SetProgressText(String),
@@ -742,6 +751,111 @@ fn save_config(config: &AppConfig) {
     if let Ok(json) = serde_json::to_string_pretty(config) {
         let _ = std::fs::write(&path, json);
     }
+}
+
+fn scx_flag_rows(filter: &str) -> Vec<FlagRow> {
+    let needle = filter.to_lowercase();
+    scx_data::FLAGS
+        .iter()
+        .filter(|f| {
+            needle.is_empty()
+                || f.scheduler.to_lowercase().contains(&needle)
+                || f.flag.to_lowercase().contains(&needle)
+                || f.description.to_lowercase().contains(&needle)
+        })
+        .map(|f| FlagRow { scheduler: f.scheduler.into(), flag: f.flag.into(), required: f.required, desc: f.description.into() })
+        .collect()
+}
+
+fn apply_kernels(window: &MainWindow, installed: &[kernels::Kernel], available: &[kernels::Kernel]) {
+    let all = kernels::group(installed.to_vec(), available.to_vec());
+    let mut filter = window.get_kernel_filter().to_string();
+    if !all.iter().any(|g| g.title == filter) {
+        filter.clear();
+        window.set_kernel_filter("".into());
+    }
+    let cats: Vec<KernelCat> = all
+        .iter()
+        .map(|g| KernelCat { title: g.title.into(), count: g.rows.len() as i32, kind: g.kind })
+        .collect();
+    let cat_rows: Vec<KernelCatRow> = cats
+        .chunks(5)
+        .map(|chunk| KernelCatRow { items: ModelRc::new(VecModel::from(chunk.to_vec())) })
+        .collect();
+    let groups: Vec<KernelGroup> = all
+        .into_iter()
+        .filter(|g| filter.is_empty() || g.title == filter)
+        .map(|g| KernelGroup {
+            title: g.title.into(),
+            blurb: g.blurb.into(),
+            kind: g.kind,
+            installed: g.rows.iter().filter(|r| r.installed).count() as i32,
+            total: g.rows.len() as i32,
+            rows: ModelRc::new(VecModel::from(
+                g.rows
+                    .into_iter()
+                    .map(|r| KernelRow { name: r.kernel.name.into(), detail: r.kernel.detail.into(), installed: r.installed })
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    window.set_kernel_groups(ModelRc::new(VecModel::from(groups)));
+    window.set_kernel_cat_rows(ModelRc::new(VecModel::from(cat_rows)));
+    window.set_kernel_installed_count(installed.len() as i32);
+    window.set_kernel_available_count(available.len() as i32);
+    window.set_kernel_total((installed.len() + available.len()) as i32);
+    window.set_kernels_loading(false);
+}
+
+fn apply_scx_status(window: &MainWindow, status: &sched::Status) {
+    window.set_scx_active(status.active);
+    if status.active {
+        window.set_scx_active_name(sched::humanize_name(&status.name).into());
+        window.set_scx_active_mode(sched::humanize_mode(&status.mode).into());
+    } else {
+        window.set_scx_active_name("EEVDF (Default)".into());
+        window.set_scx_active_mode("N/A".into());
+    }
+}
+
+fn scx_refresh(tx: &mpsc::Sender<UiMessage>, verbose: bool) {
+    if verbose {
+        let _ = tx.send(UiMessage::ScxLog("Scanning for schedulers...".into()));
+    }
+    let snap = sched::snapshot();
+    if let Some(err) = &snap.list_error {
+        let _ = tx.send(UiMessage::ScxLog(format!("Failed to list schedulers: {err}")));
+    }
+    if verbose {
+        let line = if snap.missing {
+            "scxctl not found".to_string()
+        } else {
+            format!("Found {} schedulers", snap.groups.iter().map(|(_, items)| items.len()).sum::<usize>())
+        };
+        let _ = tx.send(UiMessage::ScxLog(line));
+    }
+    let _ = tx.send(UiMessage::ScxLoaded(snap));
+}
+
+fn run_kernel_job(
+    tx: &mpsc::Sender<UiMessage>,
+    title: &str,
+    pacman_args: &[&str],
+    input: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    pid: &Arc<Mutex<Option<u32>>>,
+) {
+    let mut args = vec!["pacman"];
+    args.extend_from_slice(pacman_args);
+    run_in_terminal(tx, title, "pkexec", &args, input, pid);
+    let (installed, available) = kernels::scan();
+    let _ = tx.send(UiMessage::KernelsLoaded { installed, available });
+}
+
+fn restart_app() -> ! {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+    std::process::exit(0);
 }
 
 fn build_config(window: &MainWindow) -> AppConfig {
@@ -3359,6 +3473,20 @@ fn main() {
     let progress_stages_model: Rc<VecModel<StageRow>> = Rc::new(VecModel::default());
     window.set_progress_stages(ModelRc::from(progress_stages_model.clone()));
     let install_logs: InstallLogs = Rc::new(RefCell::new(HashMap::new()));
+    let kernel_scan: Rc<RefCell<(Vec<kernels::Kernel>, Vec<kernels::Kernel>)>> = Rc::new(RefCell::new((Vec::new(), Vec::new())));
+    let kernel_scan_dispatch = kernel_scan.clone();
+    {
+        let (weak, scan) = (window.as_weak(), kernel_scan.clone());
+        window.on_kernel_set_filter(move |title| {
+            if let Some(w) = weak.upgrade() {
+                w.set_kernel_filter(title);
+                let (installed, available) = &*scan.borrow();
+                apply_kernels(&w, installed, available);
+            }
+        });
+    }
+    let scx_log_model: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
+    window.set_scx_log(ModelRc::from(scx_log_model.clone()));
     let progress_lines_prev: Rc<RefCell<Vec<progress::StyledLine>>> = Rc::new(RefCell::new(Vec::new()));
     let awaiting_appimage_check = Rc::new(std::cell::Cell::new(false));
     let awaiting_appimage_check_dispatch = awaiting_appimage_check.clone();
@@ -3448,6 +3576,44 @@ fn main() {
                         window.set_progress_popup_cancellable(false);
                         window.set_show_progress_popup(true);
                     }
+                    UiMessage::KernelsLoaded { installed, available } => {
+                        apply_kernels(&window, &installed, &available);
+                        *kernel_scan_dispatch.borrow_mut() = (installed, available);
+                    }
+                    UiMessage::ScxLoaded(snap) => {
+                        window.set_scx_missing(snap.missing);
+                        window.set_scx_kernel_version(snap.support.version.as_str().into());
+                        window.set_scx_kernel_level(snap.support.level);
+                        window.set_scx_kernel_msg(snap.support.message.as_str().into());
+                        window.set_scx_persist(snap.persist);
+                        apply_scx_status(&window, &snap.status);
+                        let selected = window.get_scx_selected().to_string();
+                        let all: Vec<&String> = snap.groups.iter().flat_map(|(_, items)| items.iter()).collect();
+                        if !all.iter().any(|s| **s == selected) {
+                            window.set_scx_selected(all.first().map(|s| s.as_str()).unwrap_or("").into());
+                        }
+                        let options: Vec<DropItem> = snap
+                            .groups
+                            .iter()
+                            .flat_map(|(title, items)| {
+                                std::iter::once(DropItem { id: "".into(), label: title.as_str().into(), header: true }).chain(
+                                    items.iter().map(|id| DropItem { id: id.as_str().into(), label: sched::humanize_name(id).into(), header: false }),
+                                )
+                            })
+                            .collect();
+                        window.set_scx_options(ModelRc::new(VecModel::from(options)));
+                        let selected = window.get_scx_selected();
+                        window.set_scx_selected_label(if selected.is_empty() { "".into() } else { sched::humanize_name(&selected).into() });
+                    }
+                    UiMessage::ScxStatus(status) => apply_scx_status(&window, &status),
+                    UiMessage::ScxLog(line) => {
+                        scx_log_model.push(line.into());
+                        while scx_log_model.row_count() > 500 {
+                            scx_log_model.remove(0);
+                        }
+                    }
+                    UiMessage::ScxPersist(on) => window.set_scx_persist(on),
+                    UiMessage::ScxBusy(busy) => window.set_scx_busy(busy),
                     UiMessage::ProgressMode { cancellable } => {
                         window.set_progress_popup_cancellable(cancellable);
                     }
@@ -5059,10 +5225,196 @@ fn main() {
                 }
             }
         }
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = std::process::Command::new(exe).spawn();
+        restart_app();
+    });
+
+    let tx_kref = tx.clone();
+    window.on_refresh_kernels({
+        let weak = window.as_weak();
+        move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_kernels_loading(true);
+            }
+            let tx = tx_kref.clone();
+            thread::spawn(move || {
+                let (installed, available) = kernels::scan();
+                let _ = tx.send(UiMessage::KernelsLoaded { installed, available });
+            });
         }
-        std::process::exit(0);
+    });
+
+    let (tx_kin, kin_input, kin_pid) = (tx.clone(), terminal_input_sender.clone(), terminal_child_pid.clone());
+    window.on_install_kernel(move |name| {
+        let name = name.to_string();
+        if !kernels::valid_name(&name) {
+            return;
+        }
+        let (tx, input, pid) = (tx_kin.clone(), kin_input.clone(), kin_pid.clone());
+        thread::spawn(move || {
+            let headers = format!("{name}-headers");
+            run_kernel_job(&tx, "Install Kernel", &["-S", "--noconfirm", "--needed", &name, &headers], &input, &pid);
+        });
+    });
+
+    let (tx_krm, krm_input, krm_pid) = (tx.clone(), terminal_input_sender.clone(), terminal_child_pid.clone());
+    window.on_remove_kernel(move |name| {
+        let name = name.to_string();
+        if !kernels::valid_name(&name) {
+            return;
+        }
+        let (tx, input, pid) = (tx_krm.clone(), krm_input.clone(), krm_pid.clone());
+        thread::spawn(move || {
+            let headers = format!("{name}-headers");
+            run_kernel_job(&tx, "Remove Kernel", &["-R", "--noconfirm", &name, &headers], &input, &pid);
+        });
+    });
+
+    window.set_scx_flags(ModelRc::new(VecModel::from(scx_flag_rows(""))));
+    window.set_scx_info(ModelRc::new(VecModel::from(
+        scx_data::INFO
+            .iter()
+            .map(|i| SchedInfoRow { id: i.id.into(), name: i.name.into(), category: i.category.into(), desc: i.description.into() })
+            .collect::<Vec<_>>(),
+    )));
+    {
+        let weak = window.as_weak();
+        window.on_scx_filter_flags(move |text| {
+            if let Some(w) = weak.upgrade() {
+                w.set_scx_flags(ModelRc::new(VecModel::from(scx_flag_rows(text.as_str()))));
+            }
+        });
+    }
+
+    {
+        let weak = window.as_weak();
+        window.on_scx_select(move |id| {
+            if let Some(w) = weak.upgrade() {
+                w.set_scx_selected_label(sched::humanize_name(&id).into());
+                w.set_scx_selected(id);
+            }
+        });
+    }
+
+    let tx_scx_refresh = tx.clone();
+    window.on_scx_refresh(move |verbose| {
+        let tx = tx_scx_refresh.clone();
+        thread::spawn(move || scx_refresh(&tx, verbose));
+    });
+
+    let scx_polling = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let tx_scx_poll = tx.clone();
+    window.on_scx_poll(move || {
+        if scx_polling.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let (tx, flag) = (tx_scx_poll.clone(), scx_polling.clone());
+        thread::spawn(move || {
+            let _ = tx.send(UiMessage::ScxStatus(sched::status()));
+            flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    });
+
+    let tx_scx_switch = tx.clone();
+    window.on_scx_switch(move |scheduler, mode| {
+        let (scheduler, mode) = (scheduler.to_string(), mode.to_string());
+        if !sched::valid_request(&scheduler, &mode) {
+            return;
+        }
+        let tx = tx_scx_switch.clone();
+        thread::spawn(move || {
+            let _ = tx.send(UiMessage::ScxBusy(true));
+            let command = if sched::status().active { "switch" } else { "start" };
+            let _ = tx.send(UiMessage::ScxLog(format!("-> {command} {scheduler} ({mode})...")));
+            match sched::scxctl(&[command, "--sched", scheduler.trim_start_matches("scx_"), "--mode", &mode]) {
+                Ok(_) => {
+                    let _ = tx.send(UiMessage::ScxLog(format!("Now running {scheduler}")));
+                    thread::sleep(std::time::Duration::from_secs(1));
+                    let _ = tx.send(UiMessage::ScxStatus(sched::status()));
+                }
+                Err(e) => {
+                    let _ = tx.send(UiMessage::ScxLog(format!("Failed: {e}")));
+                }
+            }
+            let _ = tx.send(UiMessage::ScxBusy(false));
+        });
+    });
+
+    let tx_scx_stop = tx.clone();
+    window.on_scx_stop(move || {
+        let tx = tx_scx_stop.clone();
+        thread::spawn(move || {
+            let _ = tx.send(UiMessage::ScxBusy(true));
+            let _ = tx.send(UiMessage::ScxLog("Stopping scheduler...".into()));
+            match sched::scxctl(&["stop"]) {
+                Ok(_) => {
+                    let _ = tx.send(UiMessage::ScxLog("Scheduler stopped".into()));
+                    let _ = tx.send(UiMessage::ScxStatus(sched::status()));
+                }
+                Err(e) => {
+                    let _ = tx.send(UiMessage::ScxLog(format!("Failed: {e}")));
+                }
+            }
+            let _ = tx.send(UiMessage::ScxBusy(false));
+        });
+    });
+
+    let tx_scx_persist = tx.clone();
+    window.on_scx_persist_toggled(move |on, scheduler, mode| {
+        let (scheduler, mode) = (scheduler.to_string(), mode.to_string());
+        let tx = tx_scx_persist.clone();
+        thread::spawn(move || {
+            let log = |line: String| {
+                let _ = tx.send(UiMessage::ScxLog(line));
+            };
+            if on {
+                if !sched::valid_request(&scheduler, &mode) {
+                    log("Please select a scheduler first".into());
+                    let _ = tx.send(UiMessage::ScxPersist(false));
+                    return;
+                }
+                log(format!("-> Enabling persistence for {scheduler} ({mode})..."));
+                match sched::enable_persistence(&scheduler, &mode) {
+                    Ok(()) => {
+                        log(format!("{scheduler} enabled and will auto-start on boot ({mode} mode)"));
+                        thread::sleep(std::time::Duration::from_secs(3));
+                        if sched::service_active() {
+                            log("Service verified as running".into());
+                        } else {
+                            log("Service may not have started - check 'systemctl status scx.service'".into());
+                        }
+                        let _ = tx.send(UiMessage::ScxStatus(sched::status()));
+                    }
+                    Err(e) => {
+                        log(format!("Failed to enable persistence: {e}"));
+                        let _ = tx.send(UiMessage::ScxPersist(false));
+                    }
+                }
+            } else {
+                log("-> Disabling scheduler persistence...".into());
+                match sched::disable_persistence() {
+                    Ok(()) => log("Scheduler persistence disabled".into()),
+                    Err(e) => {
+                        log(format!("Failed to disable persistence: {e}"));
+                        let _ = tx.send(UiMessage::ScxPersist(true));
+                    }
+                }
+            }
+        });
+    });
+
+    let (tx_scx_install, scx_install_input, scx_install_pid) = (tx.clone(), terminal_input_sender.clone(), terminal_child_pid.clone());
+    window.on_install_scx_tools(move || {
+        let (tx, input, pid) = (tx_scx_install.clone(), scx_install_input.clone(), scx_install_pid.clone());
+        thread::spawn(move || {
+            run_in_terminal(&tx, "Install scx-tools", "pkexec", &["pacman", "-S", "--needed", "--noconfirm", "scx-tools"], &input, &pid);
+            scx_refresh(&tx, true);
+        });
+    });
+
+    window.on_reset_settings(move || {
+        info!("Reset settings to defaults and restart");
+        save_config(&AppConfig { first_launch_ack: load_config().first_launch_ack, ..AppConfig::default() });
+        restart_app();
     });
 
     let window_weak_ot = window.as_weak();

@@ -10,6 +10,9 @@ fn rename_file(from: &Path, to: &Path) -> bool {
 /// Rename a versioned install (`photocraft-0.7.0-linux-x86_64`) to its stable id
 /// (`photocraft`): binary, launcher and icon. Entries whose new id is taken are left alone.
 fn migrate_entry(entries: &mut [AppImageEntry], index: usize, apps_dir: &Path) -> bool {
+    if entries[index].external {
+        return false;
+    }
     let old = entries[index].name.clone();
     let new = manifest::app_slug(&old);
     if new == old || entries.iter().any(|e| e.name == new) {
@@ -121,7 +124,7 @@ pub fn tidy_store() {
         let _ = manifest::save(&entries);
     }
     remove_update_backups(&manifest::store_dir());
-    for entry in &entries {
+    for entry in entries.iter().filter(|e| !e.external) {
         if let Some(dir) = Path::new(&entry.path).parent() {
             remove_update_backups(dir);
         }
@@ -163,6 +166,7 @@ mod tests {
             icon_path: Some(icon.to_string_lossy().into_owned()),
             desktop_path: Some(desktop.to_string_lossy().into_owned()),
             size: 3,
+            external: false,
         }
     }
 

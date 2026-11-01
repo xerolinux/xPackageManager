@@ -5,7 +5,7 @@
 # PKGBUILDs under deps/ (real, separately-removable packages with their OWN
 # versions - never the AUR), then builds this. Clean with: ./build.sh --clean
 pkgname=xpm-gui
-pkgver=0.8.1
+pkgver=0.9.0
 pkgrel=1
 pkgdesc="A modern package manager for Arch Linux supporting pacman, Flatpak and AppImage"
 arch=('x86_64')
@@ -26,6 +26,7 @@ depends=(
     'zenity'
     'downgrade'        # repo package, or built by build.sh from deps/downgrade
     'appimageupdate'   # provided by appimageupdate-git (repo or deps/appimageupdate-git)
+    'scx-tools'        # scxctl, used by the Kernel Schedulers page
 )
 makedepends=('rust' 'cargo' 'qt6-base')
 optdepends=(

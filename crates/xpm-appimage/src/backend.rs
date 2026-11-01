@@ -41,6 +41,7 @@ impl AppImageBackend {
 
     /// Synchronous manifest read for callers that aren't on an async runtime.
     pub fn list_entries(&self) -> Vec<AppImageEntry> {
+        crate::discover::sync();
         manifest::load()
     }
 
@@ -102,6 +103,7 @@ impl AppImageBackend {
             icon_path: integ.icon_path,
             desktop_path: integ.desktop_path,
             size,
+            external: false,
         };
 
         let mut entries = manifest::load();
@@ -143,7 +145,8 @@ impl AppImageBackend {
             warn!("appimage: failed to remove binary {}: {}", entry.path, e);
         }
         crate::tidy::remove_update_backup(Path::new(&entry.path));
-        integration::deintegrate(&entry.icon_path, &entry.desktop_path);
+        let icon = if entry.external { None } else { entry.icon_path.clone() };
+        integration::deintegrate(&icon, &entry.desktop_path);
         manifest::save(&entries).map_err(Error::IoError)?;
         log("Removed.\n");
         Ok(())
@@ -224,7 +227,7 @@ impl AppImageBackend {
         }
 
         crate::tidy::remove_update_backup(&path);
-        let integ = integration::integrate(&path, &entry.name, &entry.display_name);
+        let integ = refresh_integration(&entry, &path);
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(entry.size);
         let updated = AppImageEntry {
             display_name: integ.display_name,
@@ -319,7 +322,7 @@ impl AppImageBackend {
 
         let update_info = elf::read_upd_info(&path);
         let supports_update = update_info.is_some();
-        let integ = integration::integrate(&path, &entry.name, &entry.display_name);
+        let integ = refresh_integration(&entry, &path);
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(entry.size);
         let updated = AppImageEntry {
             display_name: integ.display_name,
@@ -349,6 +352,19 @@ impl AppImageBackend {
             "appimage",
         )
     }
+}
+
+/// Rewrites the menu entry and icon of an app xPM installed; an app found on the system keeps its own.
+fn refresh_integration(entry: &AppImageEntry, path: &Path) -> integration::Integration {
+    if entry.external {
+        return integration::Integration {
+            display_name: entry.display_name.clone(),
+            version: None,
+            icon_path: entry.icon_path.clone(),
+            desktop_path: entry.desktop_path.clone(),
+        };
+    }
+    integration::integrate(path, &entry.name, &entry.display_name)
 }
 
 #[async_trait]
