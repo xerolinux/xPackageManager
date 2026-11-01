@@ -155,6 +155,8 @@ export struct KernelCatRow { items: [KernelCat] }
 export struct DropItem { id: string, label: string, header: bool }
 export struct FlagRow { scheduler: string, flag: string, required: bool, desc: string }
 export struct SchedInfoRow { id: string, name: string, category: string, desc: string }
+export struct LiveCpu { label: string, pct: int }
+export struct ScxLive { state: string, ops: string, switch-all: string, enable-seq: string, hotplug-seq: string, rejected: string, load: string, total: int, cpus: [LiveCpu], history: [int] }
 
 
 export global Cat {
@@ -250,8 +252,9 @@ component NavIcon inherits Rectangle {
     in property <brush> icon-color: Cat.text;
     in property <string> d;
     in property <bool> filled: false;
-    width: 18px;
-    height: 18px;
+    in property <float> k: 1;
+    width: 18px * root.k;
+    height: 18px * root.k;
 
     Path {
         width: 100%;
@@ -384,12 +387,13 @@ component NavButton inherits Rectangle {
     in property <bool> icon-filled: false;
     in property <bool> active: false;
     in property <bool> compact: false;
+    in property <float> k: 1;
     in property <string> badge: "";
     in property <string> tooltip-text: "";
     callback clicked;
 
-    height: compact ? 34px : 40px;
-    border-radius: 8px;
+    height: compact ? 34px * root.k : 40px * root.k;
+    border-radius: 8px * root.k;
     background: active ? Cat.mauve.with-alpha(0.2) : (touch.has-hover ? Cat.surface0.with-alpha(0.6) : transparent);
     animate background { duration: 120ms; easing: ease-out; }
 
@@ -399,7 +403,7 @@ component NavButton inherits Rectangle {
         changed has-hover => {
             if self.has-hover && root.tooltip-text != "" {
                 NavTooltip.text = root.tooltip-text;
-                NavTooltip.y = root.y + root.height / 2 - 14px;
+                NavTooltip.y = root.y + root.height / 2 - 14px * root.k;
             } else {
                 NavTooltip.text = "";
             }
@@ -407,14 +411,15 @@ component NavButton inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 10px;
+        padding-left: 10px * root.k;
+        padding-right: 10px * root.k;
+        spacing: 10px * root.k;
 
         if icon-path != "": VerticalLayout {
             alignment: center;
             NavIcon {
                 d: icon-path;
+                k: root.k;
                 icon-color: active ? Cat.mauve : Cat.subtext0;
                 filled: icon-filled;
             }
@@ -422,7 +427,7 @@ component NavButton inherits Rectangle {
 
         Text {
             text: label;
-            font-size: Cat.fs14;
+            font-size: Cat.fs14 * root.k;
             font-weight: active ? 600 : 400;
             color: active ? Cat.mauve : Cat.text;
             opacity: active ? 1.0 : 0.85;
@@ -432,15 +437,15 @@ component NavButton inherits Rectangle {
         if badge != "": VerticalLayout {
             alignment: center;
             Rectangle {
-                width: 28px;
-                height: 24px;
-                border-radius: 12px;
+                width: 28px * root.k;
+                height: 24px * root.k;
+                border-radius: 12px * root.k;
                 background: Cat.red;
                 VerticalLayout {
                     alignment: center;
                     Text {
                         text: badge;
-                        font-size: Cat.fs14;
+                        font-size: Cat.fs14 * root.k;
                         font-weight: 700;
                         color: Cat.crust;
                         horizontal-alignment: center;
@@ -453,10 +458,11 @@ component NavButton inherits Rectangle {
 
 component CheckBox inherits Rectangle {
     in property <bool> checked: false;
+    in property <float> k: 1;
     callback toggled(bool);
 
-    width: 24px;
-    height: 24px;
+    width: 24px * root.k;
+    height: 24px * root.k;
     border-radius: 6px;
     border-width: checked ? 0 : 2px;
     border-color: Cat.overlay1;
@@ -466,10 +472,10 @@ component CheckBox inherits Rectangle {
     if checked: NavIcon {
         d: "M20 6L9 17l-5-5";
         icon-color: Cat.crust;
-        width: 14px;
-        height: 14px;
-        x: 5px;
-        y: 5px;
+        width: 14px * root.k;
+        height: 14px * root.k;
+        x: 5px * root.k;
+        y: 5px * root.k;
     }
 
     TouchArea {
@@ -1011,8 +1017,9 @@ component SettingsLinkRow inherits Rectangle {
 
 component SectionLabel inherits Text {
     in property <string> section-title;
+    in property <float> k: 1;
     text: section-title;
-    font-size: Cat.fs15;
+    font-size: Cat.fs15 * root.k;
     font-weight: 700;
     color: Cat.overlay0;
     letter-spacing: 0.8px;
@@ -1185,23 +1192,23 @@ component DialogButton inherits Rectangle {
     in property <string> kind: "secondary";
     in property <bool> enabled: true;
     callback clicked;
-    opacity: enabled ? 1.0 : 0.4;
+    property <float> fade: enabled ? 0 : 0.6;
 
     height: 34px;
     width: max(92px, db-label.preferred-width + 32px);
     border-radius: 8px;
     border-width: kind == "secondary" ? 1px : 0px;
-    border-color: Cat.divider;
-    background: kind == "primary" ? (db-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.9))
+    border-color: Cat.divider.transparentize(root.fade);
+    background: (kind == "primary" ? (db-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.9))
         : kind == "danger" ? (db-touch.has-hover ? Cat.red.with-alpha(0.3) : Cat.red.with-alpha(0.16))
-        : (db-touch.has-hover ? Cat.surface1 : Cat.surface0);
+        : (db-touch.has-hover ? Cat.surface1 : Cat.surface0)).transparentize(root.fade);
     animate background { duration: 100ms; }
 
     db-label := Text {
         text: root.label;
         font-size: Cat.fs13;
         font-weight: 600;
-        color: kind == "primary" ? Cat.crust : kind == "danger" ? Cat.red : Cat.text;
+        color: (kind == "primary" ? Cat.crust : kind == "danger" ? Cat.red : Cat.text).transparentize(root.fade);
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -1416,9 +1423,10 @@ component DropDown inherits Rectangle {
     in property <[DropItem]> items;
     in property <string> current-id;
     in property <string> current-label;
+    in property <float> k: 1;
     callback selected(string);
 
-    height: 32px;
+    height: 32px * root.k;
     border-radius: 8px;
     background: dd-touch.has-hover ? Cat.surface1 : Cat.surface0;
     border-width: 1.5px;
@@ -1426,12 +1434,12 @@ component DropDown inherits Rectangle {
     animate background { duration: 80ms; }
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 10px;
+        padding-left: 12px * root.k;
+        padding-right: 10px * root.k;
         spacing: 8px;
         Text {
             text: root.current-label;
-            font-size: Cat.fs14;
+            font-size: Cat.fs14 * root.k;
             color: Cat.text;
             vertical-alignment: center;
             overflow: elide;
@@ -1439,7 +1447,7 @@ component DropDown inherits Rectangle {
         }
         VerticalLayout {
             alignment: center;
-            NavIcon { d: "M6 9l6 6 6-6"; icon-color: Cat.subtext0; width: 14px; height: 14px; }
+            NavIcon { d: "M6 9l6 6 6-6"; icon-color: Cat.subtext0; width: 14px * root.k; height: 14px * root.k; }
         }
     }
 
@@ -1452,7 +1460,7 @@ component DropDown inherits Rectangle {
         x: 0;
         y: root.height + 2px;
         width: root.width;
-        height: min(dd-list.preferred-height + 8px, 340px);
+        height: min(dd-list.preferred-height + 8px, 340px * root.k);
         close-policy: close-on-click-outside;
 
         Rectangle {
@@ -1470,13 +1478,13 @@ component DropDown inherits Rectangle {
                     padding: 4px;
                     spacing: 1px;
                     for it in root.items: Rectangle {
-                        height: it.header ? 26px : 30px;
+                        height: (it.header ? 26px : 30px) * root.k;
                         border-radius: 6px;
                         background: (!it.header && opt-touch.has-hover) ? Cat.mauve.with-alpha(0.18) : (it.id == root.current-id ? Cat.mauve.with-alpha(0.1) : transparent);
                         if it.header: Text {
                             x: 8px;
                             text: it.label.to-uppercase();
-                            font-size: Cat.fs11;
+                            font-size: Cat.fs11 * root.k;
                             font-weight: 700;
                             color: Cat.overlay0;
                             letter-spacing: 0.8px;
@@ -1485,7 +1493,7 @@ component DropDown inherits Rectangle {
                         if !it.header: Text {
                             x: 16px;
                             text: it.label;
-                            font-size: Cat.fs14;
+                            font-size: Cat.fs14 * root.k;
                             font-weight: it.id == root.current-id ? 700 : 400;
                             color: it.id == root.current-id ? Cat.mauve : Cat.text;
                             vertical-alignment: center;
@@ -1506,98 +1514,33 @@ component ActionButton inherits Rectangle {
     in property <string> label;
     in property <string> kind: "secondary";
     in property <bool> enabled: true;
+    in property <float> k: 1;
     callback clicked;
 
     horizontal-stretch: 1;
-    height: 36px;
-    border-radius: 8px;
-    opacity: enabled ? 1.0 : 0.4;
+    preferred-width: 0px;
+    min-width: 0px;
+    height: 36px * root.k;
+    border-radius: 8px * root.k;
+    property <float> fade: enabled ? 0 : 0.6;
     border-width: kind == "secondary" ? 1px : 0px;
-    border-color: Cat.divider;
-    background: kind == "primary" ? (ab-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.9))
+    border-color: Cat.divider.transparentize(root.fade);
+    background: (kind == "primary" ? (ab-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.9))
         : kind == "danger" ? (ab-touch.has-hover ? Cat.red.with-alpha(0.3) : Cat.red.with-alpha(0.16))
-        : (ab-touch.has-hover ? Cat.surface1 : Cat.surface0);
+        : (ab-touch.has-hover ? Cat.surface1 : Cat.surface0)).transparentize(root.fade);
     animate background { duration: 100ms; }
 
     Text {
         text: root.label;
-        font-size: Cat.fs13;
+        font-size: Cat.fs13 * root.k;
         font-weight: 600;
-        color: kind == "primary" ? Cat.crust : kind == "danger" ? Cat.red : Cat.text;
+        color: (kind == "primary" ? Cat.crust : kind == "danger" ? Cat.red : Cat.text).transparentize(root.fade);
         horizontal-alignment: center;
         vertical-alignment: center;
     }
     ab-touch := TouchArea {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
         clicked => { if root.enabled { root.clicked(); } }
-    }
-}
-
-component CircuitBanner inherits Rectangle {
-    height: 78px;
-    property <length> cx: self.width / 2;
-    property <color> dim: Cat.mauve.with-alpha(0.4);
-    property <color> bright: Cat.mauve.with-alpha(0.85);
-    property <color> glow: Cat.mauve.brighter(0.25);
-    property <length> lx1: Math.max(8px, cx - 190px);
-    property <length> rx1: Math.min(self.width - 8px, cx + 190px);
-
-    Rectangle { x: 8px; y: 12px; width: cx - 55px - 8px; height: 1px; background: bright; }
-    Rectangle { x: cx + 55px; y: 12px; width: root.width - 8px - (cx + 55px); height: 1px; background: bright; }
-    Rectangle { x: 8px; y: 65px; width: root.width - 16px; height: 2px; background: dim; }
-
-    Rectangle { x: lx1; y: 12px; width: 1px; height: 26px; background: bright; }
-    Rectangle { x: lx1; y: 38px; width: cx - 135px - lx1; height: 1px; background: bright; }
-    Rectangle { x: cx - 135px; y: 38px; width: 1px; height: 27px; background: bright; }
-    Rectangle { x: rx1; y: 12px; width: 1px; height: 26px; background: bright; }
-    Rectangle { x: cx + 135px; y: 38px; width: rx1 - (cx + 135px); height: 1px; background: bright; }
-    Rectangle { x: cx + 135px; y: 38px; width: 1px; height: 27px; background: bright; }
-
-    Rectangle { x: cx - 110px; y: 12px; width: 2px; height: 17px; background: dim; }
-    Rectangle { x: cx - 110px; y: 29px; width: 55px; height: 2px; background: dim; }
-    Rectangle { x: cx + 110px; y: 12px; width: 2px; height: 17px; background: dim; }
-    Rectangle { x: cx + 55px; y: 29px; width: 55px; height: 2px; background: dim; }
-    Rectangle { x: cx; y: 52px; width: 2px; height: 13px; background: dim; }
-
-    for py in [22px, 29px, 36px, 44px]: Rectangle {
-        x: cx - 64px; y: py; width: 9px; height: 1px; background: dim;
-    }
-    for py in [22px, 29px, 36px, 44px]: Rectangle {
-        x: cx + 55px; y: py; width: 9px; height: 1px; background: dim;
-    }
-
-    Rectangle {
-        x: cx - 55px;
-        y: 14px;
-        width: 110px;
-        height: 40px;
-        background: Cat.crust;
-        border-width: 1px;
-        border-color: bright;
-        HorizontalLayout {
-            alignment: center;
-            spacing: 4px;
-            VerticalLayout {
-                alignment: center;
-                NavIcon { d: "M13 2L3 14h9l-1 8 10-12h-9l1-8z"; icon-color: glow; width: 13px; height: 13px; }
-            }
-            Text { text: "SCX"; font-family: "JetBrains Mono"; font-size: Cat.fs13; font-weight: 700; color: glow; vertical-alignment: center; }
-        }
-    }
-
-    for n in [
-        { a: 0, dx: 8px, y: 12px }, { a: 2, dx: 8px, y: 12px }, { a: 0, dx: 8px, y: 65px }, { a: 2, dx: 8px, y: 65px },
-        { a: 3, dx: 0px, y: 12px }, { a: 4, dx: 0px, y: 12px }, { a: 3, dx: 0px, y: 38px }, { a: 4, dx: 0px, y: 38px },
-        { a: 1, dx: -135px, y: 38px }, { a: 1, dx: 135px, y: 38px }, { a: 1, dx: -135px, y: 65px }, { a: 1, dx: 135px, y: 65px },
-        { a: 1, dx: -110px, y: 12px }, { a: 1, dx: 110px, y: 12px }, { a: 1, dx: -110px, y: 29px }, { a: 1, dx: 110px, y: 29px },
-        { a: 1, dx: 0px, y: 65px },
-    ]: Rectangle {
-        width: 6px;
-        height: 6px;
-        border-radius: 3px;
-        background: glow;
-        x: (n.a == 0 ? n.dx : (n.a == 1 ? cx + n.dx : (n.a == 2 ? root.width - n.dx : (n.a == 3 ? lx1 : rx1)))) - 3px;
-        y: n.y - 3px;
     }
 }
 
@@ -1633,22 +1576,23 @@ component UnderTab inherits Rectangle {
     in property <string> label;
     in property <bool> active: false;
     in property <color> accent: Cat.blue;
+    in property <float> k: 1;
     callback clicked;
 
-    width: ut-label.preferred-width + 36px;
-    height: 40px;
+    width: ut-label.preferred-width + 36px * root.k;
+    height: 40px * root.k;
 
     ut-label := Text {
         text: root.label;
-        font-size: Cat.fs14;
+        font-size: Cat.fs14 * root.k;
         font-weight: root.active ? 700 : 500;
         color: root.active ? root.accent : Cat.overlay1;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
     Rectangle {
-        y: parent.height - 2px;
-        height: 2px;
+        y: parent.height - 2px * root.k;
+        height: 2px * root.k;
         width: parent.width;
         background: root.active ? root.accent : transparent;
         animate background { duration: 120ms; }
@@ -1661,33 +1605,36 @@ component UnderTab inherits Rectangle {
 
 component PageCard inherits Rectangle {
     in property <color> accent: Cat.mauve;
+    in property <float> k: 1;
     background: Cat.card(Cat.surface1);
     border-radius: 10px;
     border-width: 1px;
     border-color: root.accent.with-alpha(0.45);
 
     VerticalLayout {
-        padding: 12px;
-        spacing: 5px;
+        padding: 12px * root.k;
+        spacing: 5px * root.k;
         @children
     }
 }
 
 component CardTitle inherits Text {
-    font-size: Cat.fs15;
+    in property <float> k: 1;
+    font-size: Cat.fs15 * root.k;
     font-weight: 700;
     color: Cat.text;
 }
 
 component WrapText inherits Text {
-    in property <length> char-w: 6.6px;
-    in property <length> line-h: 18px;
+    in property <float> k: 1;
+    in property <length> char-w: 6.6px * root.k;
+    in property <length> line-h: 18px * root.k;
     wrap: word-wrap;
     height: Math.max(1, Math.ceil(self.text.character-count * self.char-w / Math.max(self.width, 120px))) * self.line-h;
 }
 
 component CardHint inherits WrapText {
-    font-size: Cat.fs13;
+    font-size: Cat.fs13 * root.k;
     color: Cat.overlay1;
 }
 
@@ -2366,8 +2313,10 @@ export component MainWindow inherits Window {
     background: Cat.bg;
 
     in-out property <int> view: 9;
-    property <bool> sidebar-compact: root.height < 900px;
-    property <bool> sidebar-tight: root.height < 700px;
+    property <float> ui-k: Math.clamp(Math.min(root.width / 1920px, root.height / 1040px), 1, 2.6);
+    property <length> sidebar-w: 276px * root.ui-k;
+    property <bool> sidebar-compact: root.height < 900px * root.ui-k;
+    property <bool> sidebar-tight: root.height < 700px * root.ui-k;
     Timer {
         interval: 500ms;
         running: root.view == 17 && root.scx-tab == 0 && !root.scx-missing;
@@ -2742,6 +2691,10 @@ export component MainWindow inherits Window {
     ];
     property <string> scx-mode-label: scx-mode == "gaming" ? "Gaming" : (scx-mode == "lowlatency" ? "Low Latency" : (scx-mode == "powersave" ? "Power Save" : "Auto"));
     in-out property <string> scx-selected: "";
+    in-out property <ScxLive> scx-live;
+    property <float> log-k: root.scx-tab == 0 ? root.sched-k : 1;
+    property <float> sched-k: Math.clamp(Math.min((root.width - root.sidebar-w) / 1450px, (root.height - 190px) / 760px), 1, 2.6);
+    property <bool> sched-compact: root.height < 780px;
     in-out property <string> scx-mode: "auto";
     in-out property <bool> scx-persist: false;
     in-out property <bool> scx-busy: false;
@@ -2883,52 +2836,52 @@ export component MainWindow inherits Window {
     Rectangle {
         x: 0;
         y: 0;
-        width: sidebar-vl.preferred-width;
+        width: root.sidebar-w;
         height: parent.height;
         background: Cat.sidebar;
 
         sidebar-vl := VerticalLayout {
-            padding: 12px;
-            spacing: 2px;
+            padding: 12px * root.ui-k;
+            spacing: 2px * root.ui-k;
 
             VerticalLayout {
                 alignment: center;
-                spacing: 6px;
-                padding-bottom: 4px;
+                spacing: 6px * root.ui-k;
+                padding-bottom: 4px * root.ui-k;
 
                 HorizontalLayout {
                     alignment: center;
                     Image {
                         source: @image-url("xerolinux.png");
-                        width: root.sidebar-compact ? 52px : 100px;
-                        height: root.sidebar-compact ? 52px : 100px;
+                        width: root.sidebar-compact ? 52px * root.ui-k : 100px * root.ui-k;
+                        height: root.sidebar-compact ? 52px * root.ui-k : 100px * root.ui-k;
                         image-fit: contain;
                     }
                 }
 
                 VerticalLayout {
-                    spacing: 2px;
+                    spacing: 2px * root.ui-k;
                     Text {
                         text: "XeroLinux";
-                        font-size: Cat.fs22;
+                        font-size: Cat.fs22 * root.ui-k;
                         font-weight: 800;
-                        letter-spacing: 0.3px;
+                        letter-spacing: 0.3px * root.ui-k;
                         color: Cat.mauve;
                         horizontal-alignment: center;
                     }
                     if !root.sidebar-compact: HorizontalLayout {
                         alignment: center;
-                        spacing: 5px;
+                        spacing: 5px * root.ui-k;
                         Text {
                             text: @tr("Package Manager GUI");
-                            font-size: Cat.fs12;
+                            font-size: Cat.fs12 * root.ui-k;
                             font-weight: 700;
                             color: Cat.text;
                             vertical-alignment: center;
                         }
                         Text {
                             text: "(XPM)";
-                            font-size: Cat.fs11;
+                            font-size: Cat.fs11 * root.ui-k;
                             font-weight: 600;
                             color: Cat.overlay0;
                             vertical-alignment: center;
@@ -2937,15 +2890,16 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle { height: root.sidebar-compact ? 4px : 8px; }
+            Rectangle { height: root.sidebar-compact ? 4px * root.ui-k : 8px * root.ui-k; }
             if !root.sidebar-tight: HorizontalLayout {
-                padding-left: 10px;
-                SectionLabel { section-title: @tr("LIBRARY"); }
+                padding-left: 10px * root.ui-k;
+                SectionLabel { k: root.ui-k; section-title: @tr("LIBRARY"); }
             }
-            if !root.sidebar-tight: Rectangle { height: 4px; }
+            if !root.sidebar-tight: Rectangle { height: 4px * root.ui-k; }
 
             NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: icon-home;
                 label: @tr("Home");
                 tooltip-text: @tr("Overview, quick actions and cache management");
@@ -2955,6 +2909,7 @@ export component MainWindow inherits Window {
 
             if setting-flatpak-enabled: NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: icon-flatpak;
                 label: @tr("Flatpaks");
                 tooltip-text: @tr("Browse and install Flatpak applications");
@@ -2967,6 +2922,7 @@ export component MainWindow inherits Window {
 
             NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: icon-folder;
                 label: @tr("Packages");
                 tooltip-text: @tr("Browse and install packages from Arch repositories");
@@ -2980,6 +2936,7 @@ export component MainWindow inherits Window {
 
             if setting-appimage-enabled: NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: icon-image;
                 label: @tr("AppImages");
                 tooltip-text: @tr("Install and manage AppImages");
@@ -2993,6 +2950,7 @@ export component MainWindow inherits Window {
 
             NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: icon-rss;
                 label: @tr("Arch News");
                 tooltip-text: @tr("View latest Arch Linux news and announcements");
@@ -3003,17 +2961,18 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle { height: 6px; }
-            Rectangle { height: 1px; background: Cat.divider; }
-            Rectangle { height: 6px; }
+            Rectangle { height: 6px * root.ui-k; }
+            Rectangle { height: 1px * root.ui-k; background: Cat.divider; }
+            Rectangle { height: 6px * root.ui-k; }
             if !root.sidebar-tight: HorizontalLayout {
-                padding-left: 10px;
-                SectionLabel { section-title: @tr("KERNELS & TOOLS"); }
+                padding-left: 10px * root.ui-k;
+                SectionLabel { k: root.ui-k; section-title: @tr("KERNELS & TOOLS"); }
             }
-            if !root.sidebar-tight: Rectangle { height: 4px; }
+            if !root.sidebar-tight: Rectangle { height: 4px * root.ui-k; }
 
             NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: "M9 3v2M15 3v2M9 19v2M15 19v2M3 9h2M3 15h2M19 9h2M19 15h2M7 5h10a2 2 0 012 2v10a2 2 0 01-2 2H7a2 2 0 01-2-2V7a2 2 0 012-2zM9 9h6v6H9z";
                 label: @tr("Kernel Manager");
                 tooltip-text: @tr("Install and remove Linux kernels");
@@ -3023,6 +2982,7 @@ export component MainWindow inherits Window {
 
             NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: "M13 2L3 14h9l-1 8 10-12h-9l1-8z";
                 label: @tr("Kernel Schedulers");
                 tooltip-text: @tr("Switch sched-ext CPU schedulers on the fly");
@@ -3030,17 +2990,18 @@ export component MainWindow inherits Window {
                 clicked => { view = 17; selected-index = -1; root.scx-refresh(root.scx-log.length == 0); }
             }
 
-            Rectangle { height: 6px; }
-            Rectangle { height: 1px; background: Cat.divider; }
-            Rectangle { height: 6px; }
+            Rectangle { height: 6px * root.ui-k; }
+            Rectangle { height: 1px * root.ui-k; background: Cat.divider; }
+            Rectangle { height: 6px * root.ui-k; }
             if !root.sidebar-tight: HorizontalLayout {
-                padding-left: 10px;
-                SectionLabel { section-title: @tr("TBS & SETTINGS"); }
+                padding-left: 10px * root.ui-k;
+                SectionLabel { k: root.ui-k; section-title: @tr("TBS & SETTINGS"); }
             }
-            if !root.sidebar-tight: Rectangle { height: 4px; }
+            if !root.sidebar-tight: Rectangle { height: 4px * root.ui-k; }
 
             NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: icon-wrench;
                 label: @tr("Troubleshooting");
                 tooltip-text: @tr("Fix orphaned packages and manage ignored packages");
@@ -3050,6 +3011,7 @@ export component MainWindow inherits Window {
 
             NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: icon-gear;
                 label: @tr("Settings & Tweaks");
                 tooltip-text: @tr("Configure pacman settings, parallel downloads and held packages");
@@ -3059,11 +3021,12 @@ export component MainWindow inherits Window {
 
             Rectangle { vertical-stretch: 1; }
 
-            Rectangle { height: 1px; background: Cat.divider; }
-            Rectangle { height: 10px; }
+            Rectangle { height: 1px * root.ui-k; background: Cat.divider; }
+            Rectangle { height: 10px * root.ui-k; }
 
             if total-update-count > 0: NavButton {
                 compact: root.sidebar-compact;
+                k: root.ui-k;
                 icon-path: icon-arrow-up;
                 label: @tr("Updates");
                 tooltip-text: @tr("View and install available package updates");
@@ -3072,28 +3035,28 @@ export component MainWindow inherits Window {
                 clicked => { view = 1; selected-index = -1; }
             }
 
-            if total-update-count > 0: Rectangle { height: 10px; }
+            if total-update-count > 0: Rectangle { height: 10px * root.ui-k; }
 
             HorizontalLayout {
-                spacing: 8px;
+                spacing: 8px * root.ui-k;
                 sync-btn := Rectangle {
                     property <bool> checking: busy || loading;
-                    height: 38px;
-                    border-radius: 10px;
+                    height: 38px * root.ui-k;
+                    border-radius: 10px * root.ui-k;
                     background: sync-btn.checking ? Cat.mauve.with-alpha(0.5) : (sync-touch.has-hover ? Cat.mauve : Cat.mauve.with-alpha(0.85));
                     animate background { duration: 100ms; }
 
                     HorizontalLayout {
                         alignment: center;
-                        spacing: 8px;
+                        spacing: 8px * root.ui-k;
 
                         if sync-btn.checking: VerticalLayout {
                             alignment: center;
-                            LoadingCircle { diameter: 16px; dot-color: Cat.crust; }
+                            LoadingCircle { diameter: 16px * root.ui-k; dot-color: Cat.crust; }
                         }
                         Text {
                             text: sync-btn.checking ? @tr("Checking…") : @tr("Check for Updates");
-                            font-size: Cat.fs13;
+                            font-size: Cat.fs13 * root.ui-k;
                             font-weight: 600;
                             color: Cat.crust;
                             vertical-alignment: center;
@@ -3107,14 +3070,14 @@ export component MainWindow inherits Window {
                 }
 
                 Rectangle {
-                    width: 38px;
-                    height: 38px;
-                    border-radius: 10px;
+                    width: 38px * root.ui-k;
+                    height: 38px * root.ui-k;
+                    border-radius: 10px * root.ui-k;
                     background: about-touch.has-hover ? Cat.surface1 : Cat.surface0;
-                    border-width: 1px;
+                    border-width: 1px * root.ui-k;
                     border-color: Cat.surface1;
                     animate background { duration: 100ms; }
-                    Text { text: "i"; font-size: Cat.fs14; font-family: "monospace"; font-weight: 700; color: Cat.mauve; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "i"; font-size: Cat.fs14 * root.ui-k; font-family: "monospace"; font-weight: 700; color: Cat.mauve; horizontal-alignment: center; vertical-alignment: center; }
                     about-touch := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.show-about = true; }
@@ -3122,35 +3085,35 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle { height: 14px; }
+            Rectangle { height: 14px * root.ui-k; }
 
             HorizontalLayout {
-                padding-left: 6px;
-                spacing: 4px;
+                padding-left: 6px * root.ui-k;
+                spacing: 4px * root.ui-k;
 
                 Text {
                     text: stats.pacman-count + " pacman";
-                    font-size: Cat.fs13;
+                    font-size: Cat.fs13 * root.ui-k;
                     color: Cat.overlay1;
                 }
                 if setting-flatpak-enabled: Text {
                     text: "/";
-                    font-size: Cat.fs13;
+                    font-size: Cat.fs13 * root.ui-k;
                     color: Cat.overlay0;
                 }
                 if setting-flatpak-enabled: Text {
                     text: stats.flatpak-count + " flatpak";
-                    font-size: Cat.fs13;
+                    font-size: Cat.fs13 * root.ui-k;
                     color: Cat.overlay1;
                 }
                 if setting-appimage-enabled: Text {
                     text: "/";
-                    font-size: Cat.fs13;
+                    font-size: Cat.fs13 * root.ui-k;
                     color: Cat.overlay0;
                 }
                 if setting-appimage-enabled: Text {
                     text: installed-appimages.length + " appimage";
-                    font-size: Cat.fs13;
+                    font-size: Cat.fs13 * root.ui-k;
                     color: Cat.overlay1;
                 }
             }
@@ -3158,7 +3121,7 @@ export component MainWindow inherits Window {
     }
 
     Rectangle {
-        x: sidebar-vl.preferred-width;
+        x: root.sidebar-w;
         y: 0;
         width: 1px;
         height: parent.height;
@@ -3166,9 +3129,9 @@ export component MainWindow inherits Window {
     }
 
     Rectangle {
-        x: sidebar-vl.preferred-width + 1px;
+        x: root.sidebar-w + 1px;
         y: 0;
-        width: parent.width - sidebar-vl.preferred-width - 1px;
+        width: parent.width - root.sidebar-w - 1px;
         height: parent.height;
         clip: true;
 
@@ -3193,7 +3156,7 @@ export component MainWindow inherits Window {
                           view == 16 ? "Kernel Manager" :
                           view == 17 ? "Kernel Schedulers" :
                           view == 13 ? "Arch News" : "";
-                    font-size: Cat.fs22;
+                    font-size: Cat.fs22 * root.ui-k;
                     font-weight: 700;
                     color: Cat.text;
                 }
@@ -3201,30 +3164,30 @@ export component MainWindow inherits Window {
                 hdr-spacer := Rectangle {
                     horizontal-stretch: 1;
                     if view == 17: Rectangle {
-                        width: min(adv-text.preferred-width + 15px + 8px + 24px, parent.width - 8px);
-                        height: 30px;
-                        x: Math.max(0px, Math.min((hdr-row.width - self.width) / 2 - hdr-spacer.x, parent.width - self.width));
+                        width: min(adv-text.preferred-width + 15px * root.ui-k + 8px * root.ui-k + 24px * root.ui-k, parent.width - 8px * root.ui-k);
+                        height: 30px * root.ui-k;
+                        x: Math.max(0px * root.ui-k, Math.min((hdr-row.width - self.width) / 2 - hdr-spacer.x, parent.width - self.width));
                         y: (parent.height - self.height) / 2;
-                        border-radius: 15px;
+                        border-radius: 15px * root.ui-k;
                         background: Cat.mauve.with-alpha(0.14);
-                        border-width: 1px;
+                        border-width: 1px * root.ui-k;
                         border-color: Cat.mauve.with-alpha(0.5);
                         HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            spacing: 8px;
+                            padding-left: 12px * root.ui-k;
+                            padding-right: 12px * root.ui-k;
+                            spacing: 8px * root.ui-k;
                             VerticalLayout {
                                 alignment: center;
                                 NavIcon {
                                     d: "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z";
                                     icon-color: Cat.mauve;
-                                    width: 15px;
-                                    height: 15px;
+                                    width: 15px * root.ui-k;
+                                    height: 15px * root.ui-k;
                                 }
                             }
                             adv-text := Text {
                                 text: @tr("Advanced Users Only! Know what you are doing. Breakage might occur.");
-                                font-size: Cat.fs13;
+                                font-size: Cat.fs13 * root.ui-k;
                                 font-weight: 600;
                                 color: Cat.mauve;
                                 vertical-alignment: center;
@@ -6394,7 +6357,7 @@ export component MainWindow inherits Window {
 
                     VerticalLayout {
                         spacing: 8px;
-                        SectionLabel { section-title: @tr("GENERAL"); }
+                        SectionLabel { k: root.ui-k; section-title: @tr("GENERAL"); }
 
                         HorizontalLayout {
                             spacing: 8px;
@@ -6469,7 +6432,7 @@ export component MainWindow inherits Window {
 
                         if setting-flatpak-enabled || setting-appimage-enabled: VerticalLayout {
                             padding-top: 14px;
-                            SectionLabel { section-title: @tr("REMOTE MANAGER"); }
+                            SectionLabel { k: root.ui-k; section-title: @tr("REMOTE MANAGER"); }
                         }
 
                         if setting-flatpak-enabled: Rectangle {
@@ -6524,7 +6487,7 @@ export component MainWindow inherits Window {
 
                     VerticalLayout {
                         spacing: 8px;
-                        SectionLabel { section-title: @tr("PACMAN MANAGER"); }
+                        SectionLabel { k: root.ui-k; section-title: @tr("PACMAN MANAGER"); }
 
                         HorizontalLayout {
                             spacing: 8px;
@@ -7264,29 +7227,31 @@ export component MainWindow inherits Window {
 
                 HorizontalLayout {
                     alignment: start;
-                    UnderTab { label: @tr("Scheduler"); active: scx-tab == 0; accent: Cat.mauve; clicked => { scx-tab = 0; } }
-                    UnderTab { label: @tr("Flags Reference"); active: scx-tab == 1; accent: Cat.blue; clicked => { scx-tab = 1; } }
-                    UnderTab { label: @tr("SCX Info"); active: scx-tab == 2; accent: Cat.teal; clicked => { scx-tab = 2; } }
+                    UnderTab { k: root.sched-k; label: @tr("Scheduler"); active: scx-tab == 0; accent: Cat.mauve; clicked => { scx-tab = 0; } }
+                    UnderTab { k: root.sched-k; label: @tr("Flags Reference"); active: scx-tab == 1; accent: Cat.blue; clicked => { scx-tab = 1; } }
+                    UnderTab { k: root.sched-k; label: @tr("SCX Info"); active: scx-tab == 2; accent: Cat.teal; clicked => { scx-tab = 2; } }
                 }
 
                 if scx-tab == 0: sched-scroll := ScrollView {
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     vertical-stretch: 1;
+                    min-height: 0px;
 
                     VerticalLayout {
                         min-height: sched-scroll.visible-height;
                         padding: 4px;
-                        spacing: 8px;
+                        spacing: 8px * root.sched-k;
 
                         if scx-missing: PageCard {
+                            k: root.sched-k;
                             accent: Cat.yellow;
                             HorizontalLayout {
-                                spacing: 12px;
+                                spacing: 12px * root.sched-k;
                                 VerticalLayout {
                                     alignment: center;
                                     horizontal-stretch: 1;
-                                    CardTitle { text: @tr("scxctl not found"); }
-                                    CardHint { text: @tr("Install scx-tools to enable this feature."); }
+                                    CardTitle { k: root.sched-k; text: @tr("scxctl not found"); }
+                                    CardHint { k: root.sched-k; text: @tr("Install scx-tools to enable this feature."); }
                                 }
                                 VerticalLayout {
                                     alignment: center;
@@ -7296,16 +7261,17 @@ export component MainWindow inherits Window {
                         }
 
                         PageCard {
+                            k: root.sched-k;
                             accent: scx-kernel-level == 0 ? Cat.green : (scx-kernel-level == 1 ? Cat.yellow : Cat.red);
-                            CardTitle { text: @tr("Kernel Support"); }
-                            CardHint { text: @tr("Verifies your kernel has sched-ext compiled in. Requires Linux 6.12 or newer."); }
+                            CardTitle { k: root.sched-k; text: @tr("Kernel Support"); }
+                            if !root.sched-compact: CardHint { k: root.sched-k; text: @tr("Verifies your kernel has sched-ext compiled in. Requires Linux 6.12 or newer."); }
                             HorizontalLayout {
-                                spacing: 14px;
+                                spacing: 14px * root.sched-k;
                                 alignment: start;
-                                Text { text: @tr("Kernel: ") + (scx-kernel-version == "" ? @tr("Detecting...") : scx-kernel-version); font-size: Cat.fs14; font-weight: 700; color: Cat.text; vertical-alignment: center; }
+                                Text { text: @tr("Kernel: ") + (scx-kernel-version == "" ? @tr("Detecting...") : scx-kernel-version); font-size: Cat.fs14 * root.sched-k; font-weight: 700; color: Cat.text; vertical-alignment: center; }
                                 Text {
                                     text: scx-kernel-msg;
-                                    font-size: Cat.fs14;
+                                    font-size: Cat.fs14 * root.sched-k;
                                     font-weight: 600;
                                     color: scx-kernel-level == 0 ? Cat.green : (scx-kernel-level == 1 ? Cat.yellow : Cat.red);
                                     vertical-alignment: center;
@@ -7314,39 +7280,41 @@ export component MainWindow inherits Window {
                         }
 
                         PageCard {
+                            k: root.sched-k;
                             accent: Cat.blue;
-                            CardTitle { text: @tr("Current Status"); }
-                            CardHint { text: @tr("Live view of the active sched-ext scheduler and its operating mode. Updates every 500ms."); }
+                            CardTitle { k: root.sched-k; text: @tr("Current Status"); }
+                            if !root.sched-compact: CardHint { k: root.sched-k; text: @tr("Live view of the active sched-ext scheduler and its operating mode. Updates every 500ms."); }
                             HorizontalLayout {
-                                spacing: 10px;
+                                spacing: 10px * root.sched-k;
                                 alignment: start;
-                                Text { text: @tr("Active Scheduler:"); font-size: Cat.fs14; color: Cat.overlay1; vertical-alignment: center; }
-                                Text { text: scx-active-name; font-size: Cat.fs15; font-weight: 700; color: scx-active ? Cat.mauve : Cat.text; vertical-alignment: center; }
-                                Rectangle { width: 14px; }
-                                Text { text: @tr("Mode:"); font-size: Cat.fs14; color: Cat.overlay1; vertical-alignment: center; }
-                                Text { text: scx-active-mode; font-size: Cat.fs15; font-weight: 700; color: Cat.text; vertical-alignment: center; }
+                                Text { text: @tr("Active Scheduler:"); font-size: Cat.fs14 * root.sched-k; color: Cat.overlay1; vertical-alignment: center; }
+                                Text { text: scx-active-name; font-size: Cat.fs15 * root.sched-k; font-weight: 700; color: scx-active ? Cat.mauve : Cat.text; vertical-alignment: center; }
+                                Rectangle { width: 14px * root.sched-k; }
+                                Text { text: @tr("Mode:"); font-size: Cat.fs14 * root.sched-k; color: Cat.overlay1; vertical-alignment: center; }
+                                Text { text: scx-active-mode; font-size: Cat.fs15 * root.sched-k; font-weight: 700; color: Cat.text; vertical-alignment: center; }
                             }
                         }
 
                         PageCard {
+                            k: root.sched-k;
                             accent: Cat.mauve;
-                            CardTitle { text: @tr("Scheduler Selection"); }
-                            CardHint { text: @tr("Choose a scheduler and performance mode. Enable persistence to auto-start on every boot via systemd."); }
+                            CardTitle { k: root.sched-k; text: @tr("Scheduler Selection"); }
+                            if !root.sched-compact: CardHint { k: root.sched-k; text: @tr("Choose a scheduler and performance mode. Enable persistence to auto-start on every boot via systemd."); }
                             HorizontalLayout {
-                                spacing: 12px;
+                                spacing: 12px * root.sched-k;
                                 alignment: start;
-                                padding-top: 4px;
-                                VerticalLayout { alignment: center; Text { text: @tr("Scheduler:"); font-size: Cat.fs14; color: Cat.overlay1; } }
-                                DropDown {
-                                    width: 240px;
+                                padding-top: 4px * root.sched-k;
+                                VerticalLayout { alignment: center; Text { text: @tr("Scheduler:"); font-size: Cat.fs14 * root.sched-k; color: Cat.overlay1; } }
+                                DropDown { k: root.sched-k;
+                                    width: 240px * root.sched-k;
                                     items: scx-options;
                                     current-id: scx-selected;
                                     current-label: scx-selected-label == "" ? @tr("None") : scx-selected-label;
                                     selected(id) => { root.scx-select(id); }
                                 }
-                                VerticalLayout { alignment: center; Text { text: @tr("Mode:"); font-size: Cat.fs14; color: Cat.overlay1; } }
-                                DropDown {
-                                    width: 160px;
+                                VerticalLayout { alignment: center; Text { text: @tr("Mode:"); font-size: Cat.fs14 * root.sched-k; color: Cat.overlay1; } }
+                                DropDown { k: root.sched-k;
+                                    width: 160px * root.sched-k;
                                     items: scx-mode-items;
                                     current-id: scx-mode;
                                     current-label: scx-mode-label;
@@ -7355,11 +7323,11 @@ export component MainWindow inherits Window {
                             }
                             HorizontalLayout {
                                 alignment: start;
-                                spacing: 10px;
-                                padding-top: 4px;
+                                spacing: 10px * root.sched-k;
+                                padding-top: 4px * root.sched-k;
                                 VerticalLayout {
                                     alignment: center;
-                                    CheckBox {
+                                    CheckBox { k: root.sched-k;
                                         checked: scx-persist;
                                         toggled(val) => {
                                             root.scx-persist = val;
@@ -7369,30 +7337,185 @@ export component MainWindow inherits Window {
                                 }
                                 VerticalLayout {
                                     alignment: center;
-                                    Text { text: @tr("Persist scheduler after reboot"); font-size: Cat.fs14; color: Cat.text; }
+                                    Text { text: @tr("Persist scheduler after reboot"); font-size: Cat.fs14 * root.sched-k; color: Cat.text; }
                                 }
                             }
                         }
 
-                        Rectangle { vertical-stretch: 1; min-height: 4px; }
+                        live-card := PageCard {
+                            k: root.sched-k;
+                            vertical-stretch: 1;
+                            min-height: 120px * root.sched-k;
+                            preferred-height: 0px;
+                            clip: true;
+                            accent: Cat.mauve;
+                            property <float> units: self.height / 1px / root.sched-k;
+                            property <bool> shown: self.units >= 56;
+                            property <int> tile-count: Math.max(3, Math.min(10, Math.floor(self.width / (150px * root.sched-k))));
+                            background: self.shown ? Cat.card(Cat.surface1) : transparent;
+                            border-color: self.shown ? Cat.mauve.with-alpha(0.45) : transparent;
 
-                        if sched-scroll.visible-height > 560px: CircuitBanner { }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                min-height: 0px;
+                                preferred-height: 0px;
+                                if live-card.shown: VerticalLayout {
+                                    spacing: 8px * root.sched-k;
+                                    HorizontalLayout {
+                                        spacing: 8px * root.sched-k;
+                                        CardTitle { k: root.sched-k; text: @tr("sched_ext Live State"); }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Rectangle {
+                                            height: 22px * root.sched-k;
+                                            width: live-ops.preferred-width + 18px * root.sched-k;
+                                            border-radius: 6px * root.sched-k;
+                                            background: Cat.mauve.with-alpha(0.14);
+                                            live-ops := Text {
+                                                text: scx-live.ops == "" ? @tr("EEVDF (Default)") : scx-live.ops;
+                                                font-size: Cat.fs12 * root.sched-k;
+                                                color: Cat.mauve;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        Rectangle {
+                                            height: 22px * root.sched-k;
+                                            width: live-state.preferred-width + 18px * root.sched-k;
+                                            border-radius: 6px * root.sched-k;
+                                            background: (scx-live.state == "enabled" ? Cat.green : Cat.overlay0).with-alpha(0.16);
+                                            live-state := Text {
+                                                text: scx-live.state;
+                                                font-size: Cat.fs12 * root.sched-k;
+                                                color: scx-live.state == "enabled" ? Cat.green : Cat.overlay1;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    if live-card.units >= 120: HorizontalLayout {
+                                        vertical-stretch: live-card.units >= 150 ? 0 : 1;
+                                        for t[i] in [
+                                            { label: @tr("State"), value: scx-live.state },
+                                            { label: @tr("CPU load"), value: scx-live.total + "%" },
+                                            { label: @tr("Load avg"), value: scx-live.load },
+                                            { label: @tr("Cores"), value: scx-live.cpus.length },
+                                            { label: @tr("Enable count"), value: scx-live.enable-seq },
+                                            { label: @tr("Rejected loads"), value: scx-live.rejected },
+                                            { label: @tr("Hotplug events"), value: scx-live.hotplug-seq },
+                                            { label: @tr("Switch all"), value: scx-live.switch-all },
+                                            { label: @tr("Kernel"), value: scx-kernel-version },
+                                            { label: @tr("Mode"), value: scx-active-mode },
+                                        ]: Rectangle {
+                                            visible: i < live-card.tile-count;
+                                            horizontal-stretch: i < live-card.tile-count ? 1 : 0;
+                                            preferred-width: 0px;
+                                            min-width: 0px;
+                                            max-width: i < live-card.tile-count ? 100000px : 0px;
+                                            min-height: 54px * root.sched-k;
+                                            preferred-height: 54px * root.sched-k;
+                                            Rectangle {
+                                                x: i == 0 ? 0px : 4px * root.sched-k;
+                                                width: parent.width - (i == 0 ? 0px : 4px * root.sched-k) - (i == live-card.tile-count - 1 ? 0px : 4px * root.sched-k);
+                                                border-radius: 8px * root.sched-k;
+                                                background: Cat.crust.with-alpha(0.45);
+                                            VerticalLayout {
+                                                alignment: center;
+                                                padding-left: 10px * root.sched-k;
+                                                padding-right: 6px * root.sched-k;
+                                                spacing: 1px * root.sched-k;
+                                                Text { text: t.label.to-uppercase(); font-size: Cat.fs11 * root.sched-k; color: Cat.overlay0; letter-spacing: 0.6px; overflow: elide; }
+                                                Text { text: t.value; font-size: Cat.fs15 * root.sched-k; font-weight: 700; color: Cat.text; overflow: elide; }
+                                            }
+                                            }
+                                        }
+                                    }
+                                    if live-card.units >= 150: bars := Rectangle {
+                                        vertical-stretch: 1;
+                                        min-height: 0px;
+                                        preferred-height: 0px;
+                                        property <int> n: scx-live.cpus.length;
+                                        property <int> rows-fit: Math.max(1, Math.floor(self.height / (22px * root.sched-k)));
+                                        property <int> cols-wide: Math.max(1, Math.floor(self.width / (96px * root.sched-k)));
+                                        property <int> cols: Math.max(1, Math.min(self.cols-wide, Math.max(Math.ceil(self.n / self.rows-fit), Math.min(self.n, self.cols-wide))));
+                                        property <int> rows: Math.max(1, Math.ceil(self.n / self.cols));
+                                        property <length> cw: self.width / self.cols;
+                                        property <length> ch: self.height / self.rows;
+                                        for c[i] in scx-live.cpus: Rectangle {
+                                            x: Math.mod(i, bars.cols) * bars.cw;
+                                            y: Math.floor(i / bars.cols) * bars.ch;
+                                            width: bars.cw - 4px * root.sched-k;
+                                            height: bars.ch - 4px * root.sched-k;
+                                            border-radius: 5px * root.sched-k;
+                                            background: Cat.crust.with-alpha(0.55);
+                                            clip: true;
+                                            Rectangle {
+                                                x: 0;
+                                                width: parent.width * c.pct / 100;
+                                                background: (c.pct > 80 ? Cat.red : (c.pct > 50 ? Cat.yellow : Cat.mauve)).with-alpha(0.55);
+                                            }
+                                            Text {
+                                                x: 8px * root.sched-k;
+                                                width: parent.width - 16px * root.sched-k;
+                                                height: parent.height;
+                                                text: c.label;
+                                                font-size: Math.min(Cat.fs11 * root.sched-k, parent.height * 0.6);
+                                                color: Cat.text;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                x: parent.width - self.width - 8px * root.sched-k;
+                                                width: 44px * root.sched-k;
+                                                height: parent.height;
+                                                text: c.pct + "%";
+                                                font-size: Math.min(Cat.fs11 * root.sched-k, parent.height * 0.6);
+                                                font-weight: 700;
+                                                color: Cat.text;
+                                                horizontal-alignment: right;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    if live-card.units >= 220: Rectangle {
+                                        height: 52px * root.sched-k;
+                                        border-radius: 6px * root.sched-k;
+                                        background: Cat.crust.with-alpha(0.45);
+                                        clip: true;
+                                        for v[i] in scx-live.history: Rectangle {
+                                            property <length> cw: parent.width / 60;
+                                            x: (60 - scx-live.history.length + i) * self.cw;
+                                            width: self.cw - 1px;
+                                            height: max(2px, parent.height * v / 100);
+                                            y: parent.height - self.height;
+                                            background: Cat.mauve.with-alpha(0.7);
+                                        }
+                                        Text {
+                                            x: 8px * root.sched-k;
+                                            y: 4px * root.sched-k;
+                                            text: @tr("CPU load, last 60 seconds");
+                                            font-size: Cat.fs11 * root.sched-k;
+                                            color: Cat.overlay1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         HorizontalLayout {
-                            spacing: 6px;
-                            ActionButton {
+                            spacing: 8px * root.sched-k;
+                            ActionButton { k: root.sched-k;
                                 label: @tr("Switch / Start Scheduler");
                                 kind: "primary";
                                 enabled: !scx-missing && scx-kernel-level != 2 && scx-selected != "" && !scx-busy;
                                 clicked => { root.scx-switch(root.scx-selected, root.scx-mode); }
                             }
-                            ActionButton {
+                            ActionButton { k: root.sched-k;
                                 label: @tr("Stop Scheduler");
                                 kind: "danger";
                                 enabled: scx-active && !scx-busy;
                                 clicked => { root.scx-stop(); }
                             }
-                            ActionButton {
+                            ActionButton { k: root.sched-k;
                                 label: @tr("Refresh List");
                                 enabled: !scx-missing && !scx-busy;
                                 clicked => { root.scx-refresh(true); }
@@ -7533,8 +7656,9 @@ export component MainWindow inherits Window {
 
                 PageCard {
                     accent: Cat.overlay0;
-                    height: 124px;
-                    CardTitle { text: @tr("Activity Log"); }
+                    k: root.log-k;
+                    height: (root.sched-compact && root.scx-tab == 0 ? 106px : 124px) * root.log-k;
+                    CardTitle { k: root.log-k; text: @tr("Activity Log"); }
                     Rectangle {
                         vertical-stretch: 1;
                         background: Cat.crust.with-alpha(0.7);
@@ -7544,28 +7668,28 @@ export component MainWindow inherits Window {
                             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                             content-y: min(0px, self.visible-height - self.content-height);
                             VerticalLayout {
-                                padding: 6px;
+                                padding: 6px * root.log-k;
                                 if scx-log.length == 0: Rectangle {
-                                    height: 17px;
+                                    height: 17px * root.log-k;
                                     Text {
                                         x: 0;
                                         width: parent.width;
                                         text: @tr("Waiting for user action...");
                                         font-family: "JetBrains Mono";
-                                        font-size: Cat.fs12;
+                                        font-size: Cat.fs12 * root.log-k;
                                         color: Cat.overlay0;
                                         horizontal-alignment: left;
                                         vertical-alignment: center;
                                     }
                                 }
                                 for line in scx-log: Rectangle {
-                                    height: 17px;
+                                    height: 17px * root.log-k;
                                     Text {
                                         x: 0;
                                         width: parent.width;
                                         text: line;
                                         font-family: "JetBrains Mono";
-                                        font-size: Cat.fs12;
+                                        font-size: Cat.fs12 * root.log-k;
                                         color: Cat.subtext0;
                                         wrap: no-wrap;
                                         overflow: elide;
@@ -7997,7 +8121,7 @@ export component MainWindow inherits Window {
                     if !aur-pill-dismissed: HorizontalLayout {
                         alignment: center;
                         Rectangle {
-                            width: min(aur-pill-text.preferred-width + 15px + 8px + 24px + 28px, root.width - sidebar-vl.preferred-width - 12px);
+                            width: min(aur-pill-text.preferred-width + 15px + 8px + 24px + 28px, root.width - root.sidebar-w - 12px);
                             border-radius: 8px;
                             background: Cat.yellow.with-alpha(0.08);
                             border-width: 1px;
@@ -8055,7 +8179,7 @@ export component MainWindow inherits Window {
 
                     VerticalLayout {
                         spacing: 8px;
-                        SectionLabel { section-title: @tr("SYSTEM OVERVIEW"); }
+                        SectionLabel { k: root.ui-k; section-title: @tr("SYSTEM OVERVIEW"); }
 
                         HorizontalLayout {
                             spacing: 10px;
@@ -8180,7 +8304,7 @@ export component MainWindow inherits Window {
 
                     VerticalLayout {
                         spacing: 8px;
-                        SectionLabel { section-title: @tr("QUICK ACTIONS"); }
+                        SectionLabel { k: root.ui-k; section-title: @tr("QUICK ACTIONS"); }
 
                         HorizontalLayout {
                             spacing: 10px;
@@ -8288,7 +8412,7 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         spacing: 8px;
 
-                        SectionLabel { section-title: @tr("SYSTEM"); }
+                        SectionLabel { k: root.ui-k; section-title: @tr("SYSTEM"); }
 
                         Rectangle {
                             border-radius: 12px;
@@ -8401,7 +8525,7 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         spacing: 8px;
 
-                        SectionLabel { section-title: @tr("RECENT ACTIVITY"); }
+                        SectionLabel { k: root.ui-k; section-title: @tr("RECENT ACTIVITY"); }
 
                         VerticalLayout {
                             spacing: 0;
@@ -12536,7 +12660,7 @@ export component MainWindow inherits Window {
     }
 
     if NavTooltip.text != "": Rectangle {
-        x: sidebar-vl.preferred-width + 10px;
+        x: root.sidebar-w + 10px;
         y: NavTooltip.y;
         width: nav-tt-lbl.preferred-width + 18px;
         height: 28px;

@@ -25,9 +25,11 @@ mod appstream;
 mod flathub;
 mod icons;
 mod kernels;
+mod live;
 mod progress;
 mod sched;
 mod scx_data;
+mod uiscale;
 mod xml;
 use appstream::CachedRemoteApp;
 use progress::{Mode, OpReporter};
@@ -300,6 +302,7 @@ enum UiMessage {
     KernelsLoaded { installed: Vec<kernels::Kernel>, available: Vec<kernels::Kernel> },
     ScxLoaded(sched::Snapshot),
     ScxStatus(sched::Status),
+    ScxLive(live::Live),
     ScxLog(String),
     ScxPersist(bool),
     ScxBusy(bool),
@@ -805,6 +808,22 @@ fn apply_kernels(window: &MainWindow, installed: &[kernels::Kernel], available: 
     window.set_kernel_available_count(available.len() as i32);
     window.set_kernel_total((installed.len() + available.len()) as i32);
     window.set_kernels_loading(false);
+}
+
+fn apply_scx_live(window: &MainWindow, live: live::Live) {
+    let cpus: Vec<LiveCpu> = live.cpus.into_iter().map(|(label, pct)| LiveCpu { label: label.into(), pct }).collect();
+    window.set_scx_live(ScxLive {
+        state: live.state.into(),
+        ops: sched::humanize_name(&format!("scx_{}", live.ops)).into(),
+        switch_all: if live.switch_all { "on" } else { "off" }.into(),
+        enable_seq: live.enable_seq.into(),
+        hotplug_seq: live.hotplug_seq.into(),
+        rejected: live.rejected.into(),
+        load: live.load.into(),
+        total: live.total,
+        cpus: ModelRc::new(VecModel::from(cpus)),
+        history: ModelRc::new(VecModel::from(live.history)),
+    });
 }
 
 fn apply_scx_status(window: &MainWindow, status: &sched::Status) {
@@ -3256,8 +3275,12 @@ fn load_history(weak: slint::Weak<MainWindow>, store: Arc<Mutex<Vec<alpmhist::Tr
 }
 
 fn main() {
+    let ui_scale = uiscale::detect();
     // SAFETY: runs first in main, before any thread is spawned.
     unsafe {
+        if let Some(factor) = ui_scale {
+            std::env::set_var("QT_SCALE_FACTOR", factor.to_string());
+        }
         if std::env::var_os("SLINT_BACKEND").is_none() {
             std::env::set_var("SLINT_BACKEND", "qt");
         }
@@ -3308,6 +3331,10 @@ fn main() {
     };
 
     let window = MainWindow::new().expect("Failed to create window");
+    if ui_scale.is_some() {
+        // SAFETY: Qt has read the variable during window creation; this only keeps it from reaching spawned programs.
+        unsafe { std::env::remove_var("QT_SCALE_FACTOR") };
+    }
     window.set_app_version(SharedString::from(env!("CARGO_PKG_VERSION")));
 
     if let Some(locale) = sys_locale::get_locale() {
@@ -3606,6 +3633,7 @@ fn main() {
                         window.set_scx_selected_label(if selected.is_empty() { "".into() } else { sched::humanize_name(&selected).into() });
                     }
                     UiMessage::ScxStatus(status) => apply_scx_status(&window, &status),
+                    UiMessage::ScxLive(live) => apply_scx_live(&window, live),
                     UiMessage::ScxLog(line) => {
                         scx_log_model.push(line.into());
                         while scx_log_model.row_count() > 500 {
@@ -5309,6 +5337,7 @@ fn main() {
         }
         let (tx, flag) = (tx_scx_poll.clone(), scx_polling.clone());
         thread::spawn(move || {
+            let _ = tx.send(UiMessage::ScxLive(live::sample()));
             let _ = tx.send(UiMessage::ScxStatus(sched::status()));
             flag.store(false, std::sync::atomic::Ordering::SeqCst);
         });
