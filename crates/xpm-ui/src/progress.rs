@@ -482,12 +482,73 @@ struct PacmanRows {
     last: String,
     seen_cr: bool,
     scan: Scan,
+    /// Columns of the table header pacman printed (they differ for upgrades, installs and removals).
+    table_cols: Vec<Col>,
     pending: Vec<RowInfo>,
     /// Absolute row index of the first planned package, and package names in plan order.
     base: usize,
     names: Vec<String>,
     active: Option<usize>,
     last_pct: i32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Col {
+    OldVersion,
+    NewVersion,
+    NetChange,
+    DownloadSize,
+}
+
+fn table_columns(header: &str) -> Vec<Col> {
+    let mut found: Vec<(usize, Col)> = [
+        ("Old Version", Col::OldVersion),
+        ("New Version", Col::NewVersion),
+        ("Net Change", Col::NetChange),
+        ("Download Size", Col::DownloadSize),
+    ]
+    .into_iter()
+    .filter_map(|(label, col)| header.find(label).map(|at| (at, col)))
+    .collect();
+    found.sort_by_key(|(at, _)| *at);
+    found.into_iter().map(|(_, col)| col).collect()
+}
+
+/// Version and size columns of one table row, e.g. `26.04-1 \u{2192} 26.05-1  ·  +1.20 MiB  ·  \u{2193} 0.40 MiB`.
+fn table_detail(cols: &[Col], values: &[&str]) -> String {
+    let size_cols: Vec<Col> = cols.iter().copied().filter(|c| matches!(c, Col::NetChange | Col::DownloadSize)).collect();
+    let split = values.len().saturating_sub(size_cols.len() * 2);
+    let (versions, sizes) = values.split_at(split);
+    let (mut net, mut download) = (None, None);
+    for (col, pair) in size_cols.iter().zip(sizes.chunks(2)) {
+        let size = Some(pair.join(" "));
+        match col {
+            Col::NetChange => net = size,
+            _ => download = size,
+        }
+    }
+    // A new dependency pulled in by an upgrade has a blank Old Version cell.
+    let has = |c| cols.contains(&c);
+    let (old, new) = match versions {
+        [old, new, ..] => (Some(old.to_string()), Some(new.to_string())),
+        [one] if has(Col::NewVersion) => (None, Some(one.to_string())),
+        [one] => (Some(one.to_string()), None),
+        [] => (None, None),
+    };
+    let mut parts = Vec::new();
+    match (old, new) {
+        (Some(old), Some(new)) => parts.push(format!("{old} \u{2192} {new}")),
+        (Some(one), None) | (None, Some(one)) => parts.push(one),
+        (None, None) => {}
+    }
+    if let Some(net) = net {
+        let grows = net.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()).is_some_and(|v| v > 0.0);
+        parts.push(if grows { format!("+{net}") } else { net });
+    }
+    if let Some(download) = download {
+        parts.push(format!("\u{2193} {download}"));
+    }
+    parts.join("  \u{b7}  ")
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -556,12 +617,8 @@ impl PacmanRows {
                 let mut cols = trimmed.split_whitespace();
                 if let Some(first) = cols.next() {
                     let name = first.rsplit('/').next().unwrap_or(first).to_string();
-                    let vers: Vec<&str> = cols.take(2).collect();
-                    let detail = match vers.as_slice() {
-                        [old, new] if new.chars().any(|c| c.is_ascii_digit()) => format!("{old} \u{2192} {new}"),
-                        [one] => (*one).to_string(),
-                        _ => String::new(),
-                    };
+                    let values: Vec<&str> = cols.collect();
+                    let detail = table_detail(&self.table_cols, &values);
                     self.pending.push(RowInfo { name, tag: "", detail });
                 }
             } else {
@@ -574,8 +631,9 @@ impl PacmanRows {
         if let Some(rest) = trimmed.strip_prefix("Packages (").or_else(|| trimmed.strip_prefix("Package (")) {
             self.pending.clear();
             if let Some((_, tail)) = rest.split_once(')') {
-                if tail.contains("Old Version") {
+                if tail.contains("Old Version") || tail.contains("New Version") {
                     self.scan = Scan::Table;
+                    self.table_cols = table_columns(tail);
                 } else {
                     self.scan = Scan::List;
                     for tok in tail.split_whitespace() {
@@ -1495,9 +1553,39 @@ mod tests {
             "(1/2) upgrading 7zip   [##    ]  40%\r(1/2) upgrading 7zip   [#####] 100%\r\n",
             "(2/2) upgrading glibc  [#     ]  20%",
         ]);
-        assert_eq!(msgs[0], "plan 0: 7zip [26.04-1 \u{2192} 26.05-1], glibc [2.41-2 \u{2192} 2.42-1]");
+        assert_eq!(msgs[0], "plan 0: 7zip [26.04-1 \u{2192} 26.05-1  \u{b7}  0.00 MiB], glibc [2.41-2 \u{2192} 2.42-1  \u{b7}  +1.20 MiB]");
         assert!(msgs.contains(&"row 0 state 2 100%".to_string()), "{msgs:?}");
         assert!(msgs.contains(&"row 1 state 1 20%".to_string()), "{msgs:?}");
+    }
+
+    #[test]
+    fn fresh_install_table_has_no_header_rows() {
+        let msgs = row_messages(&[
+            "Package (1)               New Version  Net Change  Download Size\r\n\r\n",
+            "extra/haskell-bv-sized    1.0.1-1      2.30 MiB    0.50 MiB\r\n\r\n",
+        ]);
+        assert_eq!(msgs[0], "plan 0: haskell-bv-sized [1.0.1-1  \u{b7}  +2.30 MiB  \u{b7}  \u{2193} 0.50 MiB]");
+    }
+
+    #[test]
+    fn upgrade_table_new_dependency_has_blank_old_version() {
+        let msgs = row_messages(&[
+            "Packages (2)  Old Version  New Version  Net Change  Download Size\r\n\r\n",
+            "extra/foo     1.0-1        1.1-1        0.10 MiB    0.20 MiB\r\nextra/newdep               2.0-1        2.30 MiB    0.50 MiB\r\n\r\n",
+        ]);
+        assert_eq!(
+            msgs[0],
+            "plan 0: foo [1.0-1 \u{2192} 1.1-1  \u{b7}  +0.10 MiB  \u{b7}  \u{2193} 0.20 MiB], newdep [2.0-1  \u{b7}  +2.30 MiB  \u{b7}  \u{2193} 0.50 MiB]"
+        );
+    }
+
+    #[test]
+    fn removal_table_shows_the_old_version_only() {
+        let msgs = row_messages(&[
+            "Package (1)  Old Version  Net Change\r\n\r\n",
+            "extra/foo    1.2-1        -2.30 MiB\r\n\r\n",
+        ]);
+        assert_eq!(msgs[0], "plan 0: foo [1.2-1  \u{b7}  -2.30 MiB]");
     }
 
     #[test]

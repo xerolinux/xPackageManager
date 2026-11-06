@@ -31,7 +31,7 @@ fn read(name: &str) -> Option<String> {
 }
 
 /// `(label, busy, total)` jiffies per `cpuN` line, with the aggregate `cpu` line first.
-fn parse_stat(text: &str) -> Vec<(String, u64, u64)> {
+pub(crate) fn parse_stat(text: &str) -> Vec<(String, u64, u64)> {
     text.lines()
         .filter(|l| l.starts_with("cpu"))
         .filter_map(|l| {
@@ -48,7 +48,7 @@ fn parse_stat(text: &str) -> Vec<(String, u64, u64)> {
         .collect()
 }
 
-fn percent(prev: (u64, u64), now: (u64, u64)) -> i32 {
+pub(crate) fn percent(prev: (u64, u64), now: (u64, u64)) -> i32 {
     let total = now.1.saturating_sub(prev.1);
     if total == 0 {
         return 0;

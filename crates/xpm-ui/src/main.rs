@@ -27,6 +27,7 @@ mod icons;
 mod kernels;
 mod live;
 mod progress;
+mod pulse;
 mod sched;
 mod scx_data;
 mod uiscale;
@@ -5241,19 +5242,28 @@ fn main() {
         });
     });
 
-    window.on_clean_app_cache(move || {
-        info!("Clean app cache and restart");
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        // The AppImage store (installed apps + manifest) lives in the same directory: only drop caches.
-        if let Ok(entries) = std::fs::read_dir(format!("{}/.local/share/xpm", home)) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name == "pkg_cache.json" || (name.starts_with("remote_") && name.ends_with(".json")) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
+    let pulse = Rc::new(RefCell::new(pulse::Sampler::default()));
+    window.on_pulse_tick({
+        let weak = window.as_weak();
+        move |width, height| {
+            let Some(w) = weak.upgrade() else { return };
+            let tick = pulse.borrow_mut().tick(width, height);
+            w.set_pulse_interval(tick.interval_ms as i64);
+            w.set_pulse_phase(tick.phase);
+            if let Some(fresh) = tick.fresh {
+                let [cpu, ram, swap, disk] = fresh.values;
+                let [cpu_path, ram_path, swap_path, disk_path] = fresh.paths;
+                w.set_pulse_cpu(cpu);
+                w.set_pulse_ram(ram);
+                w.set_pulse_swap(swap);
+                w.set_pulse_disk(disk);
+                w.set_pulse_cpu_path(cpu_path.into());
+                w.set_pulse_ram_path(ram_path.into());
+                w.set_pulse_swap_path(swap_path.into());
+                w.set_pulse_disk_path(disk_path.into());
+                w.set_pulse_disk_rate(fresh.disk_rate.into());
             }
         }
-        restart_app();
     });
 
     let tx_kref = tx.clone();

@@ -2119,11 +2119,23 @@ component ProgressDialog inherits Rectangle {
                                 VerticalLayout {
                                     alignment: center;
                                     horizontal-stretch: 1;
-                                    Text {
-                                        text: r.name;
-                                        font-size: Cat.fs12;
-                                        color: Cat.text;
-                                        overflow: elide;
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Text {
+                                            text: r.name;
+                                            font-size: Cat.fs12;
+                                            color: Cat.text;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: r.detail;
+                                            font-size: Cat.fs11;
+                                            color: Cat.overlay0;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
                                     }
                                 }
                                 if r.tag != "": VerticalLayout {
@@ -2299,6 +2311,72 @@ component ProgressDialog inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+}
+
+component PulseTrace inherits Rectangle {
+    in property <string> label;
+    in property <string> path;
+    in property <float> phase;
+    in property <int> pct;
+    in property <string> value-text;
+    in property <color> tone;
+    out property <length> graph-width: graph.width;
+    out property <length> graph-height: graph.height;
+    min-height: 20px;
+    property <color> line: root.pct >= 85 ? Cat.red : root.tone;
+
+    HorizontalLayout {
+        spacing: 12px;
+        Text {
+            width: 46px;
+            text: root.label;
+            font-size: Cat.fs12;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            color: root.tone;
+            vertical-alignment: center;
+        }
+        graph := Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 4px;
+            background: Cat.crust.with-alpha(0.4);
+            clip: true;
+
+            Rectangle {
+                width: parent.width;
+                height: parent.height * 0.15;
+                background: Cat.red.with-alpha(0.14);
+            }
+            HorizontalLayout {
+                y: parent.height * 0.4;
+                height: 1px;
+                spacing: 4px;
+                for i in 60: Rectangle { background: Cat.yellow.with-alpha(0.45); }
+            }
+            Path {
+                x: -root.phase * parent.width / 59;
+                y: 0;
+                width: parent.width * 60 / 59;
+                height: parent.height;
+                commands: root.path;
+                fill: transparent;
+                stroke: root.line;
+                stroke-width: 1.8px;
+                stroke-line-join: round;
+                stroke-line-cap: round;
+            }
+        }
+        Text {
+            width: 70px;
+            text: root.value-text != "" ? root.value-text : root.pct + "%";
+            font-size: Cat.fs13;
+            font-weight: 700;
+            color: root.pct >= 85 ? Cat.red : (root.pct >= 60 ? Cat.yellow : Cat.text);
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
         }
     }
 }
@@ -2657,7 +2735,19 @@ export component MainWindow inherits Window {
 
     callback install-dep-package(string);
     callback clean-package-cache;
-    callback clean-app-cache;
+    callback pulse-tick(float, float);
+    in-out property <duration> pulse-interval: 16ms;
+    in-out property <float> pulse-phase: 0;
+    in-out property <string> pulse-cpu-path: "";
+    in-out property <string> pulse-ram-path: "";
+    in-out property <string> pulse-swap-path: "";
+    in-out property <string> pulse-disk-path: "";
+    in-out property <string> pulse-disk-rate: "";
+    in-out property <int> pulse-cpu: 0;
+    in-out property <int> pulse-ram: 0;
+    in-out property <int> pulse-swap: 0;
+    in-out property <int> pulse-disk: 0;
+    in-out property <bool> show-activity: false;
     callback reset-settings();
     in-out property <[KernelGroup]> kernel-groups: [];
     in-out property <[KernelCatRow]> kernel-cat-rows: [];
@@ -8108,14 +8198,14 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if view == 9: ScrollView {
+            if view == 9: home-scroll := ScrollView {
                 vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 vertical-stretch: 1;
 
                 VerticalLayout {
+                    min-height: home-scroll.visible-height;
                     padding: 4px;
                     spacing: 20px;
-                    alignment: start;
 
                     if !aur-pill-dismissed: HorizontalLayout {
                         alignment: center;
@@ -8310,14 +8400,16 @@ export component MainWindow inherits Window {
 
                             Rectangle {
                                 horizontal-stretch: 1;
+                                preferred-width: 0px;
+                                min-width: 0px;
                                 height: 66px;
                                 border-radius: 10px;
-                                background: home-appcache-touch.has-hover ? Cat.card(Cat.peach).brighter(0.25) : Cat.card(Cat.surface2);
+                                background: home-activity-touch.has-hover ? Cat.card(Cat.peach).brighter(0.25) : Cat.card(Cat.surface2);
                                 animate background { duration: 100ms; }
 
-                                home-appcache-touch := TouchArea {
+                                home-activity-touch := TouchArea {
                                     mouse-cursor: pointer;
-                                    clicked => { root.clean-app-cache(); }
+                                    clicked => { root.show-activity = true; }
                                 }
 
                                 VerticalLayout {
@@ -8327,21 +8419,24 @@ export component MainWindow inherits Window {
                                     spacing: 3px;
 
                                     Text {
-                                        text: @tr("Clean App Cache");
+                                        text: @tr("Recent Activity");
                                         font-size: Cat.fs14;
                                         font-weight: 600;
                                         color: Cat.peach;
                                     }
                                     Text {
-                                        text: @tr("Clear index & restart");
+                                        text: activity-items.length > 0 ? activity-items[0].action + " " + activity-items[0].package : @tr("No activity yet");
                                         font-size: Cat.fs15;
                                         color: Cat.overlay0;
+                                        overflow: elide;
                                     }
                                 }
                             }
 
                             Rectangle {
                                 horizontal-stretch: 1;
+                                preferred-width: 0px;
+                                min-width: 0px;
                                 height: 66px;
                                 border-radius: 10px;
                                 background: home-cache-touch.has-hover ? Cat.card(Cat.blue).brighter(0.25) : Cat.card(Cat.surface2);
@@ -8375,6 +8470,8 @@ export component MainWindow inherits Window {
 
                             Rectangle {
                                 horizontal-stretch: 1;
+                                preferred-width: 0px;
+                                min-width: 0px;
                                 height: 66px;
                                 border-radius: 10px;
                                 background: home-mirror-touch.has-hover ? Cat.card(Cat.teal).brighter(0.25) : Cat.card(Cat.surface2);
@@ -8522,81 +8619,32 @@ export component MainWindow inherits Window {
                     }
 
                     VerticalLayout {
+                        vertical-stretch: 1;
                         spacing: 8px;
 
-                        SectionLabel { k: root.ui-k; section-title: @tr("RECENT ACTIVITY"); }
+                        SectionLabel { k: root.ui-k; section-title: @tr("SYSTEM PULSE"); }
 
-                        VerticalLayout {
-                            spacing: 0;
+                        Rectangle {
+                            vertical-stretch: 1;
+                            min-height: 96px;
+                            border-radius: 10px;
+                            background: Cat.card(Cat.surface2);
 
-                            if activity-items.length == 0: Rectangle {
-                                height: 40px;
-                                border-radius: 8px;
-                                background: Cat.card(Cat.surface2);
-                                Text {
-                                    text: @tr("No activity found");
-                                    font-size: Cat.fs15;
-                                    color: Cat.overlay0;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
+                            Timer {
+                                interval: root.pulse-interval;
+                                triggered => { root.pulse-tick(cpu-trace.graph-width / 1px, cpu-trace.graph-height / 1px); }
                             }
 
-                            for item[i] in activity-items: Rectangle {
-                                height: 38px;
-
-                                HorizontalLayout {
-                                    padding-left: 12px;
-                                    padding-right: 12px;
-                                    spacing: 10px;
-
-                                    Rectangle {
-                                        width: action-lbl.preferred-width + 12px;
-                                        height: 18px;
-                                        border-radius: 5px;
-                                        y: (parent.height - 18px) / 2;
-                                        background: item.action == "installed" ? Cat.green.with-alpha(0.18)
-                                            : item.action == "removed" ? Cat.red.with-alpha(0.18)
-                                            : Cat.peach.with-alpha(0.18);
-
-                                        action-lbl := Text {
-                                            text: item.action;
-                                            font-size: Cat.fs10;
-                                            font-weight: 600;
-                                            color: item.action == "installed" ? Cat.green
-                                                : item.action == "removed" ? Cat.red
-                                                : Cat.peach;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-
-                                    Text {
-                                        text: item.package;
-                                        font-size: Cat.fs13;
-                                        font-weight: 500;
-                                        color: Cat.text;
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                        overflow: elide;
-                                    }
-
-                                    Text {
-                                        text: item.date;
-                                        font-size: Cat.fs14;
-                                        color: Cat.overlay0;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                if i < activity-items.length - 1: Rectangle {
-                                    x: 12px;
-                                    y: parent.height - 1px;
-                                    width: parent.width - 24px;
-                                    height: 1px;
-                                    background: Cat.surface0;
-                                    opacity: 0.5;
-                                }
+                            VerticalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                padding-top: 10px;
+                                padding-bottom: 10px;
+                                spacing: 4px;
+                                cpu-trace := PulseTrace { vertical-stretch: 1; pct: pulse-cpu; path: pulse-cpu-path; phase: pulse-phase; tone: Cat.mauve; label: @tr("CPU"); }
+                                PulseTrace { vertical-stretch: 1; pct: pulse-ram; path: pulse-ram-path; phase: pulse-phase; tone: Cat.blue; label: @tr("RAM"); }
+                                PulseTrace { vertical-stretch: 1; pct: pulse-swap; path: pulse-swap-path; phase: pulse-phase; tone: Cat.peach; label: @tr("SWAP"); }
+                                PulseTrace { vertical-stretch: 1; pct: pulse-disk; value-text: pulse-disk-rate; path: pulse-disk-path; phase: pulse-phase; tone: Cat.teal; label: @tr("DISK"); }
                             }
                         }
                     }
@@ -8608,6 +8656,122 @@ export component MainWindow inherits Window {
 
     }
 
+
+    if show-activity: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.with-alpha(0.6);
+        TouchArea { clicked => { root.show-activity = false; } }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(580px, parent.width - 40px);
+            height: min(parent.height - 80px, 74px + max(activity-items.length, 1) * 38px);
+            background: Cat.panel;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: Cat.divider;
+            clip: true;
+            TouchArea {}
+
+            VerticalLayout {
+                Rectangle {
+                    height: 56px;
+                    HorizontalLayout {
+                        padding-left: 18px;
+                        padding-right: 14px;
+                        VerticalLayout {
+                            alignment: center;
+                            Text { text: @tr("Recent Activity"); font-size: Cat.fs17; font-weight: 700; color: Cat.text; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        VerticalLayout {
+                            alignment: center;
+                            DialogButton { label: @tr("Close"); clicked => { root.show-activity = false; } }
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: Cat.divider; }
+                ScrollView {
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                            VerticalLayout {
+                                spacing: 0;
+
+                                if activity-items.length == 0: Rectangle {
+                                    height: 40px;
+                                    border-radius: 8px;
+                                    background: Cat.card(Cat.surface2);
+                                    Text {
+                                        text: @tr("No activity found");
+                                        font-size: Cat.fs15;
+                                        color: Cat.overlay0;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                for item[i] in activity-items: Rectangle {
+                                    height: 38px;
+
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 10px;
+
+                                        Rectangle {
+                                            width: action-lbl.preferred-width + 12px;
+                                            height: 18px;
+                                            border-radius: 5px;
+                                            y: (parent.height - 18px) / 2;
+                                            background: item.action == "installed" ? Cat.green.with-alpha(0.18)
+                                                : item.action == "removed" ? Cat.red.with-alpha(0.18)
+                                                : Cat.peach.with-alpha(0.18);
+
+                                            action-lbl := Text {
+                                                text: item.action;
+                                                font-size: Cat.fs10;
+                                                font-weight: 600;
+                                                color: item.action == "installed" ? Cat.green
+                                                    : item.action == "removed" ? Cat.red
+                                                    : Cat.peach;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        Text {
+                                            text: item.package;
+                                            font-size: Cat.fs13;
+                                            font-weight: 500;
+                                            color: Cat.text;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+
+                                        Text {
+                                            text: item.date;
+                                            font-size: Cat.fs14;
+                                            color: Cat.overlay0;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    if i < activity-items.length - 1: Rectangle {
+                                        x: 12px;
+                                        y: parent.height - 1px;
+                                        width: parent.width - 24px;
+                                        height: 1px;
+                                        background: Cat.surface0;
+                                        opacity: 0.5;
+                                    }
+                                }
+                            }
+                }
+            }
+        }
+    }
 
     if selected-count > 0: Rectangle {
         x: (parent.width - 420px) / 2;
