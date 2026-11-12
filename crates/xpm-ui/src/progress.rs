@@ -490,6 +490,8 @@ struct PacmanRows {
     names: Vec<String>,
     active: Option<usize>,
     last_pct: i32,
+    /// Highest download percent seen per planned package.
+    downloaded: Vec<i32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -583,12 +585,15 @@ impl PacmanRows {
             match ch {
                 '\n' => {
                     let line = std::mem::take(&mut self.first);
-                    self.last.clear();
+                    let segment = std::mem::take(&mut self.last);
                     self.seen_cr = false;
+                    self.track_download(&segment, rows);
                     self.finish_line(&line, rows);
                 }
                 '\r' => {
                     let line = self.first.clone();
+                    let segment = self.last.clone();
+                    self.track_download(&segment, rows);
                     self.track_progress(&line, rows);
                     self.seen_cr = true;
                 }
@@ -603,6 +608,8 @@ impl PacmanRows {
             }
         }
         let line = self.first.clone();
+        let segment = self.last.clone();
+        self.track_download(&segment, rows);
         self.track_progress(&line, rows);
     }
 
@@ -654,6 +661,7 @@ impl PacmanRows {
             return;
         }
         self.names = self.pending.iter().map(|r| r.name.clone()).collect();
+        self.downloaded = vec![0; self.names.len()];
         self.base = rows.append(std::mem::take(&mut self.pending));
         self.active = None;
     }
@@ -669,6 +677,33 @@ impl PacmanRows {
         self.active = Some(i);
         self.last_pct = 0;
         rows.state(self.base + i, 1, 0);
+    }
+
+    /// Download lines look like ` name-1.0-1-x86_64  1.2 MiB  3.4 MiB/s 00:01 [####] 45%`; long names are cut with `...`.
+    fn track_download(&mut self, line: &str, rows: &mut RowSink<'_>) {
+        if self.names.is_empty() || !line.contains("/s") {
+            return;
+        }
+        let Some(pct) = extract_inline_percent(line) else { return };
+        let Some(token) = line.split_whitespace().next() else { return };
+        let cut = token.trim_end_matches(['.', '\u{2026}']);
+        let truncated = cut.len() < token.len();
+        let found = (0..self.names.len())
+            .filter(|&i| {
+                let name = &self.names[i];
+                let versioned = token
+                    .strip_prefix(name.as_str())
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+                versioned || (truncated && !cut.is_empty() && name.starts_with(cut))
+            })
+            .max_by_key(|&i| self.names[i].len());
+        if let Some(i) = found
+            && pct > self.downloaded[i]
+        {
+            self.downloaded[i] = pct;
+            rows.state(self.base + i, 1, pct);
+        }
     }
 
     fn track_progress(&mut self, line: &str, rows: &mut RowSink<'_>) {
@@ -716,6 +751,8 @@ pub(crate) struct Counts {
     pub upgraded: i32,
     pub installed: i32,
     pub removed: i32,
+    /// Changes the run made that were not in the plan it started from (new dependencies, late arrivals).
+    pub extra: i32,
 }
 
 impl Counts {
@@ -723,8 +760,10 @@ impl Counts {
         self.upgraded += o.upgraded;
         self.installed += o.installed;
         self.removed += o.removed;
+        self.extra += o.extra;
     }
 
+    /// What was asked for: matches the "N updates available" number the run started from.
     fn total(&self) -> i32 {
         self.upgraded + self.installed + self.removed
     }
@@ -771,23 +810,18 @@ impl Summary {
     }
 
     fn changed(&self) -> i32 {
-        self.native.total() + self.flatpak.total() + self.appimage.total()
+        [self.native, self.flatpak, self.appimage].iter().map(|c| c.total() + c.extra).sum()
     }
 
     /// One card per package format that changed something, plus one for serious warnings.
     fn tiles(&self) -> Vec<SummaryTile> {
         let mut tiles = Vec::new();
         for (kind, name, c) in [(0, "Native", self.native), (1, "Flatpak", self.flatpak), (2, "AppImage", self.appimage)] {
-            if c.total() == 0 {
+            if c.total() + c.extra == 0 {
                 continue;
             }
-            let detail = [("upgraded", c.upgraded), ("installed", c.installed), ("removed", c.removed)]
-                .iter()
-                .filter(|(_, n)| *n > 0)
-                .map(|(verb, n)| format!("{n} {verb}"))
-                .collect::<Vec<_>>()
-                .join(" \u{b7} ");
-            tiles.push(SummaryTile { label: name.to_string(), count: c.total(), detail, kind });
+            let count = if c.total() > 0 { c.total() } else { c.extra };
+            tiles.push(SummaryTile { label: name.to_string(), count, detail: String::new(), kind });
         }
         if self.warnings > 0 {
             tiles.push(SummaryTile { label: "Warnings".to_string(), count: self.warnings, detail: "check the log".to_string(), kind: 3 });
@@ -807,22 +841,33 @@ fn is_important_warning(line: &str) -> bool {
 }
 
 /// Counts what a finished pacman or flatpak run changed, from its output.
-fn summarize(output: &str) -> Summary {
+fn summarize(output: &str, native_plan: Option<&std::collections::HashSet<String>>, table_names: &[String]) -> Summary {
     let mut sum = Summary::default();
     let mut seen = std::collections::HashSet::new();
+    let mut done_planned = std::collections::HashSet::new();
     for seg in output.split(['\n', '\r']) {
         let line = seg.trim();
         if let Some(rest) = line.strip_prefix('(')
             && let Some((counter, action)) = rest.split_once(") ")
             && counter.split_once('/').is_some_and(|(k, n)| k.parse::<u32>().is_ok() && n.parse::<u32>().is_ok())
         {
-            let verb = action.split_whitespace().next().unwrap_or_default();
+            let mut words = action.split_whitespace();
+            let verb = words.next().unwrap_or_default();
+            let name = words.next().unwrap_or_default();
+            let planned = native_plan.is_none_or(|plan| plan.contains(name));
+            if planned {
+                done_planned.insert(name.to_string());
+            }
             if seen.insert(format!("{counter} {verb}")) {
-                match verb {
-                    "upgrading" | "downgrading" => sum.native.upgraded += 1,
-                    "installing" | "reinstalling" => sum.native.installed += 1,
-                    "removing" => sum.native.removed += 1,
-                    _ => {}
+                let counts = &mut sum.native;
+                let slot = match verb {
+                    "upgrading" | "downgrading" => Some(&mut counts.upgraded),
+                    "installing" | "reinstalling" => Some(&mut counts.installed),
+                    "removing" => Some(&mut counts.removed),
+                    _ => None,
+                };
+                if let Some(slot) = slot {
+                    if planned { *slot += 1 } else { counts.extra += 1 }
                 }
             }
             continue;
@@ -843,6 +888,12 @@ fn summarize(output: &str) -> Summary {
         if line.starts_with("warning:") && is_important_warning(line) && seen.insert(line.to_string()) {
             sum.warnings += 1;
         }
+    }
+    // Pacman lists every package of the transaction up front and exits cleanly only when all were installed,
+    // so a planned package from that table counts even when its progress line was never seen.
+    if let Some(plan) = native_plan {
+        let unseen = table_names.iter().filter(|n| plan.contains(*n) && !done_planned.contains(*n)).count();
+        sum.native.upgraded += unseen as i32;
     }
     sum
 }
@@ -884,6 +935,8 @@ struct Inner {
     dirty: bool,
     captured: String,
     extra: Summary,
+    /// Package names an update run started from, so its result counts the same packages.
+    native_plan: Option<std::collections::HashSet<String>>,
     rows_len: usize,
     pacman_rows: PacmanRows,
     /// Row that mirrors the overall percent (single-item backends such as AppImage).
@@ -1056,6 +1109,11 @@ impl Feeder {
         self.inner.lock().unwrap().row_group = group;
     }
 
+    /// The native packages this run is meant to update; anything else pacman touches counts as "pulled in".
+    pub(crate) fn set_native_plan(&self, names: Vec<String>) {
+        self.inner.lock().unwrap().native_plan = Some(names.into_iter().collect());
+    }
+
     pub(crate) fn set_prompt_label(&self, label: Option<String>) {
         self.inner.lock().unwrap().prompt_label = label;
     }
@@ -1123,6 +1181,7 @@ impl OpReporter {
             dirty: false,
             captured: String::new(),
             extra: Summary::default(),
+            native_plan: None,
             rows_len: 0,
             pacman_rows: PacmanRows::default(),
             single_row: None,
@@ -1186,7 +1245,7 @@ impl OpReporter {
                 flush(&self.feeder.tx, &mut inner);
             }
             let inner = self.feeder.inner.lock().unwrap();
-            let mut sum = summarize(&inner.captured);
+            let mut sum = summarize(&inner.captured, inner.native_plan.as_ref(), &inner.pacman_rows.names);
             sum.add(inner.extra);
             drop(inner);
             if sum.changed() > 0 {
@@ -1477,15 +1536,34 @@ mod tests {
     #[test]
     fn summary_counts_pacman_actions_once_despite_redraws() {
         let out = "(1/3) upgrading 7zip   [#--]  10%\r(1/3) upgrading 7zip   [###] 100%\n(2/3) installing foo\n(3/3) removing bar\n(1/1) Arming ConditionNeedsUpdate...\nwarning: /etc/x installed as .pacnew\nwarning: failed to run hook\n";
-        let sum = summarize(out);
-        assert_eq!(sum.native, Counts { upgraded: 1, installed: 1, removed: 1 });
+        let sum = summarize(out, None, &[]);
+        assert_eq!(sum.native, Counts { upgraded: 1, installed: 1, removed: 1, ..Default::default() });
         assert_eq!(sum.warnings, 1, "only the serious warning counts");
+    }
+
+    #[test]
+    fn update_result_counts_the_planned_packages_and_reports_the_rest() {
+        let out = "(1/4) upgrading 7zip\n(2/4) upgrading glibc\n(3/4) installing libnew\n(4/4) upgrading late-arrival\n";
+        let plan: std::collections::HashSet<String> = ["7zip", "glibc"].map(String::from).into();
+        let sum = summarize(out, Some(&plan), &[]);
+        assert_eq!(sum.native, Counts { upgraded: 2, extra: 2, ..Default::default() });
+        let tile = &sum.tiles()[0];
+        assert_eq!(tile.count, 2, "only the planned packages make the headline");
+    }
+
+    #[test]
+    fn planned_packages_from_the_pacman_table_count_even_without_a_progress_line() {
+        let out = "(1/2) upgrading 7zip\n(2/2) upgrading glibc\n";
+        let plan: std::collections::HashSet<String> = ["7zip", "glibc", "rclone", "ignored"].map(String::from).into();
+        let table = ["7zip", "glibc", "rclone"].map(String::from);
+        let sum = summarize(out, Some(&plan), &table);
+        assert_eq!(sum.tiles()[0].count, 3, "ignored never made the transaction table");
     }
 
     #[test]
     fn summary_counts_flatpak_transaction_rows() {
         let out = " 1. org.gnome.Platform  49  u  flathub  < 300 MB\n 2. org.gimp.GIMP  stable  i  flathub  < 90 MB\n 3. org.old.App  stable  r  flathub\n";
-        assert_eq!(summarize(out).flatpak, Counts { upgraded: 1, installed: 1, removed: 1 });
+        assert_eq!(summarize(out, None, &[]).flatpak, Counts { upgraded: 1, installed: 1, removed: 1, ..Default::default() });
     }
 
     #[test]
@@ -1499,9 +1577,9 @@ mod tests {
         assert_eq!(
             tiles,
             vec![
-                ("Native".to_string(), 3, "3 upgraded".to_string()),
-                ("Flatpak".to_string(), 3, "2 upgraded \u{b7} 1 installed".to_string()),
-                ("AppImage".to_string(), 1, "1 upgraded".to_string()),
+                ("Native".to_string(), 3, String::new()),
+                ("Flatpak".to_string(), 3, String::new()),
+                ("AppImage".to_string(), 1, String::new()),
             ]
         );
         let mut only_flatpak = Summary::default();
@@ -1556,6 +1634,31 @@ mod tests {
         assert_eq!(msgs[0], "plan 0: 7zip [26.04-1 \u{2192} 26.05-1  \u{b7}  0.00 MiB], glibc [2.41-2 \u{2192} 2.42-1  \u{b7}  +1.20 MiB]");
         assert!(msgs.contains(&"row 0 state 2 100%".to_string()), "{msgs:?}");
         assert!(msgs.contains(&"row 1 state 1 20%".to_string()), "{msgs:?}");
+    }
+
+    #[test]
+    fn download_lines_fill_the_package_rows() {
+        let msgs = row_messages(&[
+            "Packages (2)  Old Version  New Version  Net Change  Download Size\r\n\r\n",
+            "extra/linux-cachyos   7.3.1-1   7.3.4-1   0.19 MiB   150.69 MiB\r\nextra/linux-cachyos-headers   7.3.1-1   7.3.4-1   168.50 MiB   88.36 MiB\r\n\r\n",
+            ":: Retrieving packages...\r\n",
+            " linux-cachyos-7.3.4-1-x86_64   150.7 MiB  40.0 MiB/s 00:04 [###---] 35%\r",
+            " linux-cachyos-headers-7.3.4-1-x86_64   88.4 MiB  40.0 MiB/s 00:02 [#####-] 80%\r\n",
+            " linux-cachyos-7.3.4-1-x86_64   150.7 MiB  40.0 MiB/s 00:04 [######] 100%\r\n",
+        ]);
+        assert!(msgs.contains(&"row 0 state 1 100%".to_string()), "{msgs:?}");
+        assert!(msgs.contains(&"row 1 state 1 80%".to_string()), "{msgs:?}");
+    }
+
+    #[test]
+    fn download_then_install_rows() {
+        let msgs = row_messages(&[
+            "Packages (2)  Old Version  New Version  Net Change  Download Size\r\n\r\n",
+            "extra/cmake   4.4.5-1   4.5.0-1   4.45 MiB   15.50 MiB\r\nextra/pahole   1:1.32-1   1:1.32-2   0.00 MiB   0.42 MiB\r\n\r\n",
+            " cmake-4.5.0-1-x86_64   10.0 MiB  20.0 MiB/s 00:01 [####] 100%\r\n",
+            "(1/2) upgrading cmake   [####] 0%\r(1/2) upgrading cmake   [####] 50%\r",
+        ]);
+        assert!(msgs.contains(&"row 0 state 1 50%".to_string()), "{msgs:?}");
     }
 
     #[test]

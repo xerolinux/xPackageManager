@@ -28,6 +28,7 @@ mod kernels;
 mod live;
 mod progress;
 mod pulse;
+mod reboot;
 mod sched;
 mod scx_data;
 mod uiscale;
@@ -1834,6 +1835,8 @@ fn run_in_terminal(
 struct UpdatePlan {
     native: usize,
     flatpak: usize,
+    native_names: Vec<String>,
+    flatpak_names: Vec<String>,
     appimages: Vec<String>,
     appimage_dir: String,
 }
@@ -1901,6 +1904,7 @@ fn run_update_all(
 
     if let Some((lo, hi)) = native_window {
         feeder.window(lo, hi);
+        feeder.set_native_plan(plan.native_names.clone());
         feeder.set_row_group(group_of(progress::Format::Native));
         feeder.track_native(group_of(progress::Format::Native));
         match progress::run_pty(&feeder, "pkexec", &["pacman", "-Syu"], input_sender, pid_holder) {
@@ -1928,6 +1932,7 @@ fn run_update_all(
             None,
             true,
             Some(group_of(progress::Format::Flatpak)),
+            Some(&plan.flatpak_names),
         );
     }
 
@@ -2098,6 +2103,7 @@ fn run_flatpak_transaction(
     quiet: Option<(&mpsc::Sender<UiMessage>, &str)>,
     auto_yes: bool,
     stage_group: Option<usize>,
+    planned: Option<&[String]>,
 ) -> bool {
     const BLUE: &str = "\x1b[1;34m";
     const BOLD: &str = "\x1b[1m";
@@ -2113,6 +2119,8 @@ fn run_flatpak_transaction(
     let names: Rc<RefCell<Vec<(String, OpKind)>>> = Rc::new(RefCell::new(Vec::new()));
     let row_base: Rc<Cell<usize>> = Rc::new(Cell::new(0));
     let percents: Rc<RefCell<Vec<i32>>> = Rc::new(RefCell::new(Vec::new()));
+    let planned: Option<std::collections::HashSet<String>> = planned.map(|names| names.iter().cloned().collect());
+    let counts: Rc<Cell<progress::Counts>> = Rc::new(Cell::new(progress::Counts::default()));
 
     let quiet_tx = quiet.map(|(tx, key)| (tx.clone(), key.to_string()));
     let auto_confirm = quiet_tx.is_some() || auto_yes;
@@ -2121,6 +2129,7 @@ fn run_flatpak_transaction(
     }
     let on_event = {
         let (feeder, names, percents, row_base) = (feeder.clone(), names.clone(), percents.clone(), row_base.clone());
+        let (counts, planned) = (counts.clone(), planned.clone());
         let quiet_tx = quiet_tx.clone();
         move |ev: FlatpakEvent| match ev {
             FlatpakEvent::Plan { first, ops } => {
@@ -2186,8 +2195,19 @@ fn run_flatpak_transaction(
                 if let Some(slot) = percents.borrow_mut().get_mut(i) {
                     *slot = 100;
                 }
-                if let Some((name, _)) = names.borrow().get(i) {
+                if let Some((name, kind)) = names.borrow().get(i) {
                     feeder.line(&format!("   {GREEN}done{RESET} {DIM}{name}{RESET}"));
+                    let mut c = counts.get();
+                    if planned.as_ref().is_some_and(|plan| !plan.contains(name)) {
+                        c.extra += 1;
+                    } else {
+                        match kind {
+                            OpKind::Install => c.installed += 1,
+                            OpKind::Update => c.upgraded += 1,
+                            OpKind::Remove => c.removed += 1,
+                        }
+                    }
+                    counts.set(c);
                 }
                 feeder.report(overall_percent(&percents.borrow()), "");
                 feeder.row_state(row_base.get() + i, 2, 100);
@@ -2234,14 +2254,7 @@ fn run_flatpak_transaction(
     } else if outcome.ok() && outcome.installed + outcome.updated + outcome.removed == 0 {
         feeder.line("Nothing to do.");
     }
-    feeder.add_summary(
-        progress::Format::Flatpak,
-        progress::Counts {
-            upgraded: outcome.updated as i32,
-            installed: outcome.installed as i32,
-            removed: outcome.removed as i32,
-        },
-    );
+    feeder.add_summary(progress::Format::Flatpak, counts.get());
     outcome.ok()
 }
 
@@ -2252,7 +2265,7 @@ fn install_flatpak_quiet(tx: &mpsc::Sender<UiMessage>, name: &str, ctx: &Conflic
     let feeder = reporter.feeder();
     let _ = tx.send(UiMessage::InstallProgress { backend: 1, key: name.to_string(), state: 1, percent: 0 });
     let no_input = Arc::new(Mutex::new(None));
-    let ok = run_flatpak_transaction(&feeder, &[FlatpakRequest::Install(name.to_string())], &no_input, Some((tx, name)), true, None);
+    let ok = run_flatpak_transaction(&feeder, &[FlatpakRequest::Install(name.to_string())], &no_input, Some((tx, name)), true, None, None);
     if ok {
         let _ = tx.send(UiMessage::InstallProgress { backend: 1, key: name.to_string(), state: 2, percent: 100 });
         let _ = tx.send(UiMessage::OperationDone(true));
@@ -2331,7 +2344,7 @@ fn run_managed_operation(
     if backend == 1
         && let Some(requests) = flatpak_requests(action, names)
     {
-        let ok = run_flatpak_transaction(&reporter.feeder(), &requests, input_sender, None, false, None);
+        let ok = run_flatpak_transaction(&reporter.feeder(), &requests, input_sender, None, false, None, None);
         reporter.finish(ok);
         return;
     }
@@ -2473,30 +2486,10 @@ fn find_package_installed(window: &MainWindow, name: &str, backend: i32) -> bool
     false
 }
 
-/// Returns true if any package in the native update list requires a reboot
-/// (kernel, firmware, microcode, systemd, bootloader, glibc)
+/// True when the pending native updates, or the state the system is already in, call for a reboot.
 fn native_updates_need_reboot(window: &MainWindow) -> bool {
-    const REBOOT_PATTERNS: &[&str] = &[
-        "linux", "linux-zen", "linux-lts", "linux-hardened", "linux-cachyos",
-        "linux-firmware", "linux-firmware-whence",
-        "intel-ucode", "amd-ucode",
-        "systemd", "systemd-libs",
-        "glibc",
-        "grub", "refind-efi", "efibootmgr", "syslinux",
-        "mkinitcpio",
-    ];
-    let model = window.get_update_packages();
-    for i in 0..model.row_count() {
-        let pkg = model.row_data(i).unwrap_or_default();
-        let name = pkg.name.to_string();
-        if REBOOT_PATTERNS.iter().any(|p| &name == p)
-            || (name.starts_with("linux-") && !name.starts_with("linux-docs")
-                && !name.starts_with("linux-headers"))
-        {
-            return true;
-        }
-    }
-    false
+    let names: Vec<String> = window.get_update_packages().iter().map(|p| p.name.to_string()).collect();
+    reboot::needed(&names)
 }
 
 fn update_selection_in_models(window: &MainWindow, name: &str, backend: i32, selected: bool) {
@@ -4968,9 +4961,12 @@ fn main() {
         }
         info!("Update all: native={native} flatpak={flatpak} appimages={}", appimages.len());
         let needs_reboot = native_updates_need_reboot(&w);
+        let names = |model: ModelRc<PackageData>| model.iter().map(|p| p.name.to_string()).collect::<Vec<_>>();
         let plan = UpdatePlan {
             native,
             flatpak,
+            native_names: names(w.get_update_packages()),
+            flatpak_names: if flatpak > 0 { names(w.get_flatpak_update_packages()) } else { Vec::new() },
             appimages,
             appimage_dir: update_all_appimage_dir.lock().unwrap().clone(),
         };
