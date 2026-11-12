@@ -828,6 +828,19 @@ fn apply_scx_live(window: &MainWindow, live: live::Live) {
     });
 }
 
+/// Info cards for the schedulers in `supported` (every card when the list is empty), sorted by name.
+fn scx_info_rows(supported: &[&String]) -> ModelRc<SchedInfoRow> {
+    let mut cards: Vec<_> =
+        scx_data::INFO.iter().filter(|i| supported.is_empty() || supported.iter().any(|s| s.as_str() == i.id)).collect();
+    cards.sort_by_key(|i| i.name.to_lowercase());
+    ModelRc::new(VecModel::from(
+        cards
+            .into_iter()
+            .map(|i| SchedInfoRow { id: i.id.into(), name: i.name.into(), category: i.category.into(), desc: i.description.into() })
+            .collect::<Vec<_>>(),
+    ))
+}
+
 fn apply_scx_status(window: &MainWindow, status: &sched::Status) {
     window.set_scx_active(status.active);
     if status.active {
@@ -3610,6 +3623,7 @@ fn main() {
                         apply_scx_status(&window, &snap.status);
                         let selected = window.get_scx_selected().to_string();
                         let all: Vec<&String> = snap.groups.iter().flat_map(|(_, items)| items.iter()).collect();
+                        window.set_scx_info(scx_info_rows(&all));
                         if !all.iter().any(|s| **s == selected) {
                             window.set_scx_selected(all.first().map(|s| s.as_str()).unwrap_or("").into());
                         }
@@ -5304,12 +5318,7 @@ fn main() {
     });
 
     window.set_scx_flags(ModelRc::new(VecModel::from(scx_flag_rows(""))));
-    window.set_scx_info(ModelRc::new(VecModel::from(
-        scx_data::INFO
-            .iter()
-            .map(|i| SchedInfoRow { id: i.id.into(), name: i.name.into(), category: i.category.into(), desc: i.description.into() })
-            .collect::<Vec<_>>(),
-    )));
+    window.set_scx_info(scx_info_rows(&[]));
     {
         let weak = window.as_weak();
         window.on_scx_filter_flags(move |text| {
